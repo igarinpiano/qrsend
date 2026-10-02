@@ -93,6 +93,10 @@ impl SegmentDecoder {
         source_symbol_count(self.seg_len, self.symbol_size)
     }
 
+    pub fn symbol_size(&self) -> usize {
+        self.symbol_size
+    }
+
     /// Symbols pushed so far (duplicates included).
     pub fn received(&self) -> u32 {
         self.received

@@ -75,10 +75,11 @@ impl<S: SegmentSource> Sender<S> {
             .map(|i| (i, layout.k(i)))
             .collect();
         let cache_size = config.window + 2;
+        let meta_k = layout.k(META_INDEX);
         Sender {
             layout,
             source,
-            scheduler: Scheduler::new(config, segments),
+            scheduler: Scheduler::new(config, meta_k, segments),
             cache: VecDeque::new(),
             cache_size,
         }

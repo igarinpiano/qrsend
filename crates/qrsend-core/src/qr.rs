@@ -91,16 +91,21 @@ impl std::str::FromStr for Density {
     }
 }
 
+/// Encodes `text` as one alphanumeric segment. Base45 output is always valid
+/// alphanumeric data, and a single segment makes capacity exact (the generic
+/// segment optimiser can pick mixes that overflow a fixed version).
+fn encode_alphanumeric(text: &[u8], p: QrParams) -> qrcode::types::QrResult<QrCode> {
+    let mut bits = qrcode::bits::Bits::new(Version::Normal(p.version as i16));
+    bits.push_alphanumeric_data(text)?;
+    bits.push_terminator(p.ec.level())?;
+    QrCode::with_bits(bits, p.ec.level())
+}
+
 fn fits(chars: usize, p: QrParams) -> bool {
-    // Pure alphanumeric content is the worst case for Base45 text; the
-    // segment optimiser can only do better (digits pack denser).
-    let probe = "A".repeat(chars);
-    QrCode::with_version(
-        probe.as_bytes(),
-        Version::Normal(p.version as i16),
-        p.ec.level(),
-    )
-    .is_ok()
+    let mut bits = qrcode::bits::Bits::new(Version::Normal(p.version as i16));
+    bits.push_alphanumeric_data("A".repeat(chars).as_bytes())
+        .is_ok()
+        && bits.push_terminator(p.ec.level()).is_ok()
 }
 
 impl QrParams {
@@ -156,12 +161,7 @@ impl QrMatrix {
 pub struct QrError(String);
 
 pub fn render(text: &str, p: QrParams) -> Result<QrMatrix, QrError> {
-    let code = QrCode::with_version(
-        text.as_bytes(),
-        Version::Normal(p.version as i16),
-        p.ec.level(),
-    )
-    .map_err(|e| QrError(e.to_string()))?;
+    let code = encode_alphanumeric(text.as_bytes(), p).map_err(|e| QrError(e.to_string()))?;
     let width = code.width();
     let modules = code
         .into_colors()
@@ -219,6 +219,25 @@ mod tests {
         assert_eq!(normal.capacity_chars(), 1853);
         assert_eq!(normal.frame_capacity(), 1235);
         assert_eq!(Density::Max.params().capacity_chars(), 4296);
+    }
+
+    #[test]
+    fn full_capacity_always_renders() {
+        for p in [
+            Density::Low.params(),
+            Density::Normal.params(),
+            QrParams {
+                version: 7,
+                ec: Ec::H,
+            },
+        ] {
+            for seed in 0..20u32 {
+                let bytes: Vec<u8> = (0..p.frame_capacity())
+                    .map(|i| (i as u32).wrapping_mul(2654435761) as u8 ^ seed as u8)
+                    .collect();
+                render(&base45::encode(&bytes), p).unwrap();
+            }
+        }
     }
 
     #[test]

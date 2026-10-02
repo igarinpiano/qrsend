@@ -12,7 +12,6 @@ pub struct SessionParams {
     pub flags: u8,
     pub seg_shift: u8,
     pub seg_count: u32,
-    pub symbol_size: usize,
 }
 
 impl SessionParams {
@@ -23,7 +22,6 @@ impl SessionParams {
             flags: h.flags,
             seg_shift: h.seg_shift,
             seg_count: h.seg_count,
-            symbol_size: frame.symbol.len(),
         }
     }
 
@@ -185,6 +183,15 @@ impl Receiver {
         }
         self.tick += 1;
         let symbol_size = frame.symbol.len();
+        // The symbol size may change between sender runs (e.g. another QR
+        // density after a resume); a decoder only combines equal-size symbols.
+        if self
+            .decoders
+            .get(&h.seg_index)
+            .is_some_and(|(d, _)| d.symbol_size() != symbol_size)
+        {
+            self.decoders.remove(&h.seg_index);
+        }
         if !self.decoders.contains_key(&h.seg_index) && self.decoders.len() >= self.max_decoders {
             self.evict();
         }

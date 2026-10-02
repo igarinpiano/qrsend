@@ -30,6 +30,10 @@ pub struct Slot {
     pub j: u64,
 }
 
+/// Interleaved meta symbols use their own ESI range so they never repeat
+/// the symbols meta gets in the regular rotation.
+const INTERLEAVE_BASE: u64 = 0x80_0000;
+
 pub struct Scheduler {
     config: ScheduleConfig,
     /// (segment index, symbols per pass)
@@ -47,11 +51,11 @@ pub fn symbols_per_pass(k: u32, redundancy: f64) -> u64 {
 }
 
 impl Scheduler {
-    /// `segments` lists `(body segment index, K)` to send; meta is always interleaved.
-    pub fn new(config: ScheduleConfig, segments: Vec<(u32, u32)>) -> Self {
-        let segments = segments
-            .into_iter()
-            .filter(|&(i, _)| i != META_INDEX)
+    /// `segments` lists `(body segment index, K)` to send. Meta (with
+    /// `meta_k` source symbols) is part of every pass and also interleaved.
+    pub fn new(config: ScheduleConfig, meta_k: u32, segments: Vec<(u32, u32)>) -> Self {
+        let segments = std::iter::once((META_INDEX, meta_k))
+            .chain(segments.into_iter().filter(|&(i, _)| i != META_INDEX))
             .map(|(i, k)| (i, symbols_per_pass(k, config.redundancy)))
             .collect();
         Scheduler {
@@ -74,13 +78,13 @@ impl Scheduler {
     pub fn frames_per_pass(&self) -> u64 {
         let body: u64 = self.segments.iter().map(|&(_, n)| n).sum();
         match self.config.meta_interval {
-            0 | 1 => body.max(1),
+            0 | 1 => body,
             m => body + body / (m - 1),
         }
     }
 
     fn meta(&mut self) -> Slot {
-        let j = self.meta_j;
+        let j = INTERLEAVE_BASE + self.meta_j;
         self.meta_j += 1;
         Slot {
             seg_index: META_INDEX,
@@ -91,7 +95,7 @@ impl Scheduler {
     pub fn next_slot(&mut self) -> Slot {
         self.frame_no += 1;
         let m = self.config.meta_interval;
-        if self.segments.is_empty() || (m > 0 && self.frame_no.is_multiple_of(m)) {
+        if m > 1 && self.frame_no.is_multiple_of(m) {
             return self.meta();
         }
         let w = self.config.window.max(1);
@@ -136,49 +140,54 @@ mod tests {
             meta_interval: 5,
         };
         let segs: Vec<(u32, u32)> = (1..=7).map(|i| (i, 10 + i)).collect();
-        let mut s = Scheduler::new(cfg.clone(), segs.clone());
-        let total = s.frames_per_pass();
+        let mut s = Scheduler::new(cfg.clone(), 2, segs.clone());
         let mut seen: HashMap<u32, Vec<u64>> = HashMap::new();
         let mut metas = 0;
+        let mut frames = 0;
         loop {
             let slot = s.next_slot();
             if s.pass() != 0 {
                 break;
             }
-            if slot.seg_index == 0 {
+            frames += 1;
+            if slot.seg_index == 0 && slot.j >= INTERLEAVE_BASE {
                 metas += 1;
             } else {
                 seen.entry(slot.seg_index).or_default().push(slot.j);
             }
         }
         assert!(metas > 0);
-        for (i, k) in segs {
+        for (i, k) in std::iter::once((0, 2)).chain(segs) {
             let mut js = seen.remove(&i).unwrap();
             js.sort();
             let n = symbols_per_pass(k, cfg.redundancy);
             assert_eq!(js, (0..n).collect::<Vec<_>>(), "segment {i}");
         }
-        assert!(total > 0);
+        assert!(s.frames_per_pass().abs_diff(frames) <= 1);
     }
 
     #[test]
     fn second_pass_sends_fresh_symbols() {
-        let mut s = Scheduler::new(
-            ScheduleConfig {
-                meta_interval: 0,
-                ..Default::default()
-            },
-            vec![(1, 4)],
-        );
-        let n = symbols_per_pass(4, 0.1);
-        let js: Vec<u64> = (0..n * 2).map(|_| s.next_slot().j).collect();
-        assert_eq!(js, (0..n * 2).collect::<Vec<_>>());
+        let cfg = ScheduleConfig {
+            meta_interval: 0,
+            window: 1,
+            ..Default::default()
+        };
+        let mut s = Scheduler::new(cfg, 1, vec![(1, 4)]);
+        let (nm, n) = (symbols_per_pass(1, 0.1), symbols_per_pass(4, 0.1));
+        let body: Vec<u64> = (0..(nm + n) * 2)
+            .map(|_| s.next_slot())
+            .filter(|s| s.seg_index == 1)
+            .map(|s| s.j)
+            .collect();
+        assert_eq!(body, (0..n * 2).collect::<Vec<_>>());
     }
 
     #[test]
     fn meta_only_when_no_body() {
-        let mut s = Scheduler::new(ScheduleConfig::default(), vec![]);
+        let mut s = Scheduler::new(ScheduleConfig::default(), 1, vec![]);
         assert_eq!(s.next_slot(), Slot { seg_index: 0, j: 0 });
         assert_eq!(s.next_slot(), Slot { seg_index: 0, j: 1 });
+        assert_eq!(s.frames_per_pass(), symbols_per_pass(1, 0.1));
     }
 }
