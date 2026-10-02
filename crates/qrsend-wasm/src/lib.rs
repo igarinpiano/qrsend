@@ -95,8 +95,10 @@ pub fn render_text(text: &str) -> JsResult<QrImage> {
 #[wasm_bindgen(js_name = detectRgba)]
 pub fn detect_rgba(width: usize, height: usize, rgba: &[u8]) -> Array {
     let luma: Vec<u8> = rgba
-        .chunks_exact(4)
-        .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&[r, g, b, _]| ((r as u32 * 77 + g as u32 * 150 + b as u32 * 29) >> 8) as u8)
         .collect();
     qr::detect(qr::Luma {
         width,

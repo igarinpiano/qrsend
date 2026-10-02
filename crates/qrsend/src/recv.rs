@@ -26,6 +26,11 @@ pub struct RecvArgs {
     /// Read frames from image files or directories of images (PNG/JPEG)
     #[arg(long, num_args = 1.., value_name = "PATH", conflicts_with = "video")]
     pub images: Vec<PathBuf>,
+    /// Capture from a camera (through ffmpeg). Optional device: index on
+    /// macOS (`ffmpeg -f avfoundation -list_devices true -i ""`), /dev/videoN on
+    /// Linux, the device name on Windows
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["images", "video"])]
+    pub camera: Option<String>,
     /// Read frames from a video (.y4m natively; other formats through ffmpeg)
     #[arg(long, value_name = "FILE")]
     pub video: Option<PathBuf>,
@@ -271,14 +276,22 @@ pub fn report(outcome: Outcome, stdout_text: bool) {
 }
 
 pub fn run(args: RecvArgs) -> Result<()> {
-    let input = if let Some(v) = &args.video {
+    let input = if let Some(dev) = &args.camera {
+        let dev = if dev.is_empty() {
+            crate::input::default_camera().to_string()
+        } else {
+            dev.clone()
+        };
+        eprintln!(
+            "Scanning camera {dev:?} — point it at the sender's screen (Ctrl-C to stop; progress is saved)."
+        );
+        Input::Camera(dev)
+    } else if let Some(v) = &args.video {
         Input::Video(v.clone())
     } else if !args.images.is_empty() {
         Input::Images(image_paths(&args.images)?)
     } else {
-        bail!(
-            "choose an input: --video FILE or --images PATH (live camera capture is not available yet)"
-        );
+        bail!("choose an input: --camera, --video FILE or --images PATH");
     };
     let threads = args
         .threads

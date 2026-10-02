@@ -18,6 +18,42 @@ pub struct LumaFrame {
 pub enum Input {
     Images(Vec<PathBuf>),
     Video(PathBuf),
+    /// A live camera, captured through ffmpeg (device name/index as ffmpeg expects it).
+    Camera(String),
+}
+
+/// The platform's default camera for `--camera` without a value.
+pub fn default_camera() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "0"
+    } else if cfg!(windows) {
+        ""
+    } else {
+        "/dev/video0"
+    }
+}
+
+/// ffmpeg input arguments for a camera on this platform.
+fn camera_input(device: &str) -> Result<Vec<String>> {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    Ok(if cfg!(target_os = "macos") {
+        let mut v = s(&["-f", "avfoundation", "-framerate", "30", "-i"]);
+        v.push(format!("{device}:none"));
+        v
+    } else if cfg!(windows) {
+        if device.is_empty() {
+            bail!(
+                "name the camera: --camera \"<device name>\" (list them with `ffmpeg -list_devices true -f dshow -i dummy`)"
+            );
+        }
+        let mut v = s(&["-f", "dshow", "-i"]);
+        v.push(format!("video={device}"));
+        v
+    } else {
+        let mut v = s(&["-f", "v4l2", "-i"]);
+        v.push(device.to_string());
+        v
+    })
 }
 
 fn is_image(p: &Path) -> bool {
@@ -82,7 +118,8 @@ impl Input {
                         .with_context(|| format!("cannot open {}", path.display()))?;
                     read_y4m(BufReader::with_capacity(1 << 20, f), &tx)
                 } else {
-                    let mut child = spawn_ffmpeg(&path)?;
+                    let input = vec!["-i".to_string(), path.to_string_lossy().into_owned()];
+                    let mut child = spawn_ffmpeg(input, &path.display().to_string())?;
                     let stdout = child.stdout.take().unwrap();
                     let result = read_y4m(BufReader::with_capacity(1 << 20, stdout), &tx);
                     let _ = child.kill();
@@ -93,32 +130,30 @@ impl Input {
                     result
                 }
             }
+            Input::Camera(device) => {
+                let mut child =
+                    spawn_ffmpeg(camera_input(&device)?, &format!("camera {device:?}"))?;
+                let stdout = child.stdout.take().unwrap();
+                let result = read_y4m(BufReader::with_capacity(1 << 20, stdout), &tx);
+                let _ = child.kill();
+                let _ = child.wait();
+                result.with_context(|| format!("camera {device:?} stopped"))
+            }
         }
     }
 }
 
-fn spawn_ffmpeg(path: &Path) -> Result<Child> {
+fn spawn_ffmpeg(input: Vec<String>, what: &str) -> Result<Child> {
     Command::new("ffmpeg")
-        .args(["-nostdin", "-loglevel", "error", "-i"])
-        .arg(path)
-        .args([
-            "-f",
-            "yuv4mpegpipe",
-            "-pix_fmt",
-            "gray",
-            "-strict",
-            "-1",
-            "-",
-        ])
+        .args(["-nostdin", "-loglevel", "error"])
+        .args(&input)
+        .args(["-f", "yuv4mpegpipe", "-pix_fmt", "gray", "-strict", "-1", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!(
-                    "reading {} needs ffmpeg on PATH (or convert it to .y4m first)",
-                    path.display()
-                )
+                anyhow::anyhow!("reading {what} needs ffmpeg on PATH (https://ffmpeg.org); .y4m videos work without it")
             } else {
                 e.into()
             }

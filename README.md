@@ -59,9 +59,10 @@ tar c project | qrsend send - --name project.tar --plain
 Useful options: `--density low|normal|high|max`, `--fps 12`, `--grid 2`
 (2×2 codes at once), `--display terminal`.
 
-Receive from a recording of the sender's screen, or from image files:
+Receive with a webcam, from a recording of the sender's screen, or from image files:
 
 ```bash
+qrsend recv --camera -o ~/Downloads                # live, through ffmpeg
 qrsend recv --video recording.mp4 -o ~/Downloads   # needs ffmpeg for non-.y4m videos
 qrsend recv --images frames/
 ```
@@ -109,7 +110,7 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 ## Roadmap
 
 - [x] v0.1 — protocol core, CLI send (window / terminal / export) and receive (video / images), inbox and resume codes
-- [ ] Live camera capture in the CLI
+- [x] Live camera capture in the CLI (via ffmpeg)
 - [x] Device identities, public-key encryption (age) and sender signatures
 - [x] Web app (PWA) with camera receive, pairing and inbox
 - [ ] Streaming storage (OPFS) for very large transfers in the browser

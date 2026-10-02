@@ -275,3 +275,17 @@ qrsend completions <SHELL>
 - フレームヘッダの正確なレイアウト（PROTOCOL.md で定義）
 - 動画入力の実装方式（ffmpeg への依存を許容するか）
 - ID のバックアップと、複数端末間での ID 移行の扱い
+
+## 16. 実装状況（2026-10-02 時点）
+
+| 項目 | 状況 |
+|---|---|
+| プロトコル core（フレーム・RaptorQ・セグメント・manifest・resume code） | 実装済み |
+| CLI 送信（ウィンドウ / ターミナル / PNG・Y4M 書き出し、グリッド表示） | 実装済み |
+| CLI 受信（カメラ〔ffmpeg 経由〕/ 動画 / 画像、Inbox、再開） | 実装済み（カメラ取り込みは実機未検証） |
+| デバイス ID・ペアリング・age 暗号化・送信者署名 | 実装済み（CLI・Web とも） |
+| Web 版（送信・カメラ受信・ペアリング・Inbox・ZIP / フォルダ保存・PWA） | 実装済み（データはメモリ上。大容量は CLI 推奨） |
+| CLI ⇄ Web の相互運用 | E2E テストで検証（CLI の Y4M → Chrome 仮想カメラ、ブラウザ描画 → CLI） |
+| GitHub Pages 公開 | ワークフロー準備済み。リポジトリが private のため未公開 |
+| Web の OPFS ストリーミング保存・non-extractable 鍵 | 未実装 |
+| 双方向自動調整・カラー高密度モード・WebRTC ターボ | 未実装 |
