@@ -27,7 +27,7 @@ TARGETS = {
 }
 
 DESCRIPTION = "Send any data — text, files, folders — through a stream of QR codes"
-REPO = "git+https://github.com/igarinpiano/qrsend.git"
+REPO = {"type": "git", "url": "git+https://github.com/igarinpiano/qrsend.git"}
 HOMEPAGE = "https://igarinpiano.github.io/qrsend/"
 
 
