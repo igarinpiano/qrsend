@@ -24,3 +24,8 @@ pub fn sessions_dir() -> PathBuf {
 pub fn spools_dir() -> PathBuf {
     cache_dir().join("send")
 }
+
+/// Device identity and trusted devices.
+pub fn config_dir() -> PathBuf {
+    base("QRSEND_CONFIG_DIR", dirs::config_dir())
+}

@@ -18,14 +18,14 @@ pub const fn max_bytes_for_chars(chars: usize) -> usize {
 
 pub fn encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(encoded_len(data.len()));
-    let mut chunks = data.chunks_exact(2);
-    for pair in &mut chunks {
-        let n = (pair[0] as u32) << 8 | pair[1] as u32;
+    let (pairs, rest) = data.as_chunks::<2>();
+    for &[a, b] in pairs {
+        let n = (a as u32) << 8 | b as u32;
         out.push(ALPHABET[(n % 45) as usize] as char);
         out.push(ALPHABET[(n / 45 % 45) as usize] as char);
         out.push(ALPHABET[(n / 2025) as usize] as char);
     }
-    if let [b] = chunks.remainder() {
+    if let [b] = rest {
         let n = *b as u32;
         out.push(ALPHABET[(n % 45) as usize] as char);
         out.push(ALPHABET[(n / 45) as usize] as char);
@@ -43,12 +43,23 @@ pub enum Base45Error {
     OutOfRange,
 }
 
+const INVALID: u8 = 0xFF;
+
+const DECODE: [u8; 256] = {
+    let mut table = [INVALID; 256];
+    let mut i = 0;
+    while i < ALPHABET.len() {
+        table[ALPHABET[i] as usize] = i as u8;
+        i += 1;
+    }
+    table
+};
+
 fn value(c: u8) -> Result<u32, Base45Error> {
-    ALPHABET
-        .iter()
-        .position(|&a| a == c)
-        .map(|p| p as u32)
-        .ok_or(Base45Error::InvalidChar(c as char))
+    match DECODE[c as usize] {
+        INVALID => Err(Base45Error::InvalidChar(c as char)),
+        v => Ok(v as u32),
+    }
 }
 
 pub fn decode(text: &str) -> Result<Vec<u8>, Base45Error> {
@@ -57,16 +68,16 @@ pub fn decode(text: &str) -> Result<Vec<u8>, Base45Error> {
         return Err(Base45Error::InvalidLength);
     }
     let mut out = Vec::with_capacity(max_bytes_for_chars(bytes.len()));
-    let mut chunks = bytes.chunks_exact(3);
-    for g in &mut chunks {
-        let n = value(g[0])? + value(g[1])? * 45 + value(g[2])? * 2025;
+    let (groups, rest) = bytes.as_chunks::<3>();
+    for &[a, b, c] in groups {
+        let n = value(a)? + value(b)? * 45 + value(c)? * 2025;
         if n > 0xFFFF {
             return Err(Base45Error::OutOfRange);
         }
         out.push((n >> 8) as u8);
         out.push(n as u8);
     }
-    if let [a, b] = chunks.remainder() {
+    if let [a, b] = rest {
         let n = value(*a)? + value(*b)? * 45;
         if n > 0xFF {
             return Err(Base45Error::OutOfRange);

@@ -15,7 +15,7 @@ use qrsend_core::sender::Sender;
 
 use crate::display::{self, FrameStream};
 use crate::spool::{Content, Spool, SpoolOptions};
-use crate::{collect, util};
+use crate::{collect, identity, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DisplayKind {
@@ -81,7 +81,13 @@ pub struct SendArgs {
     /// Resend a previous session (by id) from the local cache
     #[arg(long, value_name = "ID", conflicts_with_all = ["paths", "text"])]
     pub session: Option<String>,
-    /// Name shown to the receiver (not verified)
+    /// Encrypt for this trusted device (name, fingerprint or qrsend-id:…); repeatable
+    #[arg(long, value_name = "DEVICE", conflicts_with = "plain")]
+    pub to: Vec<String>,
+    /// Send unencrypted: anyone who can see the codes can read the data
+    #[arg(long)]
+    pub plain: bool,
+    /// Name shown to the receiver (defaults to this device's name)
     #[arg(long)]
     pub sender_name: Option<String>,
     /// log2 of the segment size in bytes (advanced)
@@ -130,6 +136,30 @@ pub fn run(args: SendArgs) -> Result<()> {
     } else if let Some(id) = &args.session {
         (Spool::open(util::parse_session(id)?)?, None)
     } else {
+        if args.to.is_empty() && !args.plain {
+            bail!(
+                "choose who can read this: --to <device> to encrypt for a trusted device \
+                 (see `qrsend devices`), or --plain to send unencrypted"
+            );
+        }
+        let recipients = args
+            .to
+            .iter()
+            .map(|t| identity::resolve(t))
+            .collect::<Result<Vec<_>>>()?;
+        // Sign whenever this device has (or, when encrypting, gets) an identity.
+        let signer = if recipients.is_empty() {
+            identity::load()?
+        } else {
+            let (me, created) = identity::load_or_create(None)?;
+            if created {
+                eprintln!(
+                    "Created a device identity for signing ({}).",
+                    me.public().fingerprint()
+                );
+            }
+            Some(me)
+        };
         let content = if let Some(text) = args.text.clone() {
             Content::Text(text)
         } else if args.paths.is_empty() {
@@ -162,10 +192,16 @@ pub fn run(args: SendArgs) -> Result<()> {
             zstd_workers: workers,
         };
         eprintln!("Packing…");
+        let sender_name = args
+            .sender_name
+            .clone()
+            .or_else(|| signer.as_ref().map(|s| s.name.clone()));
         let opts = SpoolOptions {
             seg_shift: args.seg_shift,
             pack,
-            sender_name: args.sender_name.clone(),
+            sender_name,
+            recipients,
+            signer: signer.as_ref(),
         };
         (Spool::create(content, &opts)?, None)
     };
@@ -200,6 +236,11 @@ pub fn run(args: SendArgs) -> Result<()> {
             String::new()
         },
     );
+    if spool.info.recipients.is_empty() {
+        eprintln!("Unencrypted: anyone who can see the codes can read this transfer.");
+    } else {
+        eprintln!("Encrypted for: {}", spool.info.recipients.join(", "));
+    }
     if let Some(only) = &only {
         eprintln!("Resending {} segment(s) from the resume code.", only.len());
     }

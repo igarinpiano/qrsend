@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use crossbeam_channel::{bounded, unbounded};
 use indicatif::{ProgressBar, ProgressStyle};
-use qrsend_core::frame::Frame;
-use qrsend_core::manifest::{Manifest, session_hex};
+use qrsend_core::crypto::{self, CryptoError, DeviceIdentity};
+use qrsend_core::frame::{FLAG_ENCRYPTED, Frame};
+use qrsend_core::manifest::{Manifest, MetaEnvelope, session_hex};
 use qrsend_core::payload::segment_hash;
 use qrsend_core::qr::{self, Luma};
 use qrsend_core::receiver::{Event, Receiver, SessionParams};
@@ -19,7 +20,7 @@ use qrsend_core::resume::ResumeCode;
 use crate::extract::{self, Conflict, ExtractOptions, Outcome};
 use crate::input::{Input, LumaFrame, image_paths};
 use crate::store::Store;
-use crate::util;
+use crate::{identity, util};
 
 #[derive(clap::Args)]
 pub struct RecvArgs {
@@ -52,16 +53,90 @@ pub struct RecvArgs {
     pub threads: Option<usize>,
 }
 
+/// Who sent a transfer, as far as signatures can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SenderInfo {
+    Trusted(String),
+    Unverified(String),
+    Unsigned,
+}
+
+impl SenderInfo {
+    pub fn describe(&self, claimed: Option<&str>) -> String {
+        let claimed = claimed
+            .map(|c| format!(" claims to be {c:?}"))
+            .unwrap_or_default();
+        match self {
+            SenderInfo::Trusted(name) => format!("{name} ✓"),
+            SenderInfo::Unverified(key) => format!("unverified sender (key {key}){claimed}"),
+            SenderInfo::Unsigned => format!("unsigned{claimed}"),
+        }
+    }
+}
+
+const MAX_META: usize = 512 * 1024 * 1024;
+
+/// Decrypts (if needed) and verifies a meta segment.
+pub fn open_meta(
+    bytes: &[u8],
+    p: &SessionParams,
+    me: Option<&DeviceIdentity>,
+) -> Result<(Manifest, SenderInfo)> {
+    let plain = if p.flags & FLAG_ENCRYPTED != 0 {
+        let me = me.context(
+            "this transfer is encrypted, but this device has no identity yet (run `qrsend id`)",
+        )?;
+        match crypto::decrypt(bytes, me, MAX_META) {
+            Err(CryptoError::NotForUs) => bail!(
+                "this transfer is encrypted for another device (remove it with `qrsend inbox rm {}`)",
+                session_hex(p.session_id)
+            ),
+            r => r?,
+        }
+    } else {
+        bytes.to_vec()
+    };
+    let env = MetaEnvelope::decode(&plain)?;
+    let sender = match &env.signature {
+        None => SenderInfo::Unsigned,
+        Some(sig) => {
+            let key = crypto::verify_meta(sig, p.session_id, &env.manifest_z).context(
+                "the sender's signature is invalid — the transfer may have been tampered with",
+            )?;
+            match identity::trusted_name(&key.to_bytes()) {
+                Some(name) => SenderInfo::Trusted(name),
+                None => {
+                    SenderInfo::Unverified(blake3::hash(&key.to_bytes()).to_hex()[..12].to_string())
+                }
+            }
+        }
+    };
+    Ok((env.manifest(p.session_id)?, sender))
+}
+
 /// A receive session: the on-disk store plus the decoded manifest.
 pub struct Session {
     pub store: Store,
     pub manifest: Option<Manifest>,
+    pub sender: SenderInfo,
+    pub me: Option<DeviceIdentity>,
 }
 
 impl Session {
     pub fn open(store: Store) -> Result<Session> {
-        let manifest = store.manifest()?;
-        Ok(Session { store, manifest })
+        let me = identity::load()?;
+        let mut s = Session {
+            store,
+            manifest: None,
+            sender: SenderInfo::Unsigned,
+            me,
+        };
+        if s.store.has_meta() {
+            let (m, sender) = open_meta(&s.store.meta_bytes()?, &s.store.params(), s.me.as_ref())?;
+            s.manifest = Some(m);
+            s.sender = sender;
+        }
+        Ok(s)
     }
 
     fn seg_len(&self, index: u32) -> Option<usize> {
@@ -83,12 +158,8 @@ impl Session {
     /// Stores the meta segment; returns segments that failed late verification.
     fn on_meta(&mut self, data: &[u8]) -> Result<Vec<u32>> {
         self.store.write_meta(data)?;
-        if self.store.params().flags & qrsend_core::frame::FLAG_ENCRYPTED != 0 {
-            bail!(
-                "this transfer is encrypted; encrypted transfers need a device identity (`qrsend id`)"
-            );
-        }
-        let manifest = self.store.manifest()?.expect("meta just written");
+        let (manifest, sender) = open_meta(data, &self.store.params(), self.me.as_ref())?;
+        self.sender = sender;
         self.check_manifest(&manifest)?;
         self.store.state.summary = Some(summary(&manifest));
         self.manifest = Some(manifest);
@@ -154,21 +225,32 @@ pub fn summary(m: &Manifest) -> String {
     }
 }
 
-pub fn print_manifest_header(pb: &ProgressBar, m: &Manifest, p: &SessionParams) {
-    pb.println(format!(
-        "Session {} · {}",
-        session_hex(p.session_id),
-        summary(m)
-    ));
-    if let Some(name) = &m.sender_name {
-        pb.println(format!("From:   {name} (unverified)"));
+pub fn print_manifest_header(
+    pb: &ProgressBar,
+    m: &Manifest,
+    p: &SessionParams,
+    sender: &SenderInfo,
+) {
+    say(
+        pb,
+        format!("Session {} · {}", session_hex(p.session_id), summary(m)),
+    );
+    say(
+        pb,
+        format!("From:   {}", sender.describe(m.sender_name.as_deref())),
+    );
+    if p.flags & FLAG_ENCRYPTED != 0 {
+        say(pb, "Encrypted for this device.");
     }
-    pb.println(format!(
-        "On the wire: {} in {} segment{}",
-        util::human_bytes(m.body.length),
-        p.seg_count,
-        if p.seg_count == 1 { "" } else { "s" }
-    ));
+    say(
+        pb,
+        format!(
+            "On the wire: {} in {} segment{}",
+            util::human_bytes(m.body.length),
+            p.seg_count,
+            if p.seg_count == 1 { "" } else { "s" }
+        ),
+    );
 }
 
 pub fn resume_hint(session_id: u32, missing: &[u32]) -> String {
@@ -281,20 +363,26 @@ pub fn run(args: RecvArgs) -> Result<()> {
                         let resumed = !store.done_indices().is_empty();
                         let s = Session::open(store)?;
                         if let Some(m) = &s.manifest {
-                            print_manifest_header(&pb, m, &p);
+                            print_manifest_header(&pb, m, &p, &s.sender);
                         } else {
-                            pb.println(format!(
-                                "Session {} · {} segments",
-                                session_hex(p.session_id),
-                                p.seg_count + 1
-                            ));
+                            say(
+                                &pb,
+                                format!(
+                                    "Session {} · {} segments",
+                                    session_hex(p.session_id),
+                                    p.seg_count + 1
+                                ),
+                            );
                         }
                         if resumed {
-                            pb.println(format!(
-                                "Resuming: {}/{} segments already received",
-                                rx.completed_count(),
-                                rx.segment_total()
-                            ));
+                            say(
+                                &pb,
+                                format!(
+                                    "Resuming: {}/{} segments already received",
+                                    rx.completed_count(),
+                                    rx.segment_total()
+                                ),
+                            );
                         }
                         pb.set_style(
                             ProgressStyle::with_template(
@@ -306,10 +394,10 @@ pub fn run(args: RecvArgs) -> Result<()> {
                         session = Some(s);
                     }
                     Event::ForeignSession(id) => {
-                        pb.println(format!(
-                            "Ignoring frames of another session ({})",
-                            session_hex(id)
-                        ));
+                        say(
+                            &pb,
+                            format!("Ignoring frames of another session ({})", session_hex(id)),
+                        );
                     }
                     Event::Inconsistent => {}
                     Event::Completed { index, data } => {
@@ -319,12 +407,15 @@ pub fn run(args: RecvArgs) -> Result<()> {
                                 rx.reset(bad);
                             }
                             let m = s.manifest.as_ref().unwrap();
-                            print_manifest_header(&pb, m, &s.store.params());
+                            print_manifest_header(&pb, m, &s.store.params(), &s.sender);
                         } else if !s.on_segment(index, &data)? {
                             rx.reset(index);
-                            pb.println(format!(
-                                "Segment {index} failed verification; waiting for it again"
-                            ));
+                            say(
+                                &pb,
+                                format!(
+                                    "Segment {index} failed verification; waiting for it again"
+                                ),
+                            );
                         }
                         if last_save.elapsed() > Duration::from_secs(1) {
                             s.store.save()?;
@@ -376,7 +467,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
         stdout: args.stdout,
         copy: args.copy,
     };
-    match extract::finalize(&s.store, &manifest, &opts) {
+    match extract::finalize(&s.store, &manifest, s.me.as_ref(), &opts) {
         Ok(outcome) => {
             let text_to_stdout = args.stdout;
             report(outcome, text_to_stdout);
@@ -395,5 +486,14 @@ pub fn run(args: RecvArgs) -> Result<()> {
             eprintln!("  qrsend inbox export {} -o <dir>", session_hex(id));
             Err(e)
         }
+    }
+}
+
+/// Prints above the progress bar, or plainly when the bar is hidden (not a TTY).
+pub fn say(pb: &ProgressBar, msg: impl AsRef<str>) {
+    if pb.is_hidden() {
+        eprintln!("{}", msg.as_ref());
+    } else {
+        pb.println(msg);
     }
 }

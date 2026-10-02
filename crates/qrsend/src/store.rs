@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use qrsend_core::manifest::{Manifest, MetaEnvelope, session_hex};
+use qrsend_core::manifest::session_hex;
 use qrsend_core::receiver::SessionParams;
 use serde::{Deserialize, Serialize};
 
@@ -159,15 +159,6 @@ impl Store {
 
     pub fn meta_bytes(&self) -> Result<Vec<u8>> {
         Ok(fs::read(self.dir.join("meta.bin"))?)
-    }
-
-    /// Parsed manifest, if the meta segment is here (unencrypted sessions).
-    pub fn manifest(&self) -> Result<Option<Manifest>> {
-        if !self.has_meta() {
-            return Ok(None);
-        }
-        let env = MetaEnvelope::decode(&self.meta_bytes()?)?;
-        Ok(Some(env.manifest(self.state.session_id)?))
     }
 
     pub fn write_meta(&mut self, data: &[u8]) -> Result<()> {

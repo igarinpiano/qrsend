@@ -96,7 +96,7 @@ files / dirs / text / stdin
 
 - **X25519 鍵ペア**: 受信用（age の recipient / identity）
 - **Ed25519 鍵ペア**: 送信者署名用
-- **フィンガープリント**: 公開鍵から導出した短い確認コード（例: `482-913`）
+- **フィンガープリント**: 公開鍵から導出した確認コード（例: `4829-1306-5512`）
 
 ペアリング（LocalSend のデバイス一覧に相当）:
 
@@ -153,7 +153,7 @@ CLI と Web は同じモデルで動く: **Receive（集める）→ Inbox（受
 ```
 $ qrsend recv                      # 既定: カメラ 0、出力先はカレントディレクトリ
   Camera: FaceTime HD Camera
-  From:   chimo-macbook ✓ (482-913)          ← 署名検証済みの送信者
+  From:   chimo-macbook ✓          ← 署名検証済みの送信者
   Files:  photos/ (1,204 files), notes.md     ← 復号した manifest
   Size:   2.31 GB (compressed 2.05 GB)
   Disk:   OK (48.2 GB free)

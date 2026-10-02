@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use qrsend_core::crypto::{self, DeviceIdentity};
+use qrsend_core::frame::FLAG_ENCRYPTED;
 use qrsend_core::manifest::{Entry, EntryType, Kind, Manifest, session_hex};
 use qrsend_core::payload::{UnpackSink, unpack, unpack_text};
 use qrsend_core::sanitize::{SafePath, numbered_name};
@@ -54,12 +56,19 @@ pub fn verify_body(store: &Store, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn body_reader(store: &Store, manifest: &Manifest) -> Result<impl Read> {
+/// The stored body, decrypted when the session is encrypted.
+fn body_reader(
+    store: &Store,
+    manifest: &Manifest,
+    me: Option<&DeviceIdentity>,
+) -> Result<Box<dyn Read>> {
     let f = File::open(store.body_path())?;
-    Ok(BufReader::with_capacity(
-        1 << 20,
-        f.take(manifest.body.length),
-    ))
+    let raw = BufReader::with_capacity(1 << 20, f.take(manifest.body.length));
+    if store.params().flags & FLAG_ENCRYPTED == 0 {
+        return Ok(Box::new(raw));
+    }
+    let me = me.context("this transfer is encrypted, but this device has no identity")?;
+    Ok(Box::new(crypto::decrypt_reader(raw, me)?))
 }
 
 struct FsSink {
@@ -167,9 +176,14 @@ fn place(
     Ok(())
 }
 
-pub fn finalize(store: &Store, manifest: &Manifest, opts: &ExtractOptions) -> Result<Outcome> {
+pub fn finalize(
+    store: &Store,
+    manifest: &Manifest,
+    me: Option<&DeviceIdentity>,
+    opts: &ExtractOptions,
+) -> Result<Outcome> {
     verify_body(store, manifest)?;
-    let reader = body_reader(store, manifest)?;
+    let reader = body_reader(store, manifest, me)?;
     match manifest.kind {
         Kind::Text => {
             let text = unpack_text(manifest, reader)?;

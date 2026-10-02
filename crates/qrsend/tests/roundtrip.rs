@@ -21,13 +21,29 @@ impl Env {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_as("me", args)
+    }
+
+    /// Runs as a given "device" (separate identity, inbox and cache).
+    fn run_as(&self, device: &str, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_qrsend"))
             .args(args)
             .current_dir(&self.root)
-            .env("QRSEND_DATA_DIR", self.path("data"))
-            .env("QRSEND_CACHE_DIR", self.path("cache"))
+            .env("QRSEND_DATA_DIR", self.path(&format!("{device}/data")))
+            .env("QRSEND_CACHE_DIR", self.path(&format!("{device}/cache")))
+            .env("QRSEND_CONFIG_DIR", self.path(&format!("{device}/config")))
             .output()
             .unwrap()
+    }
+
+    fn ok_as(&self, device: &str, args: &[&str]) -> String {
+        let out = self.run_as(device, args);
+        assert!(
+            out.status.success(),
+            "{device}: qrsend {args:?} failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -73,6 +89,7 @@ fn text_roundtrip() {
     let env = Env::new("text");
     env.ok(&[
         "send",
+        "--plain",
         "--text",
         "héllo, QR 🌈",
         "--density",
@@ -96,6 +113,7 @@ fn folder_roundtrip_with_loss_and_resume() {
 
     env.ok(&[
         "send",
+        "--plain",
         "in/docs",
         "--seg-shift",
         "15",
@@ -142,6 +160,7 @@ fn y4m_video_and_conflicts() {
     fs::write(env.path("note.txt"), "first").unwrap();
     env.ok(&[
         "send",
+        "--plain",
         "note.txt",
         "--grid",
         "2",
@@ -161,4 +180,56 @@ fn y4m_video_and_conflicts() {
         fs::read_to_string(env.path("out/note (1).txt")).unwrap(),
         "first"
     );
+}
+
+fn device_id(env: &Env, device: &str) -> String {
+    let out = env.ok_as(device, &["id", "--name", device, "--no-qr"]);
+    out.lines()
+        .find_map(|l| l.strip_prefix("ID:"))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn encrypted_transfer_between_paired_devices() {
+    let env = Env::new("crypto");
+    let (alice, bob) = (device_id(&env, "alice"), device_id(&env, "bob"));
+    device_id(&env, "eve");
+    // Plain sends need an explicit choice.
+    assert!(
+        !env.run_as("alice", &["send", "--text", "x", "--export-frames", "nope"])
+            .status
+            .success()
+    );
+
+    env.ok_as("alice", &["devices", "add", &bob, "--yes"]);
+    env.ok_as("bob", &["devices", "add", &alice, "--yes"]);
+    fs::write(env.path("secret.txt"), "for bob only").unwrap();
+    env.ok_as(
+        "alice",
+        &["send", "secret.txt", "--to", "bob", "--export-frames", "f"],
+    );
+
+    let eve = env.run_as("eve", &["recv", "--images", "f", "-o", "eve-out"]);
+    assert!(!eve.status.success());
+    assert!(String::from_utf8_lossy(&eve.stderr).contains("encrypted for another device"));
+
+    let out = env.run_as("bob", &["recv", "--images", "f", "-o", "bob-out"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("alice ✓"));
+    assert_eq!(
+        fs::read_to_string(env.path("bob-out/secret.txt")).unwrap(),
+        "for bob only"
+    );
+
+    // Pairing by scanning the ID QR code from an image.
+    let id_png = env.path("id.png");
+    env.ok_as("bob", &["id", "--no-qr", "--png", id_png.to_str().unwrap()]);
+    env.ok_as("eve", &["devices", "add", "--image", "id.png", "--yes"]);
+    assert!(env.ok_as("eve", &["devices", "list"]).contains("bob"));
 }

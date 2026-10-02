@@ -1,8 +1,10 @@
 //! QRSend command-line interface.
 
 mod collect;
+mod devices;
 mod display;
 mod extract;
+mod identity;
 mod inbox;
 mod input;
 mod paths;
@@ -36,6 +38,11 @@ enum Cmd {
     Send(send::SendArgs),
     /// Receive a QR code stream from a video or images
     Recv(recv::RecvArgs),
+    /// Show this device's ID (for others to encrypt to it)
+    Id(devices::IdArgs),
+    /// Manage trusted devices
+    #[command(subcommand)]
+    Devices(devices::DevicesCmd),
     /// Manage received sessions
     #[command(subcommand)]
     Inbox(inbox::InboxCmd),
@@ -65,6 +72,8 @@ fn run() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Send(args) => send::run(args),
         Cmd::Recv(args) => recv::run(args),
+        Cmd::Id(args) => devices::id(args),
+        Cmd::Devices(cmd) => devices::devices(cmd),
         Cmd::Inbox(cmd) => inbox::run(cmd),
         Cmd::Cache(CacheCmd::List) => {
             let spools = spool::Spool::list();

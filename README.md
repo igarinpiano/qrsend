@@ -9,7 +9,8 @@ rebuilds the data from any large-enough subset of them.
   take hours, be interrupted, and be resumed days later.
 - **Loss tolerant.** Missed frames don't matter — any ~K+ε symbols rebuild a
   segment. Missing pieces can be requested with a short *resume code*.
-- **Verified.** Every segment and every file is checked against BLAKE3 hashes;
+- **Private and verified.** End-to-end encryption to paired devices (age) and
+  signed manifests; every segment and file is checked against BLAKE3 hashes,
   paths are sanitised and decompression is bounded.
 - **CLI and browser.** A single Rust binary, plus a web app (work in progress)
   sharing the same Rust core through WebAssembly.
@@ -27,12 +28,32 @@ cargo install --git https://github.com/igarinpiano/qrsend qrsend
 
 ## Usage
 
-Send files or folders (opens a window with the QR stream):
+### Pair devices (once)
+
+Every device has a key pair. On the **receiving** device:
 
 ```bash
-qrsend send photos/ notes.md
-qrsend send --text "hello from the other screen"
-tar c project | qrsend send - --name project.tar
+qrsend id            # prints this device's ID, fingerprint and a QR code
+```
+
+On the **sending** device, trust it (paste the ID, or scan a screenshot of the QR):
+
+```bash
+qrsend devices add 'qrsend-id:1:age1…'      # or: qrsend devices add --image id.png
+```
+
+Check that both screens show the same fingerprint. Do the same in the other
+direction so the receiver can verify who sent a transfer (`From: laptop ✓`).
+
+### Send
+
+Transfers are encrypted (age, X25519) for the devices you name and signed
+(Ed25519) by the sender. Sending unencrypted requires `--plain`.
+
+```bash
+qrsend send photos/ notes.md --to phone
+qrsend send --text "hello from the other screen" --to phone --to tablet
+tar c project | qrsend send - --name project.tar --plain
 ```
 
 Useful options: `--density low|normal|high|max`, `--fps 12`, `--grid 2`
@@ -75,7 +96,7 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 - [x] v0.1 — protocol core, CLI send (window / terminal / export) and receive (video / images), inbox and resume codes
 - [ ] Live camera capture in the CLI
-- [ ] Device identities, public-key encryption (age) and sender signatures
+- [x] Device identities, public-key encryption (age) and sender signatures
 - [ ] Web app (PWA on GitHub Pages) with camera receive and OPFS storage
 - [ ] Higher-throughput modes (colour codes, two-way auto-tuning)
 

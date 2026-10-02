@@ -171,6 +171,19 @@ pub fn render(text: &str, p: QrParams) -> Result<QrMatrix, QrError> {
     Ok(QrMatrix { width, modules })
 }
 
+/// Renders arbitrary text (any mode, smallest version, ECC M) — for device IDs.
+pub fn render_text(text: &str) -> Result<QrMatrix, QrError> {
+    let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M)
+        .map_err(|e| QrError(e.to_string()))?;
+    let width = code.width();
+    let modules = code
+        .into_colors()
+        .into_iter()
+        .map(|c| c == qrcode::Color::Dark)
+        .collect();
+    Ok(QrMatrix { width, modules })
+}
+
 /// 8-bit greyscale image view used for detection.
 pub struct Luma<'a> {
     pub width: usize,

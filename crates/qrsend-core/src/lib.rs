@@ -6,6 +6,7 @@
 
 pub mod base45;
 pub mod compress;
+pub mod crypto;
 pub mod fec;
 pub mod frame;
 pub mod manifest;

@@ -108,7 +108,10 @@ pub fn run(cmd: InboxCmd) -> Result<()> {
                 stdout,
                 copy: false,
             };
-            report(extract::finalize(&s.store, &manifest, &opts)?, stdout);
+            report(
+                extract::finalize(&s.store, &manifest, s.me.as_ref(), &opts)?,
+                stdout,
+            );
             if remove {
                 s.store.remove()?;
             }

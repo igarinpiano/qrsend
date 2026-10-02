@@ -2,13 +2,15 @@
 //! forever (and resumed later) without re-reading or re-compressing inputs.
 
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Seek, SeekFrom};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use qrsend_core::crypto::{self, DeviceIdentity, DevicePublic};
 use qrsend_core::fec;
+use qrsend_core::frame::FLAG_ENCRYPTED;
 use qrsend_core::manifest::{Body, Kind, MANIFEST_VERSION, Manifest, MetaEnvelope, session_hex};
-use qrsend_core::payload::{BodyHasher, PackOptions, Packer};
+use qrsend_core::payload::{BodyHasher, PackOptions, Packed, Packer};
 use qrsend_core::sender::{SegmentSource, SessionLayout};
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +28,8 @@ pub struct SpoolInfo {
     pub body_len: u64,
     pub created: i64,
     pub summary: String,
+    #[serde(default)]
+    pub recipients: Vec<String>,
 }
 
 pub struct Spool {
@@ -38,10 +42,39 @@ pub enum Content {
     Items(Vec<Item>),
 }
 
-pub struct SpoolOptions {
+pub struct SpoolOptions<'a> {
     pub seg_shift: u8,
     pub pack: PackOptions,
     pub sender_name: Option<String>,
+    /// Encrypt to these devices (empty = unencrypted).
+    pub recipients: Vec<DevicePublic>,
+    /// Sign the manifest with this identity.
+    pub signer: Option<&'a DeviceIdentity>,
+}
+
+fn pack<W: Write>(w: W, content: Content, opts: PackOptions) -> Result<(W, Packed)> {
+    Ok(match content {
+        Content::Text(text) => Packer::text(w, &text, opts)?,
+        Content::Items(items) => {
+            let mut packer = Packer::new(w, opts)?;
+            for item in items {
+                match item.source {
+                    None => packer.add_dir(&item.rel, item.mtime),
+                    Some(Source::Stdin) => {
+                        packer.add_file(&item.rel, &mut io::stdin().lock(), None, None, None)?;
+                    }
+                    Some(Source::File(path)) => {
+                        let mut f = File::open(&path)
+                            .with_context(|| format!("cannot open {}", path.display()))?;
+                        packer
+                            .add_file(&item.rel, &mut f, item.size, item.mode, item.mtime)
+                            .with_context(|| format!("cannot read {}", path.display()))?;
+                    }
+                }
+            }
+            packer.finish()?
+        }
+    })
 }
 
 fn new_session_id() -> u32 {
@@ -109,33 +142,12 @@ impl Spool {
     ) -> Result<SpoolInfo> {
         let body_file = BufWriter::with_capacity(1 << 20, File::create(dir.join("body.bin"))?);
         let hasher = BodyHasher::new(body_file, opts.seg_shift);
-        let (hasher, packed) = match content {
-            Content::Text(text) => Packer::text(hasher, &text, opts.pack)?,
-            Content::Items(items) => {
-                let mut packer = Packer::new(hasher, opts.pack)?;
-                for item in items {
-                    match item.source {
-                        None => packer.add_dir(&item.rel, item.mtime),
-                        Some(Source::Stdin) => {
-                            packer.add_file(
-                                &item.rel,
-                                &mut io::stdin().lock(),
-                                None,
-                                None,
-                                None,
-                            )?;
-                        }
-                        Some(Source::File(path)) => {
-                            let mut f = File::open(&path)
-                                .with_context(|| format!("cannot open {}", path.display()))?;
-                            packer
-                                .add_file(&item.rel, &mut f, item.size, item.mode, item.mtime)
-                                .with_context(|| format!("cannot read {}", path.display()))?;
-                        }
-                    }
-                }
-                packer.finish()?
-            }
+        let (hasher, packed) = if opts.recipients.is_empty() {
+            pack(hasher, content, opts.pack)?
+        } else {
+            let enc = crypto::encrypt_writer(hasher, &opts.recipients)?;
+            let (enc, packed) = pack(enc, content, opts.pack)?;
+            (enc.finish()?, packed)
         };
         let (_, digest) = hasher.finish()?;
         if digest.length.div_ceil(1 << opts.seg_shift) > qrsend_core::frame::MAX_U24 as u64 {
@@ -156,16 +168,26 @@ impl Spool {
             },
             entries: packed.entries,
         };
-        let meta = MetaEnvelope::from_manifest(&manifest)?.encode();
+        let mut envelope = MetaEnvelope::from_manifest(&manifest)?;
+        if let Some(signer) = opts.signer {
+            envelope.signature = Some(signer.sign_meta(session_id, &envelope.manifest_z));
+        }
+        let mut meta = envelope.encode();
+        let mut flags = 0;
+        if !opts.recipients.is_empty() {
+            meta = crypto::encrypt(&meta, &opts.recipients)?;
+            flags |= FLAG_ENCRYPTED;
+        }
         fs::write(dir.join("meta.bin"), &meta)?;
         let info = SpoolInfo {
             session_id,
-            flags: 0,
+            flags,
             seg_shift: opts.seg_shift,
             meta_len: meta.len() as u32,
             body_len: digest.length,
             created: manifest.created,
             summary: summary(&manifest),
+            recipients: opts.recipients.iter().map(|r| r.name.clone()).collect(),
         };
         fs::write(dir.join("spool.json"), serde_json::to_vec_pretty(&info)?)?;
         Ok(info)
