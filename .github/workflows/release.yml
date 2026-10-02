@@ -73,8 +73,45 @@ jobs:
           name: dist-${{ matrix.target }}
           path: dist/*
 
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web
+      - name: Install wasm-bindgen
+        run: command -v wasm-bindgen || cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the web app
+        working-directory: web
+        run: |
+          npm ci
+          npm run wasm
+          npm run build
+      - name: Package (offline copy of the web app)
+        run: |
+          mkdir -p dist
+          (cd web/dist && zip -qr "../../dist/qrsend-web-${TAG}.zip" .)
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-path: dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-web
+          path: dist/*
+
   release:
-    needs: build
+    needs: [build, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

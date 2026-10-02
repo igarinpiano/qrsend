@@ -16,19 +16,24 @@ base64 = "0.23.1"
 blake3 = "1.8.7"
 crc32fast = "1.5.2"
 ed25519-dalek = "3.0.0"
-getrandom = "0.4.3"
 qrcode = { version = "0.14.1", default-features = false }
+rand = "0.8"
 raptorq = "2.0.1"
 rqrr = { version = "0.11.0", default-features = false }
+ruzstd = { version = "0.9", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.21"
-zstd = "0.14.0"
+zstd = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
 
 [features]
-default = []
+default = ["zstd-native"]
+# zstd via the reference C library (best ratio, multithreading).
+zstd-native = ["dep:zstd"]
 # Multithreaded zstd compression (native builds only).
-zstdmt = ["zstd/zstdmt"]
+zstdmt = ["zstd-native", "zstd/zstdmt"]
+# Pure-Rust zstd (WebAssembly). Compresses at roughly level 1.
+ruzstd = ["dep:ruzstd"]

@@ -8,7 +8,7 @@ use crate::manifest::{Encoding, Entry, EntryType, Kind, Manifest};
 use crate::sanitize::{PathError, SafePath, numbered_name};
 
 enum Sink<W: Write> {
-    Zstd(zstd::stream::write::Encoder<'static, W>),
+    Zstd(compress::Encoder<W>),
     Raw(W),
 }
 
@@ -65,7 +65,7 @@ impl<W: Write> Packer<W> {
     pub fn new(inner: W, opts: PackOptions) -> io::Result<Self> {
         let (sink, encoding) = match opts.zstd_level {
             Some(level) => (
-                Sink::Zstd(compress::encoder(inner, level, opts.zstd_workers)?),
+                Sink::Zstd(compress::Encoder::new(inner, level, opts.zstd_workers)?),
                 Encoding::Zstd,
             ),
             None => (Sink::Raw(inner), Encoding::None),

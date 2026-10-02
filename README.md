@@ -81,6 +81,20 @@ qrsend send big.iso --export-y4m stream.y4m   # also usable as a fake camera in 
 qrsend send notes.md --export-frames frames/
 ```
 
+## Web app
+
+The same protocol runs in the browser (Rust core compiled to WebAssembly):
+send text, files and folders, receive with the camera, pair devices and keep
+unfinished transfers in an inbox. It works offline once loaded (PWA).
+
+```bash
+cd web && npm ci && npm run wasm && npm run dev
+```
+
+Each release also ships an offline copy of the web app (`qrsend-web-*.zip`).
+The browser keeps everything in memory, so very large transfers are better
+handled by the CLI.
+
 ## How it works
 
 ```
@@ -97,7 +111,8 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] v0.1 — protocol core, CLI send (window / terminal / export) and receive (video / images), inbox and resume codes
 - [ ] Live camera capture in the CLI
 - [x] Device identities, public-key encryption (age) and sender signatures
-- [ ] Web app (PWA on GitHub Pages) with camera receive and OPFS storage
+- [x] Web app (PWA) with camera receive, pairing and inbox
+- [ ] Streaming storage (OPFS) for very large transfers in the browser
 - [ ] Higher-throughput modes (colour codes, two-way auto-tuning)
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).

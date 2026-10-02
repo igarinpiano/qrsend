@@ -9,3 +9,14 @@ license = "Apache-2.0"
 repository = "https://github.com/igarinpiano/qrsend"
 homepage = "https://github.com/igarinpiano/qrsend"
 rust-version = "1.89"
+
+[profile.release]
+lto = "thin"
+
+# Smaller WebAssembly for the web app.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

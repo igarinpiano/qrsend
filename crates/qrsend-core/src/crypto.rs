@@ -145,7 +145,8 @@ pub struct DeviceIdentity {
 impl DeviceIdentity {
     pub fn generate(name: &str) -> Result<DeviceIdentity, CryptoError> {
         let mut seed = [0u8; 32];
-        getrandom::fill(&mut seed).map_err(|e| io::Error::other(e.to_string()))?;
+        rand::RngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut seed)
+            .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(DeviceIdentity {
             name: name.to_string(),
             x25519: age::x25519::Identity::generate(),
@@ -278,6 +279,66 @@ pub fn decrypt(
         return Err(CryptoError::TooLarge);
     }
     Ok(out)
+}
+
+/// Upper bound on a decrypted meta segment.
+pub const MAX_META: usize = 512 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenMetaError {
+    #[error("this transfer is encrypted, but this device has no identity yet")]
+    NoIdentity,
+    #[error("this transfer is encrypted for another device")]
+    NotForUs,
+    #[error("the sender's signature is invalid — the transfer may have been tampered with")]
+    BadSignature,
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+    #[error(transparent)]
+    Meta(#[from] crate::manifest::MetaError),
+}
+
+/// A decrypted, signature-checked manifest.
+pub struct OpenedMeta {
+    pub manifest: crate::manifest::Manifest,
+    /// The verified signer's Ed25519 key, if the meta was signed.
+    pub signer: Option<[u8; 32]>,
+}
+
+/// Decrypts (when `encrypted`) and verifies a meta segment.
+pub fn open_meta(
+    bytes: &[u8],
+    session_id: u32,
+    encrypted: bool,
+    me: Option<&DeviceIdentity>,
+) -> Result<OpenedMeta, OpenMetaError> {
+    let plain = if encrypted {
+        let me = me.ok_or(OpenMetaError::NoIdentity)?;
+        match decrypt(bytes, me, MAX_META) {
+            Err(CryptoError::NotForUs) => return Err(OpenMetaError::NotForUs),
+            r => r?,
+        }
+    } else {
+        bytes.to_vec()
+    };
+    let env = crate::manifest::MetaEnvelope::decode(&plain)?;
+    let signer = match &env.signature {
+        None => None,
+        Some(sig) => Some(
+            verify_meta(sig, session_id, &env.manifest_z)
+                .ok_or(OpenMetaError::BadSignature)?
+                .to_bytes(),
+        ),
+    };
+    Ok(OpenedMeta {
+        manifest: env.manifest(session_id)?,
+        signer,
+    })
+}
+
+/// Short display id of a signing key (for senders that are not trusted).
+pub fn key_id(verifying: &[u8; 32]) -> String {
+    blake3::hash(verifying).to_hex()[..12].to_string()
 }
 
 #[cfg(test)]

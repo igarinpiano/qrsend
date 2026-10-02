@@ -6,21 +6,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use crossbeam_channel::{bounded, unbounded};
 use indicatif::{ProgressBar, ProgressStyle};
-use qrsend_core::crypto::{self, CryptoError, DeviceIdentity};
+use qrsend_core::crypto::{self, DeviceIdentity, OpenMetaError};
 use qrsend_core::frame::{FLAG_ENCRYPTED, Frame};
-use qrsend_core::manifest::{Manifest, MetaEnvelope, session_hex};
+use qrsend_core::manifest::{Manifest, session_hex};
 use qrsend_core::payload::segment_hash;
-use qrsend_core::qr::{self, Luma};
 use qrsend_core::receiver::{Event, Receiver, SessionParams};
 use qrsend_core::resume::ResumeCode;
 
 use crate::extract::{self, Conflict, ExtractOptions, Outcome};
 use crate::input::{Input, LumaFrame, image_paths};
 use crate::store::Store;
-use crate::{identity, util};
+use crate::{decode, identity, util};
 
 #[derive(clap::Args)]
 pub struct RecvArgs {
@@ -74,44 +73,32 @@ impl SenderInfo {
     }
 }
 
-const MAX_META: usize = 512 * 1024 * 1024;
-
 /// Decrypts (if needed) and verifies a meta segment.
 pub fn open_meta(
     bytes: &[u8],
     p: &SessionParams,
     me: Option<&DeviceIdentity>,
 ) -> Result<(Manifest, SenderInfo)> {
-    let plain = if p.flags & FLAG_ENCRYPTED != 0 {
-        let me = me.context(
-            "this transfer is encrypted, but this device has no identity yet (run `qrsend id`)",
-        )?;
-        match crypto::decrypt(bytes, me, MAX_META) {
-            Err(CryptoError::NotForUs) => bail!(
-                "this transfer is encrypted for another device (remove it with `qrsend inbox rm {}`)",
-                session_hex(p.session_id)
-            ),
-            r => r?,
+    let opened = match crypto::open_meta(bytes, p.session_id, p.flags & FLAG_ENCRYPTED != 0, me) {
+        Err(OpenMetaError::NoIdentity) => {
+            bail!(
+                "this transfer is encrypted, but this device has no identity yet (run `qrsend id`)"
+            )
         }
-    } else {
-        bytes.to_vec()
+        Err(OpenMetaError::NotForUs) => bail!(
+            "this transfer is encrypted for another device (remove it with `qrsend inbox rm {}`)",
+            session_hex(p.session_id)
+        ),
+        r => r?,
     };
-    let env = MetaEnvelope::decode(&plain)?;
-    let sender = match &env.signature {
+    let sender = match opened.signer {
         None => SenderInfo::Unsigned,
-        Some(sig) => {
-            let key = crypto::verify_meta(sig, p.session_id, &env.manifest_z).context(
-                "the sender's signature is invalid — the transfer may have been tampered with",
-            )?;
-            match identity::trusted_name(&key.to_bytes()) {
-                Some(name) => SenderInfo::Trusted(name),
-                None => {
-                    SenderInfo::Unverified(blake3::hash(&key.to_bytes()).to_hex()[..12].to_string())
-                }
-            }
-        }
+        Some(key) => match identity::trusted_name(&key) {
+            Some(name) => SenderInfo::Trusted(name),
+            None => SenderInfo::Unverified(crypto::key_id(&key)),
+        },
     };
-    Ok((env.manifest(p.session_id)?, sender))
+    Ok((opened.manifest, sender))
 }
 
 /// A receive session: the on-disk store plus the decoded manifest.
@@ -318,11 +305,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let texts = qr::detect(Luma {
-                    width: f.width,
-                    height: f.height,
-                    pixels: &f.pixels,
-                });
+                let texts = decode::detect(&f);
                 if ttx.send(texts).is_err() {
                     break;
                 }

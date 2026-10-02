@@ -1,6 +1,7 @@
 //! QRSend command-line interface.
 
 mod collect;
+mod decode;
 mod devices;
 mod display;
 mod extract;
