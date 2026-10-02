@@ -18,13 +18,18 @@ rebuilds the data from any large-enough subset of them.
 > Status: early development (v0.1). The wire format is specified in
 > [docs/PROTOCOL.md](docs/PROTOCOL.md) and may still change.
 
+**Web app:** <https://igarinpiano.github.io/qrsend/>
+
 ## Install
 
-From a [release](https://github.com/igarinpiano/qrsend/releases) archive, or with Cargo:
-
 ```bash
-cargo install --git https://github.com/igarinpiano/qrsend qrsend
+npm install -g qrsend      # prebuilt binaries for macOS, Linux (glibc/musl), Windows
+cargo install qrsend       # from source
 ```
+
+Or download an archive from [Releases](https://github.com/igarinpiano/qrsend/releases)
+(checksums and build provenance attestations included). The Linux musl builds
+are static and have no window display (`--display terminal`).
 
 ## Usage
 
@@ -92,7 +97,8 @@ unfinished transfers in an inbox. It works offline once loaded (PWA).
 cd web && npm ci && npm run wasm && npm run dev
 ```
 
-Each release also ships an offline copy of the web app (`qrsend-web-*.zip`).
+It is hosted at <https://igarinpiano.github.io/qrsend/>, and each release also
+ships an offline copy (`qrsend-web-*.zip`).
 The browser keeps everything in memory, so very large transfers are better
 handled by the CLI.
 

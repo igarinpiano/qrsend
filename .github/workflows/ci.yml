@@ -23,6 +23,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: npm launcher unit tests
+        run: node --test npm/launcher.test.js
+      - name: npm packaging smoke test
+        run: |
+          mkdir -p bins/x86_64-unknown-linux-gnu
+          printf '#!/bin/sh\necho stub "$@"\n' > bins/x86_64-unknown-linux-gnu/qrsend
+          chmod +x bins/x86_64-unknown-linux-gnu/qrsend
+          python3 npm/assemble.py --version 0.0.0 --binaries bins --out npm-out
+          for d in npm-out/*/; do (cd "$d" && npm pack --dry-run > /dev/null); done
+      - name: Shell scripts
+        run: bash -n scripts/first-publish.sh
 
   test:
     strategy:

@@ -1,0 +1,83 @@
+# Builds the qrsend CLI release binaries for every target and uploads them as
+# artifacts (bin-<target>). Shared by publish-all.yml; add or change targets
+# here only.
+#
+# - Native runners build macOS and Windows directly.
+# - Linux uses cross (cross-rs): zstd-sys compiles C, and cross images bring
+#   both the cross C toolchain and an old glibc. Native ubuntu-latest builds
+#   would require a new glibc (see "Check glibc floor").
+# - musl builds are fully static, where dlopen of X11/Wayland cannot work, so
+#   they are built without the window feature (terminal display only).
+#
+# npm packages are made for the targets listed in npm/assemble.py (all of them).
+name: build-matrix
+
+on:
+  workflow_call: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest, cross: false, features: "" }
+          - { target: x86_64-apple-darwin, os: macos-26-intel, cross: false, features: "" }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, cross: false, features: "" }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm, cross: false, features: "" }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, cross: true, features: "" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true, features: "" }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: "--no-default-features" }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: "--no-default-features" }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        if: matrix.cross
+        with:
+          tool: cross
+      - name: Build (release, native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked -p qrsend --target ${{ matrix.target }} ${{ matrix.features }}
+      - name: Build (release, cross)
+        if: matrix.cross
+        run: cross build --release --locked -p qrsend --target ${{ matrix.target }} ${{ matrix.features }}
+      - name: Check glibc floor
+        # Supported down to RHEL 8 / Debian 10 (glibc 2.28).
+        if: contains(matrix.target, '-linux-gnu')
+        env:
+          MAX_GLIBC: "2.28"
+        run: |
+          bin="target/${{ matrix.target }}/release/qrsend"
+          need="$(readelf -V --wide "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -V | tail -1)"
+          echo "max GLIBC required by ${{ matrix.target }}: ${need:-none}"
+          if [ -n "$need" ] && [ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+            echo "::error::${{ matrix.target }} requires GLIBC_$need (> $MAX_GLIBC)"
+            exit 1
+          fi
+      - name: Smoke test
+        if: ${{ !matrix.cross }}
+        run: |
+          exe=qrsend; [[ "${{ matrix.target }}" == *windows* ]] && exe=qrsend.exe
+          "target/${{ matrix.target }}/release/$exe" --version
+      - name: Collect
+        run: |
+          mkdir -p out/${{ matrix.target }}
+          exe=qrsend; [[ "${{ matrix.target }}" == *windows* ]] && exe=qrsend.exe
+          cp "target/${{ matrix.target }}/release/$exe" "out/${{ matrix.target }}/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: out/

@@ -78,8 +78,10 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 
 ## リリース
 
-- パッケージ名: crates.io の `qrsend`（CLI）/ `qrsend-core`、npm の `qrsend` はいずれも未取得だった（2026-10 時点）。まだ publish していない。
-- `v*` タグの push で `.github/workflows/release.yml` が各 OS のバイナリを作り GitHub Release に添付する。crates.io への publish は `CARGO_REGISTRY_TOKEN` シークレットがある場合のみ実行。
-- バージョンはワークスペースの `Cargo.toml`（`[workspace.package]`）で一括管理。
-- GitHub Pages: `.github/workflows/pages.yml` は毎回ビルドし、リポジトリが public のときだけデプロイする。2026-10 時点でリポジトリは private で、現在のプランでは Pages を有効化できない（API が 422）。公開する場合は Settings → Pages → Source を「GitHub Actions」にする。
-- Release には各 OS の CLI に加え、Web アプリのオフライン用 zip（`qrsend-web-<tag>.zip`）が付く。
+- パッケージ: crates.io の `qrsend`（CLI）/ `qrsend-core`、npm の `qrsend`（launcher）+ `qrsend-bin-<platform>`（8 種、`npm/assemble.py` の TARGETS）。`qrsend-wasm` は publish しない。
+- 手順は igarinpiano/dirlens と同じ方式。`.github/workflows/publish-all.yml` を手動実行（Actions → publish-all → Run workflow）すると GitHub Releases → npm → crates.io の順に公開する。認証は両レジストリとも Trusted Publishing（OIDC）で、トークンはリポジトリに置かない。
+  - ビルドは `reusable-build-matrix.yml`（macOS/Windows はネイティブ、Linux は cross。glibc 下限 2.28 を検査。musl は `--no-default-features` で window 無し）。
+  - **初回だけ手動**: publish-all を「GitHub Releases」のみで実行 → `scripts/first-publish.sh <version>`（タグの内容から crates と npm を公開。`--dry-run` あり）→ crates.io / npmjs.com で Trusted Publishing を登録（publish-all.yml、crates は environment `crates-io`）。
+- バージョンはワークスペースの `Cargo.toml`（`[workspace.package]`）と `crates/qrsend/Cargo.toml` の qrsend-core 依存、`web/package.json` を揃えて上げる。
+- GitHub Pages: リポジトリは public、Pages の Source は「GitHub Actions」。`pages.yml` が main への push ごとに web/ をビルドしてデプロイする（https://igarinpiano.github.io/qrsend/）。Source を「Deploy from a branch」にすると README が表示されてしまうので注意。
+- Release には各 OS の CLI、Web アプリのオフライン用 zip（`qrsend-web-<version>.zip`）、SHA256SUMS、build provenance attestation が付く。
