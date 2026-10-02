@@ -35,6 +35,13 @@ WORK="$(mktemp -d)"
 trap 'git -C "$ROOT" worktree remove --force "$WORK/src" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 set -e
+# Unauthenticated publishes of new packages come back as a misleading
+# "404 Not Found", so check the login first (npm login sessions expire).
+if [ -z "$DRY" ] && ! who="$(npm whoami 2>/dev/null)"; then
+  echo "npm: not logged in (or the session expired). Run \`npm login\` and try again." >&2
+  exit 1
+fi
+[ -n "$DRY" ] || echo "== npm user: $who"
 git -C "$ROOT" fetch --tags --quiet
 git -C "$ROOT" worktree add --quiet --detach "$WORK/src" "v$VERSION"
 echo "== downloading release binaries of v$VERSION"
