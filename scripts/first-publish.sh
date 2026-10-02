@@ -5,8 +5,10 @@
 # this script.
 #
 # Prerequisites:
-#   - The GitHub Release v<VERSION> exists (run publish-all with only
-#     "GitHub Releases" selected) — npm packages are built from its binaries.
+#   - The GitHub Release v<VERSION> exists with binaries named
+#     qrsend-<VERSION>-<target> (run publish-all with only "GitHub Releases"
+#     selected, and `ref` = the tag for an existing release) — npm packages
+#     are built from them.
 #   - `cargo login` (crates.io token) and `npm login` done on this machine.
 #   - gh, python3, npm, cargo on PATH.
 #
@@ -72,7 +74,9 @@ if [ "$DO_NPM" = 1 ]; then
     esac
     cp "$WORK/x/qrsend-$VERSION-$target"/qrsend* "$WORK/binaries/$target/"
   done
-  python3 "$SRC/npm/assemble.py" --version "$VERSION" --binaries "$WORK/binaries" --out "$WORK/npm"
+  # Packaging tooling from this checkout (older tags may predate it); the
+  # README and LICENSE shipped in the package come from the tag.
+  python3 "$ROOT/npm/assemble.py" --version "$VERSION" --binaries "$WORK/binaries" --out "$WORK/npm" --docs "$SRC"
   # Platform packages first so the main package's optionalDependencies resolve.
   for d in "$WORK/npm"/qrsend-bin-* "$WORK/npm/qrsend"; do
     echo "== npm publish $(basename "$d")"

@@ -42,9 +42,10 @@ def main():
     ap.add_argument("--version", required=True)
     ap.add_argument("--binaries", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--docs", help="directory holding README.md and LICENSE (default: repository root)")
     args = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(here)
+    repo_root = args.docs or os.path.dirname(here)
     os.makedirs(args.out, exist_ok=True)
 
     optional = {}

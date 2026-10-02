@@ -13,7 +13,12 @@
 name: build-matrix
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build (default: the triggering ref)"
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,6 +43,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
