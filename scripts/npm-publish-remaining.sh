@@ -6,7 +6,7 @@
 # - Packages already on the registry at <version> are left alone.
 # - --skip NAME leaves a package out (repeatable).
 # - A failure does not stop the run; a summary is printed at the end.
-# - The main package `qrsend` is published last, and only when every platform
+# - The main package `qrsend-cli` is published last, and only when every platform
 #   package exists afterwards (its optionalDependencies must all resolve), unless
 #   --main is given.
 #
@@ -90,9 +90,9 @@ for dir in "$WORK/npm"/qrsend-bin-*; do
 done
 
 if [ "$missing" -eq 0 ] || [ "$FORCE_MAIN" = 1 ]; then
-  publish_dir "$WORK/npm/qrsend" || true
+  publish_dir "$WORK/npm/qrsend-cli" || true
 else
-  REPORT+=("held back          qrsend@$VERSION — $missing platform package(s) not on the registry yet (use --main to publish anyway)")
+  REPORT+=("held back          qrsend-cli@$VERSION — $missing platform package(s) not on the registry yet (use --main to publish anyway)")
 fi
 
 echo

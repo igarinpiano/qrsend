@@ -23,7 +23,7 @@ rebuilds the data from any large-enough subset of them.
 ## Install
 
 ```bash
-npm install -g qrsend      # prebuilt binaries for macOS, Linux (glibc/musl), Windows
+npm install -g qrsend-cli  # prebuilt binaries for macOS, Linux (glibc/musl), Windows
 cargo install qrsend       # from source
 ```
 

@@ -16,11 +16,11 @@
 #      to the tag when the release/tag already exists).
 #   2. Locally run `scripts/first-publish.sh <version>`: it publishes the
 #      crates (qrsend-core, then qrsend) and the npm packages (qrsend-bin-*,
-#      then qrsend) built from that GitHub Release.
+#      then qrsend-cli) built from that GitHub Release.
 #   3. crates.io → each crate → Settings → Trusted Publishing:
 #        owner igarinpiano / repo qrsend / workflow publish-all.yml /
 #        environment crates-io
-#      npmjs.com → each package (qrsend and every qrsend-bin-*) → Settings →
+#      npmjs.com → each package (qrsend-cli and every qrsend-bin-*) → Settings →
 #      Trusted publishing → GitHub Actions:
 #        owner igarinpiano / repo qrsend / workflow publish-all.yml
 # After that, every release is just this workflow with everything selected.
@@ -221,7 +221,7 @@ jobs:
             fi
           }
           for d in npm-out/qrsend-bin-*; do publish "$d"; done
-          publish npm-out/qrsend
+          publish npm-out/qrsend-cli
 
   crates-io:
     needs: [check-version, github-release, npm]

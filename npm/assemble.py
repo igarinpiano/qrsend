@@ -2,7 +2,8 @@
 """Assembles the npm packages from release binaries (adapted from dirlens).
 
 Input:  --version X.Y.Z --binaries <dir>, with <dir>/<target>/qrsend(.exe)
-Output: --out <dir> with the main package qrsend/ (a small Node launcher) and
+Output: --out <dir> with the main package qrsend-cli/ (a small Node launcher;
+        npm rejects the unscoped name "qrsend" as too similar to send/resend) and
         one qrsend-bin-<platform> package per target, installed through
         optionalDependencies — the approach used by esbuild, swc and Biome.
 """
@@ -26,6 +27,7 @@ TARGETS = {
     "aarch64-pc-windows-msvc": ("qrsend-bin-win32-arm64", ["win32"], ["arm64"], None, "qrsend.exe"),
 }
 
+MAIN = "qrsend-cli"  # the command it installs is still `qrsend`
 DESCRIPTION = "Send any data — text, files, folders — through a stream of QR codes"
 REPO = {"type": "git", "url": "git+https://github.com/igarinpiano/qrsend.git"}
 HOMEPAGE = "https://igarinpiano.github.io/qrsend/"
@@ -78,13 +80,13 @@ def main():
     if not optional:
         raise SystemExit("no binaries found")
 
-    main_dir = os.path.join(args.out, "qrsend")
+    main_dir = os.path.join(args.out, MAIN)
     os.makedirs(os.path.join(main_dir, "bin"), exist_ok=True)
     shutil.copy2(os.path.join(here, "launcher.js"), os.path.join(main_dir, "bin", "qrsend.js"))
     for doc in ["README.md", "LICENSE"]:
         shutil.copy2(os.path.join(repo_root, doc), os.path.join(main_dir, doc))
     write_json(os.path.join(main_dir, "package.json"), {
-        "name": "qrsend",
+        "name": MAIN,
         "version": args.version,
         "description": DESCRIPTION,
         "keywords": ["qr", "qrcode", "file-transfer", "air-gap", "raptorq", "cli"],
@@ -95,7 +97,7 @@ def main():
         "files": ["bin/", "README.md", "LICENSE"],
         "optionalDependencies": optional,
     })
-    print(f"assembled: qrsend + {len(optional)} platform packages -> {args.out}")
+    print(f"assembled: {MAIN} + {len(optional)} platform packages -> {args.out}")
 
 
 if __name__ == "__main__":
