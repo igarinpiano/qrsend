@@ -27,6 +27,10 @@ npm install -g qrsend-cli  # prebuilt binaries for macOS, Linux (glibc/musl), Wi
 cargo install qrsend       # from source
 ```
 
+The npm package is named `qrsend-cli`; the command it installs is `qrsend`.
+On Windows, use the release archive or Cargo for now — the Windows npm
+binaries are not published yet.
+
 Or download an archive from [Releases](https://github.com/igarinpiano/qrsend/releases)
 (checksums and build provenance attestations included). The Linux musl builds
 are static and have no window display (`--display terminal`).

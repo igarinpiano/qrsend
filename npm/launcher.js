@@ -45,7 +45,7 @@ function resolveFromPkg(pkg, exe) {
   try {
     return require.resolve(`${pkg}/bin/${exe}`);
   } catch (e) {
-    // Fallback from node_modules/qrsend/bin/ to node_modules/<pkg>/bin/
+    // Fallback from node_modules/qrsend-cli/bin/ to node_modules/<pkg>/bin/
     const local = path.join(__dirname, "..", "..", pkg, "bin", exe);
     if (fs.existsSync(local)) return local;
     return null;
@@ -71,7 +71,7 @@ function findBinary({ platform = process.platform, arch = process.arch, musl = i
   return {
     error:
       `qrsend: could not find binary package ${candidates.join(" / ")}.\n` +
-      "Try re-running npm install, or reinstall without the --force option.",
+      "Try reinstalling: npm install -g qrsend-cli (without --omit=optional / --no-optional).",
   };
 }
 
@@ -86,7 +86,7 @@ function launchErrorMessage(found, error, arch = process.arch) {
       `\nqrsend: this looks like a musl system (Alpine, etc.), but only the glibc build (${found.pkg}) is installed,` +
       " and it cannot run without glibc." +
       `\nInstall the musl build: npm install -g ${muslPkg}` +
-      " (or reinstall qrsend with npm 9+ without --omit=optional / --no-optional).";
+      " (or reinstall qrsend-cli with npm 9+ without --omit=optional / --no-optional).";
   }
   return msg;
 }

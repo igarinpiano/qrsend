@@ -79,6 +79,7 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 ## リリース
 
 - パッケージ: crates.io の `qrsend`（CLI）/ `qrsend-core`、npm の `qrsend-cli`（launcher。コマンド名は `qrsend`。@ なしの `qrsend` は send / resend に似ているとして npm に拒否された）+ `qrsend-bin-<platform>`（8 種、`npm/assemble.py` の TARGETS）。`qrsend-wasm` は publish しない。
+- 公開状況（2026-10-07）: crates.io は 0.1.0 公開済み。npm は `qrsend-cli` と `qrsend-bin-*` のうち darwin / linux の 6 個が 0.1.0 公開済み。`qrsend-bin-win32-x64` / `-arm64` は npm サポートの spam 判定解除待ち（解除後に `scripts/npm-publish-remaining.sh 0.1.0`）。Trusted Publishing の登録と 0.1.1 の publish-all 実行はその後。
 - 手順は igarinpiano/dirlens と同じ方式。`.github/workflows/publish-all.yml` を手動実行（Actions → publish-all → Run workflow）すると GitHub Releases → npm → crates.io の順に公開する。認証は両レジストリとも Trusted Publishing（OIDC）で、トークンはリポジトリに置かない。
   - ビルドは `reusable-build-matrix.yml`（macOS/Windows はネイティブ、Linux は cross。glibc 下限 2.28 を検査。musl は `--no-default-features` で window 無し）。
   - npm の初回公開では `*-win32-*` という名前が spam 判定（403 Forbidden - Package name triggered spam detection）で拒否されやすい（dirlens でも発生）。npm サポートに whitelist を依頼して解除してもらう。途中で止まった公開は `scripts/npm-publish-remaining.sh <version> [--skip NAME]` で再開できる（公開済みは飛ばし、失敗しても続行し、全機種がそろうまで本体 `qrsend-cli` は保留。`--main` で先に公開できる）。
