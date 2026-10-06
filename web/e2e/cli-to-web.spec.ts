@@ -22,8 +22,12 @@ for (const [name, video] of [
         await expect(page.getByTestId("received-file")).toHaveText(["notes/a.txt", "notes/b.md"], { timeout: 60_000 });
       }
       // It is kept in the inbox.
-      await page.goto("./#/inbox");
-      await expect(page.getByText("Complete")).toBeVisible();
+      // The record is saved asynchronously, so retry until it shows up.
+      await expect(async () => {
+        await page.goto("./#/");
+        await page.goto("./#/inbox");
+        await expect(page.getByText("Complete")).toBeVisible({ timeout: 2_000 });
+      }).toPass({ timeout: 20_000 });
     } finally {
       await browser.close();
     }
