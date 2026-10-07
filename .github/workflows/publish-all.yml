@@ -30,8 +30,9 @@
 #
 # ADDING A PLATFORM LATER: its npm package does not exist yet, so the npm
 # stage publishes everything else and then fails naming it. Publish it once
-# with `scripts/npm-publish-remaining.sh <version>` and add its trusted
-# publisher; the next release includes it automatically.
+# with `scripts/npm-publish-remaining.sh <version> --trust` (which also adds
+# its trusted publisher); the next release includes it automatically. The
+# crates.io stage is skipped when the npm stage fails: run it again on its own.
 name: publish-all
 
 on:

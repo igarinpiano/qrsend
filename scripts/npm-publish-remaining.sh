@@ -7,6 +7,12 @@
 #
 # - Packages already on the registry at <version> are left alone.
 # - --skip NAME leaves a package out (repeatable).
+# - --try-name PKG=NAME first publishes a copy of platform package PKG under
+#   NAME, to find out whether npm accepts that name (its spam detection tends
+#   to reject new unscoped *-win32-* names). The outcome is only reported.
+# - --trust registers this repository's publish-all.yml (environment `npm`) as
+#   the trusted publisher of every package this run publishes (`npm trust`,
+#   npm 11.10+), so the next release can publish it from GitHub Actions.
 # - A failure does not stop the run; a summary is printed at the end.
 # - The main package `qrsend-cli` is published last, and only when every platform
 #   package exists afterwards (its optionalDependencies must all resolve), unless
@@ -15,17 +21,19 @@
 # Binaries come from the GitHub Release v<version> (qrsend-<version>-<target>
 # archives); README and LICENSE from the v<version> tag.
 #
-# Usage: scripts/npm-publish-remaining.sh <version> [--skip NAME]... [--main] [--dry-run]
+# Usage: scripts/npm-publish-remaining.sh <version> [--skip NAME]... [--try-name PKG=NAME]... [--trust] [--main] [--dry-run]
 set -uo pipefail
 
-VERSION="${1:?usage: scripts/npm-publish-remaining.sh <version> [--skip NAME]... [--main] [--dry-run]}"
+VERSION="${1:?usage: scripts/npm-publish-remaining.sh <version> [--skip NAME]... [--try-name PKG=NAME]... [--trust] [--main] [--dry-run]}"
 shift
-DRY=""; FORCE_MAIN=0; SKIP=()
+DRY=""; FORCE_MAIN=0; TRUST=0; SKIP=(); TRY=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY="--dry-run" ;;
     --main) FORCE_MAIN=1 ;;
+    --trust) TRUST=1 ;;
     --skip) SKIP+=("${2:?--skip needs a package name}"); shift ;;
+    --try-name) TRY+=("${2:?--try-name needs PKG=NAME}"); shift ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -67,6 +75,37 @@ skipped() { local s; for s in "${SKIP[@]+"${SKIP[@]}"}"; do [ "$s" = "$1" ] && r
 
 declare -a REPORT
 missing=0
+
+# Lets publish-all.yml publish later versions of a package through OIDC.
+trust() {
+  [ "$TRUST" = 1 ] && [ -z "$DRY" ] || return 0
+  if npm trust github "$1" --file publish-all.yml --repo "$REPO" --env npm --allow-publish --yes; then
+    REPORT+=("trusted publisher  $1")
+  else
+    REPORT+=("NO trusted publisher for $1 — add it on npmjs.com (publish-all.yml, environment npm)")
+  fi
+}
+
+for t in "${TRY[@]+"${TRY[@]}"}"; do
+  from="${t%%=*}"; to="${t#*=}"
+  if [ ! -d "$WORK/npm/$from" ]; then
+    REPORT+=("name not tried     $to — no package $from in this release")
+  elif published "$to"; then
+    REPORT+=("name accepted      $to@$VERSION is already published")
+  else
+    mkdir -p "$WORK/try/$to"
+    cp -R "$WORK/npm/$from/." "$WORK/try/$to/"
+    NAME="$to" node -e 'const fs = require("fs"), f = process.argv[1], p = JSON.parse(fs.readFileSync(f)); p.name = process.env.NAME; fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n")' "$WORK/try/$to/package.json"
+    echo
+    echo "== trying the name $to (a copy of $from@$VERSION)"
+    if (cd "$WORK/try/$to" && npm publish --access public $DRY); then
+      REPORT+=("name accepted      $to@$VERSION${DRY:+ (dry run)} — published as a copy of $from")
+      trust "$to"
+    else
+      REPORT+=("name REJECTED      $to (see the npm error above)")
+    fi
+  fi
+done
 publish_dir() {
   local dir="$1" name
   name="$(node -p "require('$dir/package.json').name")"
@@ -80,6 +119,7 @@ publish_dir() {
     if (cd "$dir" && npm publish --access public $DRY); then
       REPORT+=("published          $name@$VERSION${DRY:+ (dry run)}")
       [ -n "$DRY" ] && return 1  # still not on the registry
+      trust "$name"
     else
       REPORT+=("FAILED             $name@$VERSION (see the npm error above)"); return 1
     fi
