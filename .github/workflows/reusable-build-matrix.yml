@@ -8,7 +8,7 @@
 #   Native ubuntu-latest builds would require a new glibc ("Check glibc floor").
 #   `cross: true` is the tagged cross release, whose images link against old
 #   glibc versions; `cross: git` is cross from its main branch, used only for
-#   targets the release cannot build (LoongArch, current Android NDKs) — its
+#   targets the release cannot build (LoongArch, NetBSD, current Android NDKs) — its
 #   images are much newer (glibc 2.39), so it must not be used for the rest.
 # - `features: --no-default-features` drops the window display (minifb). It is
 #   used where dlopen of X11/Wayland cannot work (static musl) or makes no
@@ -68,7 +68,7 @@ jobs:
           - { target: x86_64-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
           - { target: i686-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
           - { target: x86_64-unknown-freebsd, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: x86_64-unknown-netbsd, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: x86_64-unknown-netbsd, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
           - { target: x86_64-unknown-illumos, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.optional || false }}
