@@ -9,7 +9,10 @@
 # - --skip NAME leaves a package out (repeatable).
 # - --try-name PKG=NAME first publishes a copy of platform package PKG under
 #   NAME, to find out whether npm accepts that name (its spam detection tends
-#   to reject new unscoped *-win32-* names). The outcome is only reported.
+#   to reject new unscoped *-win32-* names). If npm rejects it, the run goes on
+#   with the names as they are. If npm accepts it, the run stops there, before
+#   anything else is published: switch npm/assemble.py and npm/launcher.js to
+#   that name and run again.
 # - --trust registers this repository's publish-all.yml (environment `npm`) as
 #   the trusted publisher of every package this run publishes (`npm trust`,
 #   npm 11.10+), so the next release can publish it from GitHub Actions.
@@ -75,6 +78,7 @@ skipped() { local s; for s in "${SKIP[@]+"${SKIP[@]}"}"; do [ "$s" = "$1" ] && r
 
 declare -a REPORT
 missing=0
+accepted=0
 
 # Lets publish-all.yml publish later versions of a package through OIDC.
 trust() {
@@ -82,7 +86,7 @@ trust() {
   if npm trust github "$1" --file publish-all.yml --repo "$REPO" --env npm --allow-publish --yes; then
     REPORT+=("trusted publisher  $1")
   else
-    REPORT+=("NO trusted publisher for $1 — add it on npmjs.com (publish-all.yml, environment npm)")
+    REPORT+=("no trusted publisher added for $1 (see the npm error above; \`npm trust list $1\` shows what is registered)")
   fi
 }
 
@@ -101,6 +105,7 @@ for t in "${TRY[@]+"${TRY[@]}"}"; do
     if (cd "$WORK/try/$to" && npm publish --access public $DRY); then
       REPORT+=("name accepted      $to@$VERSION${DRY:+ (dry run)} — published as a copy of $from")
       trust "$to"
+      [ -n "$DRY" ] || accepted=$((accepted + 1))
     else
       REPORT+=("name REJECTED      $to (see the npm error above)")
     fi
@@ -126,6 +131,16 @@ publish_dir() {
   fi
   return 0
 }
+
+if [ "$accepted" -gt 0 ]; then
+  echo
+  echo "== summary"
+  printf '  %s\n' "${REPORT[@]}"
+  echo
+  echo "npm accepted a tried name, so nothing else was published. Use that name in"
+  echo "npm/assemble.py and npm/launcher.js, then run this script again without --try-name."
+  exit 3
+fi
 
 for dir in "$WORK/npm"/qrsend-bin-* "$WORK/npm"/@qrsend/*; do
   [ -d "$dir" ] || continue
