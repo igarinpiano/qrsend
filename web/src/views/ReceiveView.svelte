@@ -7,6 +7,7 @@
   import { bytes, duration, RateMeter } from "../lib/format";
   import { LINK_PREFIX, LanReceiver, LinkAssembler, canConnect, isOffer, type LinkMessage } from "../lib/lan";
   import { featureOn } from "../lib/prefs";
+  import { recoverFromLoadFailure } from "../lib/update";
   import { toDataUrl } from "../lib/qrdraw";
   import { feedbackWav } from "../lib/sound";
   import { copyText } from "../lib/save";
@@ -37,10 +38,12 @@
   let feedbackUrl = $state("");
   let feedbackAt = 0;
   let coreReady = false;
-  ready().then(() => {
-    coreReady = true;
-    if (st) showFeedback(st, true);
-  });
+  ready()
+    .then(() => {
+      coreReady = true;
+      if (st) showFeedback(st, true);
+    })
+    .catch(() => recoverFromLoadFailure());
 
   // A sender that listens with a microphone can be answered by sound: the
   // feedback code as a second of chirps from this device's speaker. Nothing

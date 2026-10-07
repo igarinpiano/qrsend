@@ -2,6 +2,16 @@
 // state, storage and extraction all run there, off the UI thread).
 import EngineWorker from "./engine.worker?worker";
 import type { EngineApi, EngineEvent } from "./engine-types";
+import { RELOAD_HINT, recoverFromLoadFailure } from "./update";
+
+/** Errors that mean a file of the app could not be fetched (rather than something about the transfer). */
+const LOAD_FAILURE = /failed to fetch|fetching|importing a module|load failed|networkerror|engine could not be started/i;
+
+/** If a new version went live, reloads into it; otherwise explains what to do. */
+async function loadFailure(e: Error): Promise<Error> {
+  await recoverFromLoadFailure();
+  return new Error(`A part of the app could not be loaded (${e.message}). ${RELOAD_HINT}`);
+}
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
@@ -21,13 +31,21 @@ function start(): Worker {
     const p = pending.get(msg.id);
     if (!p) return;
     pending.delete(msg.id);
-    if (msg.error !== undefined) p.reject(new Error(msg.error));
-    else p.resolve(msg.result);
+    if (msg.error !== undefined) {
+      const err = new Error(msg.error);
+      if (LOAD_FAILURE.test(msg.error)) loadFailure(err).then(p.reject);
+      else p.reject(err);
+    } else p.resolve(msg.result);
   };
   w.onerror = (e) => {
-    const err = new Error(e.message || "The background engine stopped unexpectedly.");
-    pending.forEach((p) => p.reject(err));
+    // Most often the worker's own script could not be fetched. Start a new
+    // worker on the next call instead of talking to a dead one.
+    if (worker === w) worker = undefined;
+    const waiting = [...pending.values()];
     pending.clear();
+    loadFailure(new Error(e.message || "the background engine could not be started")).then((err) =>
+      waiting.forEach((p) => p.reject(err)),
+    );
   };
   return w;
 }

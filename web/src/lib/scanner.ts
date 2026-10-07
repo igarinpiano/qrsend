@@ -2,6 +2,7 @@
 // or a captured screen, or frame by frame from a video file (a recording of a
 // sender's screen).
 import ScanWorker from "./scan.worker?worker";
+import { recoverFromLoadFailure } from "./update";
 
 export interface ScanStats {
   frames: number;
@@ -52,7 +53,17 @@ export class Scanner {
     } catch {
       /* no storage: nothing to force */
     }
-    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean; ms?: number }>) => {
+    // The decoder's own script or its WebAssembly could not be fetched: if a
+    // new version went live meanwhile, this page has to be reloaded into it.
+    let failed = false;
+    const loadFailed = () => {
+      if (failed) return;
+      failed = true;
+      recoverFromLoadFailure().catch(() => {});
+    };
+    this.worker.onerror = loadFailed;
+    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean; ms?: number; error?: string }>) => {
+      if (e.data.error && /fetch|wasm|import/i.test(e.data.error)) loadFailed();
       this.busy = false;
       this.stats.frames++;
       const now = performance.now();

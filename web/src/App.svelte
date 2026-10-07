@@ -5,6 +5,7 @@
   import DevicesView from "./views/DevicesView.svelte";
   import InboxView from "./views/InboxView.svelte";
   import PreviewView from "./views/PreviewView.svelte";
+  import { reloadForUpdate } from "./lib/update";
 
   function parse() {
     const [path, query = ""] = location.hash.replace(/^#/, "").split("?");
@@ -17,6 +18,25 @@
     const onHash = () => (route = parse());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
+  });
+
+  // A new version has been installed while this page was open. The page
+  // still runs the old one, whose files the new version has replaced, so it
+  // should be reloaded — at once where nothing is lost by that, on request
+  // where a transfer or a filled-in form may be open.
+  let updateReady = $state(false);
+  $effect(() => {
+    const sw = navigator.serviceWorker;
+    if (!sw) return;
+    const controlled = !!sw.controller;
+    const onChange = () => {
+      // The very first install takes control too; that is no update.
+      if (!controlled) return;
+      if (route.path === "/send" || route.path === "/receive") updateReady = true;
+      else reloadForUpdate();
+    };
+    sw.addEventListener("controllerchange", onChange);
+    return () => sw.removeEventListener("controllerchange", onChange);
   });
 
   const nav = [
@@ -57,6 +77,13 @@
   {/key}
 </main>
 
+{#if updateReady}
+  <div class="update" role="status">
+    <span>A new version of QRSend is ready.</span>
+    <button class="primary" onclick={() => location.reload()}>Reload</button>
+  </div>
+{/if}
+
 <footer class="small muted">
   <p>
     <a href="https://github.com/igarinpiano/qrsend">QRSend</a> is open source (Apache-2.0). Nothing you send or receive
@@ -66,6 +93,21 @@
 </footer>
 
 <style>
+  .update {
+    position: sticky;
+    bottom: 12px;
+    z-index: 20;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    margin: 12px 16px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+  }
   header {
     position: sticky;
     top: 0;

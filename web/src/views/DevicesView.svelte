@@ -5,6 +5,7 @@
   import { canKeepKeys, createIdentity, identityInfo, loadIdentity, renameIdentity, type StoredIdentity } from "../lib/keys";
   import { toDataUrl } from "../lib/qrdraw";
   import { copyText } from "../lib/save";
+  import { RELOAD_HINT, recoverFromLoadFailure } from "../lib/update";
   import Camera from "./Camera.svelte";
 
   let me = $state<StoredIdentity | undefined>();
@@ -37,7 +38,12 @@
     protectedKeys = await canKeepKeys();
   }
 
-  onMount(load);
+  onMount(() => {
+    load().catch(async (e) => {
+      await recoverFromLoadFailure();
+      error = `A part of the app could not be loaded (${e instanceof Error ? e.message : e}). ${RELOAD_HINT}`;
+    });
+  });
 
   async function create() {
     error = "";
