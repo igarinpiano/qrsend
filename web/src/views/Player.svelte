@@ -56,6 +56,8 @@
       feedback: (code, taken) => hear(code, taken),
       state: (state) => {
         link = state;
+        if (state === "offering") markLink("offered");
+        if (state === "connected") markLink("connected");
         engine.sendTextChannelUp(state === "connected").catch(() => {});
         // A lost connection: the screen takes over again, and a new offer goes out.
         if (state === "closed" && !finished) linkTimer = setTimeout(() => lan?.start().catch(() => {}), 2000);
@@ -73,6 +75,14 @@
   // Measurements (a preview feature): what this side spends its time on.
   const showStats = featureOn("stats");
   let eyeStats = $state<ScanStats | undefined>();
+  // When each step toward a network connection happened (seconds since sending began).
+  type LinkStep = "offered" | "answer" | "connected";
+  const began = performance.now();
+  let linkSteps = $state<Partial<Record<LinkStep, number>>>({});
+  function markLink(step: LinkStep) {
+    if (showStats && linkSteps[step] === undefined) linkSteps[step] = (performance.now() - began) / 1000;
+  }
+  const afterLink = (at: number | undefined) => (at === undefined ? "not yet" : `after ${at.toFixed(1)} s`);
   let linkStats = $state<LanSender["measurements"] | undefined>();
   const percent = (share: number) => `${Math.round(share * 100)}%`;
   let ear: Ear | undefined;
@@ -126,7 +136,11 @@
   const finished = $derived(!!report?.complete);
 
   function onTexts(texts: string[]) {
-    for (const t of texts) if (t.startsWith(LINK_PREFIX)) lan?.answer(t).catch((e) => console.warn("link answer:", e));
+    for (const t of texts) {
+      if (!t.startsWith(LINK_PREFIX)) continue;
+      markLink("answer");
+      lan?.answer(t).catch((e) => console.warn("link answer:", e));
+    }
     const text = texts.find((t) => t.startsWith(FEEDBACK_PREFIX));
     if (text) hear(text);
   }
@@ -367,8 +381,14 @@
         {/if}
       </span>
     </div>
-    {#if showStats && (linkStats || eyeStats)}
+    {#if showStats && (linkStats || eyeStats || linkSteps.offered !== undefined)}
       <div class="info small" data-testid="tx-stats">
+        {#if linkSteps.offered !== undefined}
+          <span data-testid="tx-steps">
+            Connection: offered {afterLink(linkSteps.offered)} · answer read {afterLink(linkSteps.answer)} · connected
+            {afterLink(linkSteps.connected)}
+          </span>
+        {/if}
         {#if linkStats}
           <span>
             Network: {linkStats.sent} pieces sent{linkStats.binary ? "" : " as text"}, {linkStats.onTheirWay} on their way · pace

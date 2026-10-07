@@ -96,12 +96,18 @@ for (const [color, name] of [
 
       const receiver = await context.newPage();
       await cameraFrom(receiver, "to-receiver");
+      await enablePreview(receiver, /Show measurements/);
       await receiver.goto("./#/receive");
       await broadcast(sender, "to-receiver", "canvas", 50, 1, 24, color);
       // The file list arrives…
       await expect(receiver.getByText("one-color.bin")).toBeVisible({ timeout: 30_000 });
       // …and so does the offer to connect, which the receiver answers.
       await expect(receiver.getByTestId("link-answer")).toBeVisible({ timeout: 30_000 });
+      // The measurements say when each step happened and what was read.
+      await expect(receiver.getByTestId("rx-steps")).toHaveText(
+        /file list after [\d.]+ s · offer to connect read after [\d.]+ s · answer shown\s+after [\d.]+ s · connected not yet\. Of \d+ codes read, \d+ were notices and\s+\d+ offers/,
+      );
+      console.log(`${name} only: ${(await receiver.getByTestId("rx-steps").innerText()).replace(/\s+/g, " ")}`);
     } finally {
       await browser.close();
     }

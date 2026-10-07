@@ -31,6 +31,16 @@
   let linkBytes = 0;
   let linkBytesAt = 0;
   let linkBytesSeen = 0;
+  // When each step toward the transfer happened, and what kinds of codes
+  // were read: for finding out which step a slow start is waiting for.
+  type Step = "first" | "list" | "offer" | "answer" | "connected";
+  let steps = $state<Partial<Record<Step, number>>>({});
+  let seen = $state({ codes: 0, notices: 0, offers: 0 });
+  function mark(step: Step) {
+    if (showStats && steps[step] === undefined) steps[step] = performance.now();
+  }
+  const after = (at: number | undefined) =>
+    at === undefined || steps.first === undefined ? "not yet" : `after ${((at - steps.first) / 1000).toFixed(1)} s`;
 
   // When the sender asks for it (two-way transfer), this screen shows it what
   // is still missing, so it sends only that and stops by itself. The code is
@@ -168,6 +178,7 @@
   function onLinkCode(code: string) {
     const msg = assembler.add(code);
     if (!msg || !isOffer(msg) || !canConnect || msg.session !== info?.session) return;
+    mark("offer");
     if (offer && offer.id === msg.id) return;
     offer = msg;
     connect();
@@ -197,6 +208,7 @@
         linkState = state;
         clearInterval(replyTimer);
         if (state === "connected") {
+          mark("connected");
           // Counts start over with every connection (the sender's do), and
           // the sender starts again from what is missing.
           linkCodes = [];
@@ -213,6 +225,7 @@
       const answer = await lan.accept(offer);
       await ready();
       answerUrl = toDataUrl(renderText(answer), 5);
+      mark("answer");
     } catch (e) {
       linkState = "closed";
       linkError = e instanceof Error ? e.message : String(e);
@@ -226,6 +239,7 @@
     }
     if (next.result && next.feedback) lingering = false;
     st = next;
+    if (next.info?.summary) mark("list");
     showFeedback(next);
     if (next.feedbackBySound) sound(!!next.result && completeSaid === 0);
     // The sender should hear at once that everything has arrived.
@@ -291,6 +305,12 @@
 
   function ontexts(texts: string[]) {
     if (!st || error) return;
+    if (showStats) {
+      mark("first");
+      seen.codes += texts.length;
+      seen.notices += texts.filter((t) => t.startsWith("QSC1-")).length;
+      seen.offers += texts.filter((t) => t.startsWith(LINK_PREFIX)).length;
+    }
     if (result) {
       // Everything is here, but a sender that asks for feedback only now
       // (a short transfer can be over before its first notice) must still be
@@ -317,6 +337,13 @@
   <Camera {ontexts} oncamera={(reads, dot) => (camera = { reads, dot })} {active} allowFile={!result} />
 {/if}
 
+{#if showStats && steps.first !== undefined}
+  <p class="small muted" data-testid="rx-steps">
+    Since the first code: file list {after(steps.list)} · offer to connect read {after(steps.offer)} · answer shown
+    {after(steps.answer)} · connected {after(steps.connected)}. Of {seen.codes} codes read, {seen.notices} were notices and
+    {seen.offers} offers.
+  </p>
+{/if}
 {#if showStats && intake.msPerBatch > 0 && !result}
   <p class="small muted" data-testid="rx-stats">
     Taking in: {intake.msPerBatch.toFixed(1)} ms per batch of {intake.codesPerBatch.toFixed(0)} pieces · {intake.waiting} waiting

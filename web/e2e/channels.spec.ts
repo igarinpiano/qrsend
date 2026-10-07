@@ -141,6 +141,7 @@ test("local network: after a handshake through the codes, the transfer travels o
     await expect(receiver.getByTestId("received-file")).toHaveText(["lan.bin"], { timeout: 90_000 });
     console.log(`local network: ${(data.length / 1024 / ((Date.now() - started) / 1000)).toFixed(0)} KiB/s`);
     console.log(await sender.getByTestId("tx-stats").innerText());
+    await expect(sender.getByTestId("tx-steps")).toHaveText(/offered after [\d.]+ s · answer read after [\d.]+ s · connected\s+after [\d.]+ s/);
     await expect(sender.getByText("The other device has everything.")).toBeVisible({ timeout: 30_000 });
     const [download] = await Promise.all([
       receiver.waitForEvent("download"),

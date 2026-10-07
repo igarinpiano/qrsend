@@ -125,6 +125,10 @@ pub fn symbols_per_pass(k: u32, redundancy: f64) -> u64 {
     k as u64 + (k as f64 * redundancy).ceil() as u64 + 2
 }
 
+/// One code in this many is a meta symbol while the file list is urgent (see
+/// `Scheduler::meta_every`).
+const URGENT_META_EVERY: u64 = 3;
+
 /// How often a window is extended before the schedule moves on regardless
 /// (each extension is a tenth of a pass), so that a receiver which never
 /// completes a segment cannot hold everything else up.
@@ -265,10 +269,27 @@ impl Scheduler {
         }
     }
 
+    /// How often a meta symbol is put in between at the moment.
+    ///
+    /// The file list of a large transfer is long (a checksum per segment:
+    /// 33 kB for 1 GiB, 28 codes at a usual size), and at one code in ten a
+    /// camera that reads a fifth of what is shown waited a minute for it. So
+    /// it comes more often while that helps: at the start of the stream, for
+    /// as many symbols as a pass holds, and for as long as a receiver that
+    /// answers says it lacks it.
+    fn meta_every(&self) -> u64 {
+        let m = self.config.meta_interval;
+        if self.meta_j < self.segments[0].n || self.live {
+            m.min(URGENT_META_EVERY)
+        } else {
+            m
+        }
+    }
+
     pub fn next_slot(&mut self) -> Slot {
         self.frame_no += 1;
         let m = self.config.meta_interval;
-        if m > 1 && self.meta_turn.due(m) && self.segments[0].needed {
+        if m > 1 && self.meta_turn.due(self.meta_every()) && self.segments[0].needed {
             return self.meta();
         }
         if !self.segments.iter().any(|s| s.needed) {
@@ -357,6 +378,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_long_file_list_comes_often_at_first_and_while_a_receiver_lacks_it() {
+        let segs: Vec<(u32, u32)> = (1..=50).map(|i| (i, 800)).collect();
+        let metas = |s: &mut Scheduler, codes: usize| {
+            (0..codes)
+                .filter(|_| s.next_slot().seg_index == META_INDEX)
+                .count()
+        };
+        // 28 symbols of file list, as for a 1 GiB file.
+        let mut s = Scheduler::new(ScheduleConfig::default(), 28, segs.clone());
+        // Often at first (one in three, plus its place among the segments)…
+        let early = metas(&mut s, 90);
+        assert!(early >= 30, "{early}");
+        // …then one in ten or so, as before…
+        metas(&mut s, 2000);
+        let later = metas(&mut s, 1000);
+        assert!((80..=130).contains(&later), "{later}");
+        // …and often again for a receiver that says it lacks it,
+        s.set_needed(|_| true);
+        let wanted = metas(&mut s, 300);
+        assert!(wanted >= 95, "{wanted}");
+        // but not at all once it has it.
+        s.set_needed(|i| i != META_INDEX);
+        assert_eq!(metas(&mut s, 300), 0);
     }
 
     #[test]
