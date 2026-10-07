@@ -22,7 +22,8 @@
 #        environment crates-io
 #      npmjs.com → each package (qrsend-cli and every qrsend-bin-*) → Settings →
 #      Trusted publishing → GitHub Actions:
-#        owner igarinpiano / repo qrsend / workflow publish-all.yml
+#        owner igarinpiano / repo qrsend / workflow publish-all.yml /
+#        environment npm
 # After that, every release is just this workflow with everything selected.
 name: publish-all
 
@@ -186,6 +187,7 @@ jobs:
       needs.build.result == 'success' &&
       needs.github-release.result != 'failure' && needs.github-release.result != 'cancelled'
     runs-on: ubuntu-latest
+    environment: npm
     permissions:
       contents: read
       id-token: write  # npm Trusted Publishing (OIDC)

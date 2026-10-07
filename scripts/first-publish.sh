@@ -87,4 +87,4 @@ fi
 echo
 echo "Done. Now add Trusted Publishing (see the header of .github/workflows/publish-all.yml):"
 echo "  crates.io: qrsend-core, qrsend   — workflow publish-all.yml, environment crates-io"
-echo "  npmjs.com: qrsend-cli and every qrsend-bin-* package — workflow publish-all.yml"
+echo "  npmjs.com: qrsend-cli and every qrsend-bin-* package — workflow publish-all.yml, environment npm"
