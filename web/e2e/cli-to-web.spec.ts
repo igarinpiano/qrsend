@@ -107,12 +107,13 @@ async function adoptIdentity(page: Page) {
           req.onsuccess = () => resolve(req.result);
           req.onerror = () => reject(req.error);
         });
-      let db = await open();
-      for (let i = 0; i < 50 && !db.objectStoreNames.contains("kv"); i++) {
-        db.close();
+      // Wait until the app has created its database: opening it earlier
+      // would create an empty one here, which the app then cannot upgrade.
+      for (let i = 0; i < 100; i++) {
+        if ((await indexedDB.databases()).some((d) => d.name === "qrsend" && (d.version ?? 0) >= 2)) break;
         await new Promise((r) => setTimeout(r, 100));
-        db = await open();
       }
+      const db = await open();
       const tx = db.transaction("kv", "readwrite");
       tx.objectStore("kv").put(secret, "identity");
       tx.objectStore("kv").put(

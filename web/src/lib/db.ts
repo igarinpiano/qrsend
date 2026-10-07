@@ -12,15 +12,16 @@ function db(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, VERSION);
     req.onupgradeneeded = (e) => {
       const d = req.result;
-      if (e.oldVersion < 1) {
-        d.createObjectStore("kv");
-        d.createObjectStore("sessions", { keyPath: "session" });
-      }
+      // Whatever is there (nothing, or a v1 database): end up with these stores.
+      const had = (name: string) => d.objectStoreNames.contains(name);
+      const hadSessions = had("sessions");
+      if (!had("kv")) d.createObjectStore("kv");
+      if (!hadSessions) d.createObjectStore("sessions", { keyPath: "session" });
       if (e.oldVersion === 1) {
         // v1 kept received segments in IndexedDB; they are in OPFS now, and
         // unfinished v1 sessions cannot be continued.
-        d.deleteObjectStore("segments");
-        req.transaction!.objectStore("sessions").clear();
+        if (had("segments")) d.deleteObjectStore("segments");
+        if (hadSessions) req.transaction!.objectStore("sessions").clear();
       }
     };
     req.onsuccess = () => resolve(req.result);
