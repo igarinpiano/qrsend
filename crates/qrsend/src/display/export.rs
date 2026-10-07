@@ -189,3 +189,19 @@ pub fn video(
     }
     result
 }
+
+/// Writes `count` frames as text, one per line ("-" = standard output).
+pub fn text(stream: &mut FrameStream, path: &Path, count: u64) -> Result<()> {
+    let mut out: Box<dyn Write> = if path.as_os_str() == "-" {
+        Box::new(BufWriter::new(std::io::stdout().lock()))
+    } else {
+        Box::new(BufWriter::new(
+            File::create(path).with_context(|| format!("cannot create {}", path.display()))?,
+        ))
+    };
+    for _ in 0..count {
+        writeln!(out, "{}", stream.next_text()?)?;
+    }
+    out.flush()?;
+    Ok(())
+}

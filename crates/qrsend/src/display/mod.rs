@@ -80,6 +80,13 @@ impl FrameStream {
         }
     }
 
+    /// The next frame as text (what a QR code would carry).
+    pub fn next_text(&mut self) -> Result<String> {
+        let frame = self.sender.next_frame()?;
+        self.frames += 1;
+        Ok(frame.to_qr_text())
+    }
+
     pub fn next_matrix(&mut self) -> Result<QrMatrix> {
         let frame = self.sender.next_frame()?;
         self.frames += 1;

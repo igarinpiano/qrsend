@@ -107,6 +107,19 @@ holds about 40 KB — over 1 MB/s at 30 fps when captured without loss. Reading
 finds one code, then walks the grid from it, so frames with hundreds of codes
 decode too. `--export-frames DIR` writes PNG frames instead.
 
+### Over anything that carries bytes
+
+Frames do not have to be pictures. `--export-text` writes them as lines of
+text and `recv --text` reads them, so the same resumable, verified transfer
+works over a serial line, a TCP connection, ssh or a file — and survives lost
+or garbled lines.
+
+```bash
+qrsend send big.iso --plain --export-text - | nc 192.168.1.20 9000   # sender
+nc -l 9000 | qrsend recv --text - -o ~/Downloads                     # receiver
+qrsend send notes/ --plain --export-text /dev/ttyUSB0                # serial
+```
+
 ## Web app
 
 The same protocol runs in the browser (Rust core compiled to WebAssembly):

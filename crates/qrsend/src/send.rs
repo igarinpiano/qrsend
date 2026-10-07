@@ -48,6 +48,12 @@ pub struct SendArgs {
     /// capture the screen; read it back with `qrsend recv --video`
     #[arg(long, value_name = "FILE", alias = "export-y4m")]
     pub export_video: Option<PathBuf>,
+    /// Write the frames as text, one per line, instead of displaying them
+    /// ("-" = standard output). For any channel that carries bytes: a serial
+    /// line, a TCP connection, ssh, a file. Read it with `qrsend recv --text`.
+    /// Frames are 1024 bytes of data each unless a QR size is given
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["export_frames", "export_video", "dense"])]
+    pub export_text: Option<PathBuf>,
     /// Maximum throughput for exports: fill the frame with as many codes as
     /// fit (same as --grid auto --size 1920x1080 --scale 2, and 30 fps for video)
     #[arg(long)]
@@ -152,6 +158,9 @@ fn parse_size(s: &str) -> Result<(usize, usize), String> {
 fn parse_ec(s: &str) -> Result<Ec, String> {
     s.parse()
 }
+
+/// Data bytes per frame for `--export-text` (a line of about 1600 characters).
+const TEXT_SYMBOL_SIZE: usize = 1024;
 
 pub fn run(args: SendArgs) -> Result<()> {
     let fps = args
@@ -282,7 +291,16 @@ pub fn run(args: SendArgs) -> Result<()> {
             }
         }
     };
-    let symbol_size = params.symbol_size();
+    // Text frames need not fit a QR code: larger ones cost less per byte.
+    let plain_text = args.export_text.is_some()
+        && args.qr_version.is_none()
+        && args.ecc.is_none()
+        && args.density == DensityArg::Auto;
+    let symbol_size = if plain_text {
+        TEXT_SYMBOL_SIZE
+    } else {
+        params.symbol_size()
+    };
     if symbol_size < MIN_SYMBOL_SIZE {
         bail!(
             "QR version {} with ECC {:?} is too small for QRSend frames",
@@ -299,6 +317,26 @@ pub fn run(args: SendArgs) -> Result<()> {
     let sender = Sender::new(layout, spool.source()?, config, only.as_deref());
     let mut stream = FrameStream::new(sender, params);
     let per_pass = stream.frames_per_pass();
+    if let Some(path) = &args.export_text {
+        let count = args
+            .frames
+            .unwrap_or((per_pass as f64 * args.passes).ceil().max(1.0) as u64);
+        eprintln!(
+            "Session {} · {}",
+            session_hex(spool.info.session_id),
+            spool.info.summary
+        );
+        display::export::text(&mut stream, path, count)?;
+        eprintln!(
+            "Wrote {count} frame(s) of {symbol_size} B as text to {}. Read them with: qrsend recv --text <file or ->",
+            if path.as_os_str() == "-" {
+                "standard output".to_string()
+            } else {
+                path.display().to_string()
+            }
+        );
+        return Ok(());
+    }
     let canvas = if exporting {
         Some(Canvas::new(params.modules(), grid, size, scale)?)
     } else {

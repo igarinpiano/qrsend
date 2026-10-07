@@ -34,6 +34,11 @@ pub struct RecvArgs {
     /// Read frames from a video (.y4m natively; other formats through ffmpeg)
     #[arg(long, value_name = "FILE")]
     pub video: Option<PathBuf>,
+    /// Read frames as text, one per line ("-" = standard input), as written
+    /// by `qrsend send --export-text` — from a serial line, a TCP connection,
+    /// ssh, a file…
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["images", "video", "camera"])]
+    pub text: Option<PathBuf>,
     /// Directory to save received files into
     #[arg(short, long, default_value = ".", value_name = "DIR")]
     pub out: PathBuf,
@@ -280,8 +285,35 @@ pub fn report(outcome: Outcome, stdout_text: bool) {
     }
 }
 
+/// Reads frames as lines of text and passes them on in batches.
+fn read_text(path: &std::path::Path, tx: crossbeam_channel::Sender<Vec<String>>) -> Result<()> {
+    use std::io::BufRead;
+    let reader: Box<dyn BufRead> = if path.as_os_str() == "-" {
+        Box::new(std::io::stdin().lock())
+    } else {
+        Box::new(std::io::BufReader::new(std::fs::File::open(path).map_err(
+            |e| anyhow::anyhow!("cannot open {}: {e}", path.display()),
+        )?))
+    };
+    let mut batch = Vec::new();
+    // A damaged line (bytes that are not text) is just a lost frame.
+    for line in BufRead::split(reader, b'\n') {
+        let line = String::from_utf8_lossy(&line?).trim().to_string();
+        if !line.is_empty() {
+            batch.push(line);
+        }
+        if batch.len() >= 32 && tx.send(std::mem::take(&mut batch)).is_err() {
+            return Ok(());
+        }
+    }
+    let _ = tx.send(batch);
+    Ok(())
+}
+
 pub fn run(args: RecvArgs) -> Result<()> {
-    let input = if let Some(dev) = &args.camera {
+    let input = if args.text.is_some() {
+        None
+    } else if let Some(dev) = &args.camera {
         let dev = if dev.is_empty() {
             crate::input::default_camera().to_string()
         } else {
@@ -290,13 +322,13 @@ pub fn run(args: RecvArgs) -> Result<()> {
         eprintln!(
             "Scanning camera {dev:?} — point it at the sender's screen (Ctrl-C to stop; progress is saved)."
         );
-        Input::Camera(dev)
+        Some(Input::Camera(dev))
     } else if let Some(v) = &args.video {
-        Input::Video(v.clone())
+        Some(Input::Video(v.clone()))
     } else if !args.images.is_empty() {
-        Input::Images(image_paths(&args.images)?)
+        Some(Input::Images(image_paths(&args.images)?))
     } else {
-        bail!("choose an input: --camera, --video FILE or --images PATH");
+        bail!("choose an input: --camera, --video FILE, --images PATH or --text FILE");
     };
     let threads = args
         .threads
@@ -315,7 +347,15 @@ pub fn run(args: RecvArgs) -> Result<()> {
 
     let (ftx, frx) = bounded::<LumaFrame>(threads * 2);
     let (ttx, trx) = unbounded::<Vec<String>>();
-    let producer = thread::spawn(move || input.produce(ftx));
+    let producer = match (input, args.text.clone()) {
+        (Some(input), _) => thread::spawn(move || input.produce(ftx)),
+        (None, Some(path)) => {
+            drop(ftx);
+            let ttx = ttx.clone();
+            thread::spawn(move || read_text(&path, ttx))
+        }
+        (None, None) => unreachable!("an input was chosen above"),
+    };
     let lattice = Arc::new(std::sync::Mutex::new(decode::Lattice::default()));
     for _ in 0..threads {
         let (frx, ttx, stop, lattice) = (frx.clone(), ttx.clone(), stop.clone(), lattice.clone());

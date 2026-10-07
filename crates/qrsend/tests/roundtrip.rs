@@ -323,3 +323,37 @@ fn compressed_video_roundtrip_through_ffmpeg() {
     env.ok(&["recv", "--video", "dense.mp4", "-o", "out"]);
     assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(200_000));
 }
+
+#[test]
+fn text_frames_through_a_lossy_byte_channel() {
+    let env = Env::new("pipe");
+    fs::write(env.path("data.bin"), noise(300_000)).unwrap();
+    env.ok(&[
+        "send",
+        "--plain",
+        "data.bin",
+        "--seg-shift",
+        "16",
+        "--passes",
+        "1.3",
+        "--export-text",
+        "frames.txt",
+    ]);
+    // The channel loses every tenth line, garbles some and adds noise of its own.
+    let text = fs::read_to_string(env.path("frames.txt")).unwrap();
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        match i % 10 {
+            3 => {}
+            6 => out.extend_from_slice(&line.as_bytes()[..line.len() / 2]),
+            _ => out.extend_from_slice(line.as_bytes()),
+        }
+        out.extend_from_slice(if i % 4 == 0 { b"\r\n" } else { b"\n" });
+        if i % 25 == 0 {
+            out.extend_from_slice(b"login: \xff\xfe garbage\n\n");
+        }
+    }
+    fs::write(env.path("received.txt"), out).unwrap();
+    env.ok(&["recv", "--text", "received.txt", "-o", "out"]);
+    assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(300_000));
+}
