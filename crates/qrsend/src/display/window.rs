@@ -31,6 +31,9 @@ pub fn run(stream: &mut FrameStream, mut fps: f64, grid: GridSpec, min_scale: us
     let (mut cols, mut rows) = (1, 1);
 
     while window.is_open() && !window.is_key_down(Key::Escape) && !window.is_key_down(Key::Q) {
+        if stream.finished() {
+            break;
+        }
         if window.is_key_pressed(Key::Space, KeyRepeat::No) {
             paused = !paused;
         }

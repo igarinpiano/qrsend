@@ -49,6 +49,9 @@ pub fn run(stream: &mut FrameStream, mut fps: f64) -> Result<()> {
     let mut paused = false;
     let mut next = Instant::now();
     loop {
+        if stream.finished() {
+            break;
+        }
         if !paused && Instant::now() >= next {
             let m = stream.next_matrix()?;
             let dark = |x: isize, y: isize| {

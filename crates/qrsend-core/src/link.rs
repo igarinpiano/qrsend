@@ -13,6 +13,9 @@ pub const PREFIX: &str = "QSL1-";
 pub const KIND_OFFER: u8 = 1;
 /// The receiver accepts it.
 pub const KIND_ANSWER: u8 = 2;
+/// The sender listens for a TCP connection (see [`TcpOffer`]); the receiver
+/// connects, so no answer is needed.
+pub const KIND_TCP_OFFER: u8 = 3;
 
 const HEADER_LEN: usize = 8;
 const CHECK_LEN: usize = 2;
@@ -113,9 +116,129 @@ pub fn split(
         .collect())
 }
 
+/// A whole link message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkMessage {
+    pub session_id: u32,
+    pub kind: u8,
+    pub id: u8,
+    pub payload: Vec<u8>,
+}
+
+/// A message in the making: (session, kind, id, parts), and the parts seen.
+type Pending = ((u32, u8, u8, u8), Vec<Option<Vec<u8>>>);
+
+/// Puts link messages together from their codes, which arrive in any order
+/// and repeatedly.
+#[derive(Default)]
+pub struct Assembler {
+    pending: Vec<Pending>,
+}
+
+impl Assembler {
+    /// Returns the whole message whenever `text` completes (or repeats a
+    /// part of) one; `None` for anything else, other kinds of codes included.
+    pub fn add(&mut self, text: &str) -> Option<LinkMessage> {
+        let p = LinkPart::decode(text).ok()?;
+        let key = (p.session_id, p.kind, p.id, p.parts);
+        let at = match self.pending.iter().position(|(k, _)| *k == key) {
+            Some(at) => at,
+            None => {
+                if self.pending.len() >= 16 {
+                    self.pending.remove(0);
+                }
+                self.pending.push((key, vec![None; p.parts as usize]));
+                self.pending.len() - 1
+            }
+        };
+        let parts = &mut self.pending[at].1;
+        parts[p.part as usize] = Some(p.payload);
+        let whole: Option<Vec<&Vec<u8>>> = parts.iter().map(Option::as_ref).collect();
+        Some(LinkMessage {
+            session_id: p.session_id,
+            kind: p.kind,
+            id: p.id,
+            payload: whole?.into_iter().flatten().copied().collect(),
+        })
+    }
+}
+
+/// Payload of a [`KIND_TCP_OFFER`]: where the sender listens, and a key
+/// that only those who see its screen know (see docs/PROTOCOL.md §12.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpOffer {
+    pub port: u16,
+    pub key: [u8; 16],
+    /// Addresses to try, as text (IPv4 or IPv6).
+    pub addresses: Vec<String>,
+}
+
+impl TcpOffer {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = self.port.to_be_bytes().to_vec();
+        out.extend_from_slice(&self.key);
+        out.push(self.addresses.len() as u8);
+        for a in &self.addresses {
+            out.push(a.len() as u8);
+            out.extend_from_slice(a.as_bytes());
+        }
+        out
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<Self, LinkError> {
+        let mut rest = data;
+        let mut take = |n: usize| {
+            let (head, tail) = rest.split_at_checked(n).ok_or(LinkError::Malformed)?;
+            rest = tail;
+            Ok::<_, LinkError>(head)
+        };
+        let port = u16::from_be_bytes(take(2)?.try_into().unwrap());
+        let key = take(16)?.try_into().unwrap();
+        let count = take(1)?[0];
+        let mut addresses = Vec::new();
+        for _ in 0..count {
+            let len = take(1)?[0] as usize;
+            let a = std::str::from_utf8(take(len)?).map_err(|_| LinkError::Malformed)?;
+            addresses.push(a.to_string());
+        }
+        Ok(TcpOffer {
+            port,
+            key,
+            addresses,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assembler_takes_parts_in_any_order() {
+        let offer = TcpOffer {
+            port: 40123,
+            key: [7; 16],
+            addresses: vec!["192.168.1.20".into(), "fd00::1".into()],
+        };
+        let codes = split(5, KIND_TCP_OFFER, 1, &offer.to_bytes(), 40).unwrap();
+        assert!(codes.len() > 2);
+        let mut a = Assembler::default();
+        assert!(a.add("QSC1-ABC").is_none());
+        let mut whole = None;
+        for code in codes.iter().rev() {
+            assert!(whole.is_none());
+            whole = a.add(code);
+        }
+        let whole = whole.unwrap();
+        assert_eq!(
+            (whole.session_id, whole.kind, whole.id),
+            (5, KIND_TCP_OFFER, 1)
+        );
+        assert_eq!(TcpOffer::from_bytes(&whole.payload).unwrap(), offer);
+        // A repeated part gives the message again.
+        assert!(a.add(&codes[0]).is_some());
+        assert!(TcpOffer::from_bytes(&whole.payload[..10]).is_err());
+    }
 
     #[test]
     fn split_and_reassemble() {

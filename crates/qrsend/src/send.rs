@@ -5,18 +5,19 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use qrsend_core::frame::MIN_SYMBOL_SIZE;
+use qrsend_core::frame::{self, MIN_SYMBOL_SIZE};
 use qrsend_core::manifest::session_hex;
 use qrsend_core::payload::PackOptions;
 use qrsend_core::qr::{self, Density, Ec, QrParams};
 use qrsend_core::resume::ResumeCode;
 use qrsend_core::schedule::ScheduleConfig;
-use qrsend_core::sender::Sender;
+use qrsend_core::sender::{Sender, SessionLayout};
+use qrsend_core::{base45, link};
 
 use crate::display::export::Canvas;
 use crate::display::{self, FrameStream, GridSpec};
 use crate::spool::{Content, Spool, SpoolOptions};
-use crate::{collect, identity, util};
+use crate::{collect, identity, net, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DisplayKind {
@@ -116,6 +117,20 @@ pub struct SendArgs {
     /// Name shown to the receiver (defaults to this device's name)
     #[arg(long)]
     pub sender_name: Option<String>,
+    /// Also offer a direct connection over the local network: the stream
+    /// then carries a code telling a receiving `qrsend` where to connect, and
+    /// once it does the transfer travels through the connection as well
+    /// (encrypted with a key from that code), far faster than through a
+    /// camera. Sending ends by itself when the receiver has everything
+    #[arg(long)]
+    pub lan: bool,
+    /// Address to announce for --lan instead of the ones found (for a machine
+    /// on several networks)
+    #[arg(long, value_name = "ADDRESS", requires = "lan")]
+    pub lan_address: Option<String>,
+    /// Port to listen on for --lan (default: any free one)
+    #[arg(long, value_name = "PORT", default_value_t = 0, requires = "lan")]
+    pub lan_port: u16,
     /// log2 of the segment size in bytes (advanced)
     #[arg(long, default_value_t = 20, hide = true, value_parser = clap::value_parser!(u8).range(12..=30))]
     pub seg_shift: u8,
@@ -317,6 +332,50 @@ pub fn run(args: SendArgs) -> Result<()> {
     let sender = Sender::new(layout, spool.source()?, config, only.as_deref());
     let mut stream = FrameStream::new(sender, params);
     let per_pass = stream.frames_per_pass();
+    if args.lan {
+        let (listener, offer) = net::listen(args.lan_address.as_deref(), args.lan_port)?;
+        // The offer travels as codes like the frames do, so its parts must
+        // be no longer than a frame.
+        let room = base45::encoded_len(frame::OVERHEAD + symbol_size);
+        let codes = link::split(
+            spool.info.session_id,
+            link::KIND_TCP_OFFER,
+            rand::random(),
+            &offer.to_bytes(),
+            room,
+        )?;
+        eprintln!(
+            "Offering a network connection at {} port {}.",
+            offer.addresses.join(", "),
+            offer.port
+        );
+        let (events_tx, events) = crossbeam_channel::unbounded();
+        let wide = SessionLayout {
+            symbol_size: net::SYMBOL_SIZE,
+            ..layout
+        };
+        let id = spool.info.session_id;
+        net::serve(
+            listener,
+            offer,
+            wide,
+            move || Spool::open(id)?.source(),
+            events_tx,
+        );
+        stream.with_link(codes, events);
+    }
+    // After an export there is no display loop to end; with --lan the
+    // transfer goes on through the connection until the receiver has it all.
+    let serve_until_done = |stream: &mut FrameStream| {
+        if !args.lan {
+            return;
+        }
+        eprintln!("Waiting for the receiver on the network (Ctrl-C to stop)…");
+        while !stream.finished() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        eprintln!("The receiver has everything.");
+    };
     if let Some(path) = &args.export_text {
         let count = args
             .frames
@@ -335,6 +394,7 @@ pub fn run(args: SendArgs) -> Result<()> {
                 path.display().to_string()
             }
         );
+        serve_until_done(&mut stream);
         return Ok(());
     }
     let canvas = if exporting {
@@ -397,6 +457,7 @@ pub fn run(args: SendArgs) -> Result<()> {
             eprintln!("Wrote {what} at {fps} fps to {}", path.display());
             eprintln!("Read it back (or a recording of it) with: qrsend recv --video <file>");
         }
+        serve_until_done(&mut stream);
     } else {
         match args.display {
             DisplayKind::Terminal => display::terminal::run(&mut stream, fps)?,
@@ -407,11 +468,15 @@ pub fn run(args: SendArgs) -> Result<()> {
                 bail!("this build has no window support; use --display terminal")
             }
         }
-        eprintln!(
-            "Sent {} codes ({} pass(es)).",
-            stream.frames,
-            stream.pass() + 1
-        );
+        if stream.finished() {
+            eprintln!("The receiver has everything.");
+        } else {
+            eprintln!(
+                "Sent {} codes ({} pass(es)).",
+                stream.frames,
+                stream.pass() + 1
+            );
+        }
     }
     eprintln!(
         "To resend later: qrsend send --session {}  (or --resume <code> from the receiver)",

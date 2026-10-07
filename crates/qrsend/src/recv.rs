@@ -7,10 +7,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use crossbeam_channel::{bounded, unbounded};
+use crossbeam_channel::{bounded, never, select, tick, unbounded};
 use indicatif::{ProgressBar, ProgressStyle};
 use qrsend_core::crypto::{self, DeviceIdentity, OpenMetaError};
+use qrsend_core::direct::{self, Record};
 use qrsend_core::frame::{FLAG_ENCRYPTED, Frame};
+use qrsend_core::link::{self, TcpOffer};
 use qrsend_core::manifest::{Manifest, session_hex};
 use qrsend_core::payload::segment_hash;
 use qrsend_core::receiver::{Event, Receiver, SessionParams};
@@ -19,7 +21,7 @@ use qrsend_core::resume::ResumeCode;
 use crate::extract::{self, Conflict, ExtractOptions, Outcome};
 use crate::input::{Input, LumaFrame, image_paths};
 use crate::store::Store;
-use crate::{decode, identity, util};
+use crate::{decode, identity, net, util};
 
 #[derive(clap::Args)]
 pub struct RecvArgs {
@@ -57,6 +59,10 @@ pub struct RecvArgs {
     /// Only accept this session (8 hex digits)
     #[arg(long, value_name = "ID")]
     pub session: Option<String>,
+    /// Do not connect to a sender that offers a network connection
+    /// (`qrsend send --lan`); read the codes only
+    #[arg(long)]
+    pub no_lan: bool,
     /// Decoder threads (default: all cores)
     #[arg(long)]
     pub threads: Option<usize>,
@@ -388,12 +394,66 @@ pub fn run(args: RecvArgs) -> Result<()> {
     let mut meter = util::RateMeter::new(Duration::from_secs(5));
     let mut last_log = Instant::now();
 
-    'outer: for texts in trx.iter() {
-        scanned += 1;
-        for text in texts {
-            let Ok(frame) = Frame::from_qr_text(&text) else {
-                continue;
-            };
+    // A sender may offer a network connection (`qrsend send --lan`). What
+    // arrives through it joins what the codes bring: frames are frames.
+    let mut offers = link::Assembler::default();
+    let mut link: Option<net::Link> = None;
+    let mut tried_offer: Option<u8> = None;
+    let mut link_taken = 0u64;
+    let mut link_reported = 0u64;
+    let mut last_report = Instant::now();
+    let mut codes_open = true;
+    let (no_codes, no_messages) = (never::<Vec<String>>(), never::<Vec<u8>>());
+    let report_due = tick(net::REPLY_EVERY);
+
+    'outer: loop {
+        let mut frames = Vec::new();
+        let mut offered = Vec::new();
+        select! {
+            recv(if codes_open { &trx } else { &no_codes }) -> texts => match texts {
+                Ok(texts) => {
+                    scanned += 1;
+                    for text in texts {
+                        if text.starts_with(link::PREFIX) {
+                            offered.push(text);
+                        } else if let Ok(frame) = Frame::from_qr_text(&text) {
+                            frames.push(frame);
+                        }
+                    }
+                }
+                // The input is used up; a connection may still be delivering.
+                Err(_) => {
+                    codes_open = false;
+                    if link.is_none() {
+                        break 'outer;
+                    }
+                }
+            },
+            recv(link.as_ref().map_or(&no_messages, |l| &l.messages)) -> message => match message {
+                Ok(message) => {
+                    if link_taken == 0 {
+                        say(&pb, "Receiving over the network.");
+                    }
+                    for record in direct::unpack(&message) {
+                        link_taken += 1;
+                        if let Record::Frame(frame) = Record::parse(record) {
+                            frames.push(frame);
+                        }
+                    }
+                }
+                Err(_) => {
+                    if link_taken > 0 {
+                        say(&pb, "The network connection ended; reading the codes.");
+                    }
+                    link = None;
+                    if !codes_open {
+                        break 'outer;
+                    }
+                }
+            },
+            recv(report_due) -> _ => {}
+        }
+        for frame in frames {
             for event in rx.push(frame) {
                 match event {
                     Event::Locked(p) => {
@@ -495,6 +555,48 @@ pub fn run(args: RecvArgs) -> Result<()> {
             }
             pb.set_message(line);
         }
+        for text in offered {
+            let Some(message) = offers.add(&text) else {
+                continue;
+            };
+            let ours = rx
+                .params()
+                .is_some_and(|p| p.session_id == message.session_id);
+            if message.kind != link::KIND_TCP_OFFER
+                || args.no_lan
+                || !ours
+                || link.is_some()
+                || tried_offer == Some(message.id)
+            {
+                continue;
+            }
+            if let Ok(offer) = TcpOffer::from_bytes(&message.payload) {
+                tried_offer = Some(message.id);
+                link_taken = 0;
+                link_reported = 0;
+                say(
+                    &pb,
+                    format!(
+                        "The sender offers a network connection ({}); connecting…",
+                        offer.addresses.join(", ")
+                    ),
+                );
+                link = Some(net::connect(offer, message.session_id));
+            }
+        }
+        // The sender goes by these reports: what has been taken in, and
+        // what is still missing.
+        if let Some(l) = &link
+            && link_taken != link_reported
+            && last_report.elapsed() >= net::REPLY_EVERY
+            && let Some(feedback) = rx.feedback(false)
+        {
+            link_reported = link_taken;
+            last_report = Instant::now();
+            let _ = l
+                .replies
+                .send(format!("A{link_taken}\n{}", feedback.encode()));
+        }
         if rx.is_complete() || stop.load(Ordering::Relaxed) {
             break 'outer;
         }
@@ -519,6 +621,15 @@ pub fn run(args: RecvArgs) -> Result<()> {
         );
         eprintln!("{}", resume_hint(id, &s.store.missing()));
         std::process::exit(2);
+    }
+    // Everything is verified and stored: a sender on the network may stop.
+    if let Some(l) = link.take() {
+        if let Some(feedback) = rx.feedback(true) {
+            let _ = l
+                .replies
+                .send(format!("A{link_taken}\n{}", feedback.encode()));
+        }
+        l.finish();
     }
     let manifest = s.manifest.clone().expect("complete session has a manifest");
     let opts = ExtractOptions {

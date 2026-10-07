@@ -8,6 +8,7 @@ mod extract;
 mod identity;
 mod inbox;
 mod input;
+mod net;
 mod paths;
 mod recv;
 mod send;
@@ -37,7 +38,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Show files, folders or text as a QR code stream
-    Send(send::SendArgs),
+    Send(Box<send::SendArgs>),
     /// Receive a QR code stream from a video or images
     Recv(recv::RecvArgs),
     /// Show this device's ID (for others to encrypt to it)
@@ -80,7 +81,7 @@ fn main() {
 
 fn run() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Send(args) => send::run(args),
+        Cmd::Send(args) => send::run(*args),
         Cmd::Recv(args) => recv::run(args),
         Cmd::Id(args) => devices::id(args),
         Cmd::Devices(cmd) => devices::devices(cmd),

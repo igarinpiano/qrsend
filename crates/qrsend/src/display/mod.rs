@@ -8,9 +8,11 @@ pub mod window;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use crossbeam_channel::Receiver;
 use qrsend_core::qr::{self, QUIET, QrMatrix, QrParams};
 use qrsend_core::sender::Sender;
 
+use crate::net::LinkEvent;
 use crate::spool::FileSource;
 use crate::util;
 
@@ -68,7 +70,18 @@ pub struct FrameStream {
     pub params: QrParams,
     pub frames: u64,
     started: Instant,
+    /// Codes besides frames, repeated in the stream: the offer to connect
+    /// over the network.
+    extras: Vec<String>,
+    since_extra: u64,
+    extra_turn: usize,
+    link: Option<Receiver<LinkEvent>>,
+    link_up: bool,
+    finished: bool,
 }
+
+/// While an offer is waiting for a receiver, every so many codes is one of it.
+const EXTRA_EVERY: u64 = 6;
 
 impl FrameStream {
     pub fn new(sender: Sender<FileSource>, params: QrParams) -> Self {
@@ -77,30 +90,74 @@ impl FrameStream {
             params,
             frames: 0,
             started: Instant::now(),
+            extras: Vec::new(),
+            since_extra: 0,
+            extra_turn: 0,
+            link: None,
+            link_up: false,
+            finished: false,
         }
     }
 
-    /// The next frame as text (what a QR code would carry).
+    /// Mixes an offer to connect over the network into the stream, and
+    /// follows what the connection reports.
+    pub fn with_link(&mut self, offer: Vec<String>, events: Receiver<LinkEvent>) {
+        self.extras = offer;
+        self.link = Some(events);
+    }
+
+    /// Takes in what the network connection reported since the last call.
+    fn poll(&mut self) {
+        let Some(events) = &self.link else { return };
+        for event in events.try_iter() {
+            match event {
+                // The connection brings the transfer from its start: the
+                // screen goes on from its end, so both bring something.
+                LinkEvent::Up => {
+                    self.link_up = true;
+                    self.sender.set_backwards(true);
+                }
+                LinkEvent::Down => {
+                    self.link_up = false;
+                    self.sender.set_backwards(false);
+                    // What the receiver said it has still holds, but
+                    // nothing tells any more when a window is complete.
+                    self.sender.receiver_quiet();
+                }
+                LinkEvent::Feedback(f) => {
+                    self.finished |= f.complete;
+                    self.sender.apply_feedback(f);
+                }
+            }
+        }
+    }
+
+    /// The receiver reported (through the network connection) that it has
+    /// everything.
+    pub fn finished(&mut self) -> bool {
+        self.poll();
+        self.finished
+    }
+
+    /// The next code of the stream as text: a frame, or now and then a part
+    /// of the offer.
     pub fn next_text(&mut self) -> Result<String> {
-        let frame = self.sender.next_frame()?;
+        self.poll();
         self.frames += 1;
-        Ok(frame.to_qr_text())
+        if !self.extras.is_empty() && !self.link_up {
+            self.since_extra += 1;
+            if self.since_extra.is_multiple_of(EXTRA_EVERY) {
+                self.extra_turn = (self.extra_turn + 1) % self.extras.len();
+                return Ok(self.extras[self.extra_turn].clone());
+            }
+        }
+        Ok(self.sender.next_frame()?.to_qr_text())
     }
 
     pub fn next_matrix(&mut self) -> Result<QrMatrix> {
-        let frame = self.sender.next_frame()?;
-        self.frames += 1;
-        let text = frame.to_qr_text();
-        qr::render(&text, self.params).with_context(|| {
-            format!(
-                "frame {} ({} bytes, {} chars, segment {}, esi {})",
-                self.frames,
-                frame.encoded_len(),
-                text.len(),
-                frame.header.seg_index,
-                frame.header.esi
-            )
-        })
+        let text = self.next_text()?;
+        qr::render(&text, self.params)
+            .with_context(|| format!("code {} ({} characters)", self.frames, text.len()))
     }
 
     /// The next `n` codes. Rendering (mask selection) dominates the cost, so
@@ -110,9 +167,8 @@ impl FrameStream {
             return (0..n).map(|_| self.next_matrix()).collect();
         }
         let texts = (0..n)
-            .map(|_| self.sender.next_frame().map(|f| f.to_qr_text()))
-            .collect::<std::io::Result<Vec<_>>>()?;
-        self.frames += n as u64;
+            .map(|_| self.next_text())
+            .collect::<Result<Vec<_>>>()?;
         let params = self.params;
         let threads = std::thread::available_parallelism()
             .map(|t| t.get())
@@ -161,6 +217,13 @@ impl FrameStream {
         let left = per_pass - shown;
         let per_second = fps * codes as f64;
         let rate = self.symbol_size() as f64 * per_second;
+        if self.link_up {
+            return format!(
+                "sending over the network · the screen adds ~{}/s · running {}",
+                util::human_bytes(rate as u64),
+                util::human_duration(self.started.elapsed().as_secs_f64())
+            );
+        }
         format!(
             "pass {} · {} of {} codes, {} left ({}) · {:.1} fps × {} · ~{}/s · running {}",
             self.pass() + 1,

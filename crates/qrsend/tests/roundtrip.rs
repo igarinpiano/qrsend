@@ -357,3 +357,84 @@ fn text_frames_through_a_lossy_byte_channel() {
     env.ok(&["recv", "--text", "received.txt", "-o", "out"]);
     assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(300_000));
 }
+
+#[test]
+fn a_network_connection_carries_what_the_codes_did_not() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let env = Env::new("lan");
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let data: Vec<u8> = (0..3_000_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
+    fs::write(env.path("big.bin"), &data).unwrap();
+
+    // The sender writes a few codes (a tiny part of the transfer, with the
+    // offer to connect among them) and then serves whoever connects.
+    let mut sender = Command::new(env!("CARGO_BIN_EXE_qrsend"))
+        .args([
+            "send",
+            "big.bin",
+            "--plain",
+            "--no-compress",
+            "--lan",
+            "--lan-address",
+            "127.0.0.1",
+            "--export-frames",
+            "frames",
+            "--frames",
+            "60",
+        ])
+        .current_dir(&env.root)
+        .env("QRSEND_DATA_DIR", env.path("me/data"))
+        .env("QRSEND_CACHE_DIR", env.path("me/cache"))
+        .env("QRSEND_CONFIG_DIR", env.path("me/config"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (said, heard) = mpsc::channel::<String>();
+    let stderr = sender.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = said.send(line);
+        }
+    });
+    let wait_for = |what: &str| {
+        loop {
+            let line = heard
+                .recv_timeout(Duration::from_secs(60))
+                .unwrap_or_else(|_| panic!("the sender never said {what:?}"));
+            if line.contains(what) {
+                return;
+            }
+        }
+    };
+    wait_for("Waiting for the receiver on the network");
+
+    // A receiver that keeps to the codes gets what 60 codes hold: not much.
+    let alone = env.run_as(
+        "other",
+        &["recv", "--images", "frames", "--no-lan", "-o", "alone"],
+    );
+    assert_eq!(alone.status.code(), Some(2));
+    assert!(!env.path("alone/big.bin").exists());
+
+    // One that takes the offer gets everything through the connection.
+    let out = env.run_as("them", &["recv", "--images", "frames", "-o", "out"]);
+    let log = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{log}");
+    assert!(log.contains("Receiving over the network."), "{log}");
+    assert_eq!(fs::read(env.path("out/big.bin")).unwrap(), data);
+
+    // And the sender, told so, stops by itself.
+    wait_for("The receiver has everything.");
+    assert!(sender.wait().unwrap().success());
+}
