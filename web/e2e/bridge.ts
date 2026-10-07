@@ -41,12 +41,21 @@ export async function cameraFrom(page: Page, channel: string) {
  * `channel` every `everyMs`, enlarged by `scale` on a white ground `margin`
  * pixels wide all around.
  */
-export async function broadcast(page: Page, channel: string, selector: string, everyMs: number, scale = 1, margin = 24) {
+export async function broadcast(
+  page: Page,
+  channel: string,
+  selector: string,
+  everyMs: number,
+  scale = 1,
+  margin = 24,
+  /** Pass on only this color of the picture, as gray (0 red, 1 green, 2 blue): a camera that makes out one color. */
+  only = -1,
+) {
   await page.evaluate(
-    ([name, sel, every, zoom, margin]) => {
+    ([name, sel, every, zoom, margin, only]) => {
       const out = new BroadcastChannel(name);
       const stage = document.createElement("canvas");
-      const ctx = stage.getContext("2d")!;
+      const ctx = stage.getContext("2d", { willReadFrequently: only >= 0 })!;
       setInterval(async () => {
         const el = document.querySelector(sel) as HTMLCanvasElement | HTMLImageElement | null;
         if (!el) return;
@@ -58,9 +67,15 @@ export async function broadcast(page: Page, channel: string, selector: string, e
         ctx.fillRect(0, 0, stage.width, stage.height);
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(el, margin, margin, w * zoom, h * zoom);
+        if (only >= 0) {
+          const picture = ctx.getImageData(0, 0, stage.width, stage.height);
+          const d = picture.data;
+          for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = d[i + only];
+          ctx.putImageData(picture, 0, 0);
+        }
         out.postMessage(await createImageBitmap(stage));
       }, every);
     },
-    [channel, selector, everyMs, scale, margin] as const,
+    [channel, selector, everyMs, scale, margin, only] as const,
   );
 }

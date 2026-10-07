@@ -10,6 +10,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use crossbeam_channel::Receiver;
 use qrsend_core::qr::{self, QUIET, QrMatrix, QrParams};
+use qrsend_core::schedule::Recurring;
 use qrsend_core::sender::Sender;
 
 use crate::net::LinkEvent;
@@ -73,7 +74,7 @@ pub struct FrameStream {
     /// Codes besides frames, repeated in the stream: the offer to connect
     /// over the network.
     extras: Vec<String>,
-    since_extra: u64,
+    extra_due: Recurring,
     extra_turn: usize,
     link: Option<Receiver<LinkEvent>>,
     link_up: bool,
@@ -91,7 +92,7 @@ impl FrameStream {
             frames: 0,
             started: Instant::now(),
             extras: Vec::new(),
-            since_extra: 0,
+            extra_due: Recurring::new(EXTRA_EVERY - 1),
             extra_turn: 0,
             link: None,
             link_up: false,
@@ -145,8 +146,9 @@ impl FrameStream {
         self.poll();
         self.frames += 1;
         if !self.extras.is_empty() && !self.link_up {
-            self.since_extra += 1;
-            if self.since_extra.is_multiple_of(EXTRA_EVERY) {
+            // Never at a fixed distance, which would keep the offer to one
+            // place in a grid (see `Recurring`).
+            if self.extra_due.due(EXTRA_EVERY) {
                 self.extra_turn = (self.extra_turn + 1) % self.extras.len();
                 return Ok(self.extras[self.extra_turn].clone());
             }

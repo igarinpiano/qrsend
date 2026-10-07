@@ -63,3 +63,47 @@ test("automatic speed: the sender shows more codes once the feedback says they a
     await browser.close();
   }
 });
+
+// Found on real devices: a phone's camera made out only one of the three
+// colors of color codes. The data got through (any code will do), but the
+// file list, the request for feedback and the offer to connect never did:
+// each of them was always drawn in the same one of the other two colors.
+for (const [color, name] of [
+  [0, "red"],
+  [1, "green"],
+  [2, "blue"],
+] as const) {
+  test(`color codes: a camera that makes out only ${name} still learns everything`, async ({ playwright, baseURL }) => {
+    const browser = await playwright.chromium.launch({
+      args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+    });
+    try {
+      const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1000, height: 700 } });
+      const sender = await context.newPage();
+      await cameraFrom(sender, "to-sender");
+      // An offer to connect makes notices and offers frequent, as it was when this was found.
+      await enablePreview(sender, /Two-way transfer/, /Color codes/, /Local network boost/);
+      await sender.goto("./#/send");
+      await sender
+        .locator('input[type="file"]')
+        .first()
+        .setInputFiles({ name: "one-color.bin", mimeType: "application/octet-stream", buffer: crypto.randomBytes(2_000_000) });
+      await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+      await sender.getByLabel("Density").selectOption("low");
+      await sender.getByLabel("Codes on screen").selectOption("1");
+      await sender.getByRole("button", { name: "Start sending" }).click();
+      await expect(sender.getByText("×3 colors")).toBeVisible();
+
+      const receiver = await context.newPage();
+      await cameraFrom(receiver, "to-receiver");
+      await receiver.goto("./#/receive");
+      await broadcast(sender, "to-receiver", "canvas", 50, 1, 24, color);
+      // The file list arrives…
+      await expect(receiver.getByText("one-color.bin")).toBeVisible({ timeout: 30_000 });
+      // …and so does the offer to connect, which the receiver answers.
+      await expect(receiver.getByTestId("link-answer")).toBeVisible({ timeout: 30_000 });
+    } finally {
+      await browser.close();
+    }
+  });
+}

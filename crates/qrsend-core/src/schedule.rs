@@ -22,6 +22,57 @@ impl Default for ScheduleConfig {
     }
 }
 
+/// Says when something that recurs in the stream (a meta symbol, a notice,
+/// an offer to connect) takes the place of a data code: every so many codes
+/// on average, but never at a fixed distance.
+///
+/// A fixed distance locks such codes to one place in the picture. With three
+/// codes per picture (color codes) and one in six being a notice, every
+/// notice was in the first of the three colors, and every meta symbol in the
+/// third; a camera that made out only the second color never learned what
+/// the transfer was, nor that a connection was on offer. The same happens
+/// with grids, to a receiver that cannot see one corner. So the distance
+/// varies by one either way, which over time visits every place.
+#[derive(Debug, Clone)]
+pub struct Recurring {
+    since: u64,
+    gap: u64,
+    state: u32,
+}
+
+impl Recurring {
+    /// `first`: codes to pass before the first turn (0: the very next one).
+    pub fn new(first: u64) -> Self {
+        Recurring {
+            since: 0,
+            gap: first,
+            state: 0x9E37_79B9,
+        }
+    }
+
+    /// Call once per code. True when this code is the recurring one's turn;
+    /// `every` is the distance to the next turn, give or take one.
+    pub fn due(&mut self, every: u64) -> bool {
+        if self.since < self.gap {
+            self.since += 1;
+            return false;
+        }
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 17;
+        self.state ^= self.state << 5;
+        // One code of the distance is this turn itself.
+        let jitter = (self.state % 3) as u64;
+        self.gap = (every.max(2) - 2 + jitter).max(1);
+        self.since = 0;
+        true
+    }
+
+    /// The next turn comes at once (something new is to be said).
+    pub fn soon(&mut self) {
+        self.gap = 0;
+    }
+}
+
 /// Which symbol of which segment to send next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slot {
@@ -51,6 +102,8 @@ pub struct Scheduler {
     /// Meta first, then the body segments in order.
     segments: Vec<Seg>,
     frame_no: u64,
+    /// When a meta symbol is put in between.
+    meta_turn: Recurring,
     meta_j: u64,
     pass: u64,
     /// The order segments are gone through in a pass (positions into
@@ -94,12 +147,14 @@ impl Scheduler {
                 }
             })
             .collect::<Vec<Seg>>();
+        let meta_turn = Recurring::new(config.meta_interval.saturating_sub(1));
         let mut s = Scheduler {
             config,
             order: (0..segments.len()).collect(),
             backwards: false,
             segments,
             frame_no: 0,
+            meta_turn,
             meta_j: 0,
             pass: 0,
             window: Vec::new(),
@@ -213,7 +268,7 @@ impl Scheduler {
     pub fn next_slot(&mut self) -> Slot {
         self.frame_no += 1;
         let m = self.config.meta_interval;
-        if m > 1 && self.frame_no.is_multiple_of(m) && self.segments[0].needed {
+        if m > 1 && self.meta_turn.due(m) && self.segments[0].needed {
             return self.meta();
         }
         if !self.segments.iter().any(|s| s.needed) {
@@ -270,6 +325,58 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// However many codes a picture holds, what recurs must not keep to one
+    /// place in it: a receiver may be unable to read that place (one color
+    /// of three, one corner of a grid).
+    #[test]
+    fn what_recurs_visits_every_place_in_the_picture() {
+        for per_picture in 2..=16u64 {
+            // The stream as a sender builds it while an offer is waiting:
+            // now and then a notice or an offer, otherwise the schedule,
+            // which now and then gives a meta symbol.
+            let segs: Vec<(u32, u32)> = (1..=20).map(|i| (i, 200)).collect();
+            let mut schedule = Scheduler::new(ScheduleConfig::default(), 1, segs);
+            let mut extras = Recurring::new(0);
+            let places = per_picture as usize;
+            let (mut meta, mut extra, mut data) =
+                (vec![0u32; places], vec![0u32; places], vec![0u32; places]);
+            for i in 0..per_picture * 600 {
+                let place = (i % per_picture) as usize;
+                if extras.due(6) {
+                    extra[place] += 1;
+                } else if schedule.next_slot().seg_index == META_INDEX {
+                    meta[place] += 1;
+                } else {
+                    data[place] += 1;
+                }
+            }
+            for (what, seen) in [("meta", &meta), ("extras", &extra), ("data", &data)] {
+                assert!(
+                    seen.iter().all(|&n| n > 0),
+                    "{per_picture} codes per picture: {what} never at some place: {seen:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recurring_keeps_its_average_distance() {
+        for every in [3u64, 6, 10, 64] {
+            let mut r = Recurring::new(0);
+            let turns = (0..every * 3000).filter(|_| r.due(every)).count() as f64;
+            let average = (every * 3000) as f64 / turns;
+            assert!(
+                (average - every as f64).abs() < 0.1,
+                "every {every}: {average}"
+            );
+        }
+        // Asked to, the next turn comes at once.
+        let mut r = Recurring::new(50);
+        assert!(!r.due(50));
+        r.soon();
+        assert!(r.due(50));
+    }
+
     #[test]
     fn first_pass_covers_every_symbol_once() {
         let cfg = ScheduleConfig {
@@ -301,7 +408,8 @@ mod tests {
             let n = symbols_per_pass(k, cfg.redundancy);
             assert_eq!(js, (0..n).collect::<Vec<_>>(), "segment {i}");
         }
-        assert!(s.frames_per_pass().abs_diff(frames) <= 1);
+        // (An estimate: where exactly meta symbols come in between varies.)
+        assert!(s.frames_per_pass().abs_diff(frames) <= frames / 20 + 1);
     }
 
     #[test]

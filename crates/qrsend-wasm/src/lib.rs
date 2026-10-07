@@ -33,7 +33,7 @@ use qrsend_core::qr::{self, Ec, QrParams};
 use qrsend_core::receiver::{Event, Receiver, SessionParams};
 use qrsend_core::resume::ResumeCode;
 use qrsend_core::sanitize::SafePath;
-use qrsend_core::schedule::ScheduleConfig;
+use qrsend_core::schedule::{Recurring, ScheduleConfig};
 use qrsend_core::sender::{SegmentSource, Sender, SessionLayout};
 use qrsend_core::sound;
 use qrsend_core::tune;
@@ -611,6 +611,8 @@ pub struct SendSession {
     link: Vec<String>,
     /// Codes shown since something besides data had to be said.
     since_extras: u64,
+    /// When the next code besides data is due.
+    extra_turn_due: Recurring,
     extra_turn: usize,
 }
 
@@ -685,6 +687,7 @@ impl SendSession {
             hearing: false,
             link: Vec::new(),
             since_extras: 0,
+            extra_turn_due: Recurring::new(0),
             extra_turn: 0,
         })
     }
@@ -783,6 +786,7 @@ impl SendSession {
         if codes != self.link {
             self.link = codes;
             self.since_extras = 0;
+            self.extra_turn_due.soon();
         }
     }
 
@@ -842,6 +846,7 @@ impl SendSession {
     pub fn ask_for_feedback(&mut self, on: bool, by_sound: bool) {
         if on && (!self.asking || by_sound != self.hearing) {
             self.since_extras = 0;
+            self.extra_turn_due.soon();
         }
         self.asking = on;
         self.hearing = on && by_sound;
@@ -998,7 +1003,11 @@ impl SendSession {
         let shown = self.since_extras;
         self.since_extras += 1;
         let answered = self.sender.feedback().is_some();
-        if !shown.is_multiple_of(extra_interval(shown, !self.link.is_empty(), answered)) {
+        // Never at a fixed distance: see `Recurring`.
+        if !self
+            .extra_turn_due
+            .due(extra_interval(shown, !self.link.is_empty(), answered))
+        {
             return None;
         }
         let turn = self.extra_turn % count;
