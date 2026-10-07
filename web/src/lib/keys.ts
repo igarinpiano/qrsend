@@ -2,9 +2,12 @@
 //
 // Private keys are WebCrypto keys created as non-extractable: scripts (ours
 // included) can use them to decrypt and sign but can never read them out.
-// Browsers without WebCrypto X25519 / Ed25519 fall back to keys held by the
-// WebAssembly core ("legacy"); identities stored by earlier versions are
-// imported into WebCrypto on first use, keeping the same device ID.
+// Browsers that cannot do that fall back to keys held by the WebAssembly core
+// ("legacy"): those without WebCrypto X25519 / Ed25519, and those that have
+// them but cannot keep such keys in IndexedDB (WebKit, i.e. Safari and every
+// browser on iOS, accepts them and then returns nothing). Identities stored
+// by earlier versions are imported into WebCrypto on first use, keeping the
+// same device ID.
 import { Identity, deviceInfo, ready } from "./core";
 import * as db from "./db";
 
@@ -26,6 +29,34 @@ export type StoredIdentity =
   | { kind: "legacy"; secret: string };
 
 const KEY = "identity";
+const PROBE_KEY = "identity-probe";
+
+let storable: Promise<boolean> | undefined;
+
+/**
+ * Whether this browser can create these keys, keep them in IndexedDB and use
+ * them after reading them back. Tried with a throwaway key, never with the
+ * real identity: a browser that silently drops stored keys would lose it.
+ */
+export function canKeepKeys(): Promise<boolean> {
+  storable ??= (async () => {
+    try {
+      const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"])) as CryptoKeyPair;
+      const x = (await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"])) as CryptoKeyPair;
+      await db.put("kv", { sign: pair.privateKey, derive: x.privateKey }, PROBE_KEY);
+      const back = await db.get<{ sign?: CryptoKey; derive?: CryptoKey }>("kv", PROBE_KEY);
+      if (!back?.sign || !back.derive) return false;
+      await crypto.subtle.sign({ name: "Ed25519" }, back.sign, new Uint8Array(1));
+      await crypto.subtle.deriveBits({ name: "X25519", public: x.publicKey }, back.derive, 256);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      await db.del("kv", PROBE_KEY).catch(() => {});
+    }
+  })();
+  return storable;
+}
 
 function b64url(bytes: Uint8Array): string {
   let s = "";
@@ -91,23 +122,28 @@ export async function loadIdentity(): Promise<StoredIdentity | undefined> {
   // Earlier versions stored the secret as a string.
   const legacySecret = typeof stored === "string" ? stored : stored.kind === "legacy" ? stored.secret : undefined;
   if (legacySecret === undefined) return stored as StoredIdentity;
+  const legacy: StoredIdentity = { kind: "legacy", secret: legacySecret };
+  if (!(await canKeepKeys())) return legacy;
   try {
     const migrated = await importLegacy(legacySecret);
     await db.put("kv", migrated, KEY);
     return migrated;
   } catch {
-    return { kind: "legacy", secret: legacySecret };
+    return legacy;
   }
 }
 
 export async function createIdentity(name: string): Promise<StoredIdentity> {
   await ready();
-  let id: StoredIdentity;
-  try {
-    id = await generateWebCrypto(name);
-  } catch {
-    id = { kind: "legacy", secret: Identity.generate(name).secret() };
+  let id: StoredIdentity | undefined;
+  if (await canKeepKeys()) {
+    try {
+      id = await generateWebCrypto(name);
+    } catch {
+      /* fall back below */
+    }
   }
+  id ??= { kind: "legacy", secret: Identity.generate(name).secret() };
   await db.put("kv", id, KEY);
   return id;
 }

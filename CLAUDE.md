@@ -83,6 +83,7 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 - clap で `Option<T>` 型の引数に独自の value_parser（Option を返す）を付けると実行時に型不一致で panic する。`--density` は専用 enum（DensityArg）にしている。
 - raptorq は 32bit ARM で `std` feature を切っている（NEON の unstable intrinsics を使うため stable でビルドできない）。
 - Web の wasm コールバックは同期。OPFS の同期ハンドルは「開く」のが非同期なので、展開先は 1 セッション 1 ファイル（out）にまとめ、各ファイルはその中の範囲（offset, size）として記録する。ページ側は Blob の slice で取り出す（メモリに載せない）。
+- **WebKit（Safari、iPhone / iPad の全ブラウザ）は X25519 / Ed25519 の CryptoKey を IndexedDB に保存できない**: `put` はエラーなく成功するのに `get` が何も返さない（0.1.1 では「Create device ID を押しても無反応」になり、0.1.0 から移行した ID も失われた）。`keys.ts` の `canKeepKeys()` が使い捨ての鍵で保存→読み出し→利用を試し、だめなら legacy（wasm 内の鍵を文字列で保存）にする。本物の ID で試してはいけない。iPhone の Chrome も中身は WebKit なので、Mac の Chrome で動いても確認にならない → `web/e2e/webkit.spec.ts`（Playwright の WebKit）で確認する。
 - Web の暗号化セッション: age ヘッダの X25519 スタンザごとに WebCrypto で共有秘密を計算して wasm に渡す（Meta と Body は別の age ファイルなので 2 回）。署名は SendJob.seal() が返すメッセージを WebCrypto で署名して finish() に渡す。
 - OPFS はオリジン共有なので、送信スプールは Worker ごとの UUID ディレクトリに置く。
 - QR は `qr::render` が常に単一の英数字セグメントで符号化する（汎用の最適化器だと固定バージョンで容量オーバーする実例があった）。容量は `QrParams::symbol_size()` で決まる。

@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { renderText } from "../lib/core";
   import { forget, inspect, trust, trustedDevices, type DeviceInfo, type Trusted } from "../lib/devices";
-  import { createIdentity, identityInfo, loadIdentity, renameIdentity, type StoredIdentity } from "../lib/keys";
+  import { canKeepKeys, createIdentity, identityInfo, loadIdentity, renameIdentity, type StoredIdentity } from "../lib/keys";
   import { toDataUrl } from "../lib/qrdraw";
   import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
@@ -18,6 +18,8 @@
   let scanning = $state(false);
   let error = $state("");
   let copied = $state(false);
+  /** Whether this browser keeps the private keys where scripts cannot read them. */
+  let protectedKeys = $state(true);
 
   function guessName(): string {
     const ua = navigator.userAgent;
@@ -32,13 +34,20 @@
       qr = toDataUrl(renderText(mine.id), 5);
     }
     devices = await trustedDevices();
+    protectedKeys = await canKeepKeys();
   }
 
   onMount(load);
 
   async function create() {
-    me = await createIdentity(name.trim() || guessName());
-    await load();
+    error = "";
+    try {
+      me = await createIdentity(name.trim() || guessName());
+      await load();
+      if (!me) error = "The device ID could not be stored in this browser (private browsing?).";
+    } catch (e) {
+      error = `Cannot create a device ID: ${e instanceof Error ? e.message : e}`;
+    }
   }
 
   async function rename() {
@@ -114,9 +123,15 @@
       <input type="text" bind:value={name} />
     </label>
     <button class="primary" onclick={create}>Create device ID</button>
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
     <p class="small muted">
-      The private keys are created inside this browser and cannot be exported — not even by this page. Clearing site data
-      deletes them.
+      {#if protectedKeys}
+        The private keys are created inside this browser and cannot be exported — not even by this page. Clearing site
+        data deletes them.
+      {:else}
+        The private keys are created inside this browser and kept as site data (this browser cannot keep them in its
+        protected key store). Clearing site data deletes them.
+      {/if}
     </p>
   {/if}
 </div>

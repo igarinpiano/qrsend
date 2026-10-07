@@ -97,7 +97,7 @@ jobs:
         run: cargo build --release -p qrsend --no-default-features
       - name: Install ffmpeg (video file test)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit
       - run: npm run test:e2e
       - uses: actions/upload-artifact@v4
         if: failure()
