@@ -2,7 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { engine } from "../lib/engine";
   import type { FrameBatch, ReceiverReport, SendStarted } from "../lib/engine-types";
-  import { drawGrid, fitGrid } from "../lib/qrdraw";
+  import { drawColourGrid, drawGrid, fitGrid } from "../lib/qrdraw";
   import { bytes, duration } from "../lib/format";
   import { featureOn } from "../lib/prefs";
   import { Scanner } from "../lib/scanner";
@@ -110,8 +110,13 @@
     return fitGrid(info.modules, info.quiet, canvas.clientWidth * dpr, canvas.clientHeight * dpr, MIN_MODULE_PX);
   }
 
+  // Colour codes (a preview feature): three codes per cell.
+  const layers = featureOn("colour") ? 3 : 1;
+
   function draw() {
-    if (shown) drawGrid(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet);
+    if (!shown) return;
+    const paint = layers === 3 ? drawColourGrid : drawGrid;
+    paint(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet);
   }
 
   onMount(() => {
@@ -129,7 +134,7 @@
       fetching = true;
       const [c, r] = layout();
       engine
-        .sendFrames(c * r)
+        .sendFrames(c * r * layers)
         .then((batch) => {
           ready = batch;
           [cols, rows] = [c, r];
@@ -187,7 +192,7 @@
     onclose();
   }
 
-  const perTick = $derived(cols * rows);
+  const perTick = $derived(cols * rows * layers);
   // Codes still to show before this pass is over (a receiver that saw
   // everything is done by then).
   const inPass = $derived(frames % info.framesPerPass);
@@ -221,9 +226,9 @@
           {#if quiet}
             <span data-testid="receiver-quiet">· not heard for {Math.round(silentFor / 1000)}s, sending on</span>
           {/if}
-          · {cols}×{rows} · ~{bytes(rate)}/s
+          · {cols}×{rows}{layers === 3 ? " ×3 colours" : ""} · ~{bytes(rate)}/s
         {:else}
-          Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows} ·
+          Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows}{layers === 3 ? " ×3 colours" : ""} ·
           ~{bytes(rate)}/s
           {info.encrypted ? "· encrypted" : "· not encrypted"}
         {/if}

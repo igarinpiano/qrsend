@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { featureOn } from "../lib/prefs";
   import { Scanner, type ScanStats } from "../lib/scanner";
 
   let {
@@ -20,6 +21,7 @@
   async function start() {
     error = "";
     fileProgress = undefined;
+    onScreen = false;
     try {
       await scanner!.start(cameraId || undefined);
       started = true;
@@ -33,10 +35,34 @@
     }
   }
 
+  // Receiving from the screen (a preview feature, and only where the browser can capture one).
+  const screenOffered = featureOn("screenCapture") && Scanner.canCaptureScreen;
+  let onScreen = $state(false);
+
+  async function useScreen() {
+    if (!scanner) return;
+    error = "";
+    fileProgress = undefined;
+    try {
+      await scanner.startScreen(() => {
+        started = false;
+        onScreen = false;
+      });
+      started = true;
+      onScreen = true;
+    } catch (e) {
+      // Closing the picker is not an error worth showing.
+      if (!(e instanceof DOMException && e.name === "NotAllowedError")) {
+        error = `Cannot capture the screen: ${e instanceof Error ? e.message : e}`;
+      }
+    }
+  }
+
   async function scanFile(file: File | undefined) {
     if (!file || !scanner) return;
     error = "";
     started = true;
+    onScreen = false;
     fileProgress = { name: file.name, at: 0, duration: 0, ended: false };
     try {
       const ended = await scanner.scanFile(file, (at, duration) => {
@@ -90,16 +116,20 @@
     {#if fileProgress && !fileProgress.ended}
       {fileProgress.name}: {fileProgress.at.toFixed(1)} / {fileProgress.duration.toFixed(1)} s ·
     {/if}
-    {#if stats}{stats.width}×{stats.height} · {stats.engine === "native" ? "built-in detector" : "ZXing"} · {stats.codes} codes{/if}
+    {#if stats}{onScreen ? "screen " : ""}{stats.width}×{stats.height} · {stats.engine === "native" ? "built-in detector" : "ZXing"} ·
+      {stats.codes} codes{stats.coloured ? " · colour" : ""}{/if}
   </span>
   <span class="row">
-    {#if cameras.length > 1 && !fileProgress}
+    {#if cameras.length > 1 && !fileProgress && !onScreen}
       <select class="picker" bind:value={cameraId} onchange={start} aria-label="Camera">
         <option value="">Default camera</option>
         {#each cameras as c (c.deviceId)}
           <option value={c.deviceId}>{c.label || "Camera"}</option>
         {/each}
       </select>
+    {/if}
+    {#if screenOffered && active}
+      <button class="file" onclick={onScreen ? start : useScreen}>{onScreen ? "Use the camera" : "Use the screen"}</button>
     {/if}
     {#if allowFile && active}
       <label class="button file">

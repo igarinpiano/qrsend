@@ -11,8 +11,8 @@
 
 <h2>Feature preview</h2>
 <p class="muted">
-  New ways of sending that are still being worked on. Everything here is off unless you turn it on; with all of it off,
-  QRSend sends exactly as before. The choice is remembered in this browser.
+  New ways of transferring that are still being worked on. Everything here is off unless you turn it on; with all of it
+  off, QRSend works exactly as before. The choice is remembered in this browser.
 </p>
 
 {#each PREVIEW_FEATURES as feature (feature.id)}
@@ -22,6 +22,7 @@
       <span>
         <strong>{feature.title}</strong>
         <span class="badge">{on[feature.id] ? "On" : "Off"}</span>
+        <span class="small muted">when {feature.side}</span>
       </span>
     </label>
     <p class="small">{feature.summary}</p>

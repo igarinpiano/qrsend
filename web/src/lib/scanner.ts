@@ -1,5 +1,6 @@
-// Feeds pictures to the decoding worker, one at a time: live from a camera,
-// or frame by frame from a video file (a recording of a sender's screen).
+// Feeds pictures to the decoding worker, one at a time: live from a camera
+// or a captured screen, or frame by frame from a video file (a recording of a
+// sender's screen).
 import ScanWorker from "./scan.worker?worker";
 
 export interface ScanStats {
@@ -8,6 +9,8 @@ export interface ScanStats {
   engine: string;
   width: number;
   height: number;
+  /** The stream is being read as colour codes. */
+  coloured?: boolean;
 }
 
 type VideoWithRvfc = HTMLVideoElement & {
@@ -32,11 +35,12 @@ export class Scanner {
     private onTexts: (texts: string[]) => void,
     private onStats?: (s: ScanStats) => void,
   ) {
-    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string }>) => {
+    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string; coloured?: boolean }>) => {
       this.busy = false;
       this.stats.frames++;
       this.stats.codes += e.data.texts.length;
       this.stats.engine = e.data.engine;
+      this.stats.coloured = !!e.data.coloured;
       if (e.data.texts.length) this.onTexts(e.data.texts);
       this.onStats?.({ ...this.stats });
       this.decoded?.();
@@ -74,6 +78,37 @@ export class Scanner {
     } catch {
       /* not supported */
     }
+    await this.show(stream, turn);
+  }
+
+  static get canCaptureScreen(): boolean {
+    return typeof navigator.mediaDevices?.getDisplayMedia === "function";
+  }
+
+  /**
+   * Reads codes from a window or screen the user picks (a remote desktop, a
+   * virtual machine, a shared screen) instead of a camera. `onEnded` runs
+   * when the user stops sharing.
+   */
+  async startScreen(onEnded?: () => void): Promise<void> {
+    this.stop();
+    const turn = this.turn;
+    const stream = await navigator.mediaDevices.getDisplayMedia({ audio: false, video: { frameRate: { ideal: 30 } } });
+    if (turn !== this.turn) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    this.stream = stream;
+    stream.getVideoTracks()[0].addEventListener("ended", () => {
+      if (this.stream !== stream) return;
+      this.stop();
+      onEnded?.();
+    });
+    await this.show(stream, turn);
+  }
+
+  /** Plays `stream` in the video element and starts reading it. */
+  private async show(stream: MediaStream, turn: number): Promise<void> {
     if (turn !== this.turn) return;
     this.video.srcObject = stream;
     this.video.muted = true;

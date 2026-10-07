@@ -293,7 +293,7 @@ qrsend completions <SHELL>
 | ビルド対象 | macOS / Windows / Linux（glibc・musl）に加え、32bit・ARMv6/v7・RISC-V・ppc64le・s390x・LoongArch・Android・FreeBSD・NetBSD・illumos（追加分は best-effort） |
 | 受信側から送信側への逆方向チャネル | 第一歩を実装（0.1.2、Web 版の Feature preview「Two-way transfer」。既定はオフで、従来の一方向が基本）。送信側がオンにすると、ストリームに合図（notice）を混ぜ、それを見た受信側が「まだ足りないもの」を QR 1 個で表示し、送信側のカメラがそれを読む。送信側は足りない分だけを送り、全部届いたら自動で止まる。逆方向が途切れたら 2 秒で「待ち」をやめ、10 秒で全送信に戻る。損失率に応じた速度・密度の自動調節、CLI 対応、ピントや距離の案内は未実装 |
 | Feature preview | Web 版の `#/preview`。作りかけの機能は送信側がここで個別にオンにする（ブラウザごとに保存）。オフなら画面も動作も従来どおり |
-| 複数の通信手段の併用（カラーコード・LAN・音など） | 未実装 |
+| カメラ以外の経路 | CLI: フレームをテキスト行として任意のバイト列に流す（`--export-text` / `recv --text`。シリアル・TCP・ssh・ファイル）。Web（Feature preview）: カラーコード（R/G/B に 3 個重ねる。受信側は自動判別）、画面キャプチャからの受信（リモートデスクトップや VM の窓を直接読む）。LAN（WebRTC）と音は未実装。実カメラでのカラーコードと、実際の画面共有からの受信は未検証 |
 
 ---
 

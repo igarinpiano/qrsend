@@ -136,6 +136,12 @@ loaded (PWA).
 - **Feature preview** (footer link): new ways of sending that are still being
   worked on. Each is off until the sender turns it on; otherwise everything
   works as before.
+  - *Colour codes*: three codes in one, as the red, green and blue parts of
+    the picture — up to three times the data per frame. Receivers recognise
+    them on their own.
+  - *Receive from the screen*: read the codes straight from a window or
+    screen (a remote desktop, a virtual machine, a shared screen in a call)
+    instead of through a camera.
   - *Two-way transfer*: when the sender has a camera that sees the receiver's
     screen (two phones or laptops facing each other), the receiver shows a
     small feedback code with what is still missing. The sender sends only

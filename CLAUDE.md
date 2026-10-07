@@ -88,6 +88,10 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 - 受信側は frame の CRC → セッション整合 → RaptorQ → セグメント BLAKE3（manifest 到着後）→ 全体 BLAKE3 → ファイル BLAKE3 の順に検証する。manifest 到着前のセグメントは `unverified` として保存し、後で検証する。
 - `recv` は未完了で終わると終了コード 2 と resume code を出す。
 - **作りかけの機能は Feature preview に置く**（ユーザーの方針: 基本は従来の方式。新機能は送信側が `#/preview` で個別にオンにする）。定義は `web/src/lib/prefs.ts` の `PREVIEW_FEATURES`、保存先は localStorage の `qrsend.preview.<id>`。オフのときは画面も送る内容も従来と同じにする。受信側には設定を作らず、送信側からの合図で自動的に従う形にする。
+- 経路が増えても受け皿は 1 つ: フレームは噴水符号なので、どの経路から来たフレームも同じ `recvPush` に入れればよい。送信側は 1 つの生成器（SendSession / FrameStream）から各経路に別々のフレームを配る。新しい経路を足すときはこの形を崩さない。
+- カラーコード（preview、PROTOCOL §2.3）: `drawColourGrid` が 1 枠に 3 コードを RGB で重ねる。受信は `scan.worker.ts` が 12 フレームに 1 回 RGB を分けて読み、3 成分の内容が違えばカラーとして読み続ける（送信側からの合図は無い）。
+- 画面キャプチャ受信（preview）: `Scanner.startScreen`（getDisplayMedia）。ヘッドレスのブラウザには共有できる画面が無いので、e2e は getDisplayMedia を仮想カメラのストリームに差し替えて確認している（実際の画面共有は未検証）。
+- **e2e でブラウザを起動するときは必ず `--use-fake-device-for-media-stream` を付ける**（`e2e/video.ts` の `fakeCamera`）。`--use-fake-ui-for-media-stream` だけだと権限が自動で通り、受信ページが開発機の本物のカメラを開いてしまう。
 - Two-way transfer（逆方向チャネル、0.1.2〜、Web のみ、preview）: 送信側がオンだと SendSession がデータの合間に notice（QSC1）を混ぜる。受信側はそれを見たセッションに限りフィードバック QR を表示し（0.3 秒以上の間隔で描き直す）、送信プレーヤーが自分のカメラ（前面優先）で読んで `engine.sendFeedback` に渡す。途切れたら 2 秒で `sendReceiverSilent(false)`（窓の完成待ちをやめる）、10 秒で `sendReceiverSilent(true)`（全送信に戻る）。`COMPLETE` は展開まで終わってから立てる。フィードバックは認証なしの助言で、到達の証明には使わない。順方向は逆方向に依存させない（PROTOCOL §11.3）。e2e（`two-way.spec.ts`）は 2 つのブラウザの仮想カメラを Y4M でつないで往復させる。
 
 ## リリース
