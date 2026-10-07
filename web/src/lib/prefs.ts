@@ -6,7 +6,7 @@ export interface PreviewFeature {
   id: string;
   title: string;
   /** Which role of this device the switch affects. */
-  side: "sending" | "receiving";
+  side: "sending" | "receiving" | "sending and receiving";
   summary: string;
   /** How to use it, step by step. */
   steps: string[];
@@ -30,7 +30,7 @@ export const PREVIEW_FEATURES = [
     title: "Feedback by sound",
     side: "sending",
     summary:
-      "Like two-way transfer, but the receiver answers with short chirps from its speaker, which this device hears through its microphone. No camera has to see the receiver's screen, so it works in the usual position: a phone filming a computer screen. The receiver is asked before it makes any sound. A feedback code takes about a second.",
+      "Like two-way transfer, but the receiver answers with a short run of soft notes from its speaker, which this device hears through its microphone. No camera has to see the receiver's screen, so it works in the usual position: a phone filming a computer screen. The receiver is asked every time before it makes any sound. A feedback code takes about a second and a half.",
     steps: [
       "Start sending as usual; the browser asks for the microphone.",
       "The receiver is asked whether it may answer by sound. Keep the devices close and the room reasonably quiet.",
@@ -42,10 +42,10 @@ export const PREVIEW_FEATURES = [
     title: "Local network boost",
     side: "sending",
     summary:
-      "Once each device has seen the other's screen, the two also connect directly over the local network (Wi-Fi or cable), which is far faster than a camera. Both ways are then used at once: the connection carries the transfer from its start while the screen carries it from its end, and the receiver keeps whatever arrives first. The connection is arranged through the codes themselves: no server, no account, and nothing outside the local network is contacted. The receiver is asked before it connects. If the connection fails or drops, the screen simply carries on.",
+      "Once each device has seen the other's screen, the two also connect directly over the local network (Wi-Fi or cable), which is far faster than a camera. Both ways are then used at once: the connection carries the transfer from its start while the screen carries it from its end, and the receiver keeps whatever arrives first. The connection is arranged through the codes themselves: no server, no account, and nothing outside the local network is contacted. The receiver connects by itself when it sees the offer (and can end the connection). If the connection fails or drops, the screen simply carries on.",
     steps: [
       "Both devices must be on the same network, and — for a moment — this device's camera must see the receiver's screen.",
-      "Start sending as usual. The receiver is asked whether to connect and then shows a code; hold it up to this device's camera.",
+      "Start sending as usual. The receiver shows a code as soon as it has seen the offer; hold it up to this device's camera.",
       "Once connected, the devices no longer need to see each other (though it helps: the screen keeps contributing).",
     ],
   },
@@ -70,6 +70,14 @@ export const PREVIEW_FEATURES = [
       "On the Receive page, choose “Use the screen” and pick the window that shows the codes.",
       "On the sender, try many codes at once (“Fill the screen”).",
     ],
+  },
+  {
+    id: "stats",
+    title: "Show measurements",
+    side: "sending and receiving",
+    summary:
+      "Shows what the transfer spends its time on: how long reading a picture takes (with and without codes in it), how fast received codes are taken in, and — with a local network connection — what holds the sender back. For finding out why something is slower than it should be.",
+    steps: ["Start a transfer; the numbers appear under the camera picture and in the sender's status line."],
   },
 ] as const satisfies readonly PreviewFeature[];
 

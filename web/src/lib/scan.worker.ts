@@ -76,9 +76,12 @@ async function detectColors(bitmap: ImageBitmap, native: BarcodeDetector | null)
 
 // Nothing tells a receiver that the codes are colored. Seen as a gray
 // picture, a colored frame still yields a code now and then (mostly the
-// green one), so every so often the three parts are read separately: if they
-// hold different codes, the stream is colored and is read that way from then
-// on; if they all hold the same, it is black and white.
+// green one), so every so often the three parts are read separately. The
+// answer changes only on evidence: parts holding different codes mean
+// colored; at least two parts holding exactly the same codes mean black and
+// white. A picture in which nothing, or only one part, could be read says
+// nothing either way (a weak camera loses the red and blue parts often), and
+// the answer stays what it was.
 const COLOR_PROBE_EVERY = 12;
 let colored = false;
 let sinceProbe = 0;
@@ -86,16 +89,17 @@ let sinceProbe = 0;
 async function scan(bitmap: ImageBitmap, native: BarcodeDetector | null): Promise<string[]> {
   sinceProbe++;
   if (!colored && sinceProbe < COLOR_PROBE_EVERY) return detect(bitmap, native);
+  sinceProbe = 0;
   const parts = await detectColors(bitmap, native);
   const all = [...new Set(parts.flat())];
+  const read = parts.filter((p) => p.length > 0);
   const most = Math.max(...parts.map((p) => p.length));
   if (all.length > most) {
     colored = true;
-  } else if (sinceProbe >= COLOR_PROBE_EVERY) {
-    // Three times the same (or nothing at all): not colored.
+  } else if (read.length >= 2) {
+    // Every part that could be read holds the same codes.
     colored = false;
   }
-  if (sinceProbe >= COLOR_PROBE_EVERY) sinceProbe = 0;
   return all;
 }
 
@@ -111,8 +115,9 @@ self.onmessage = async (e: MessageEvent<{ bitmap?: ImageBitmap; zxing?: boolean 
   try {
     const native = await nativeDetector();
     if (native) engine = "native";
+    const started = performance.now();
     texts = await scan(bitmap, native);
-    self.postMessage({ texts, engine, colored });
+    self.postMessage({ texts, engine, colored, ms: performance.now() - started });
   } catch (err) {
     self.postMessage({ texts: [], engine, colored, error: String(err) });
   } finally {

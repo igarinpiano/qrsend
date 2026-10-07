@@ -287,9 +287,22 @@ export class LanSender {
     this.wake?.();
   }
 
-  /** How many codes may currently be on their way (for display). */
-  get windowSize(): number {
-    return this.window;
+  /** Time spent, in milliseconds, since the connection came up (for the measurements display). */
+  private spent = { window: 0, buffer: 0, pull: 0, since: 0 };
+
+  /** What the connection is doing: for finding out what holds a transfer back. */
+  get measurements(): { window: number; onTheirWay: number; sent: number; waitingForReceiver: number; waitingForNetwork: number; preparing: number } {
+    const total = Math.max(performance.now() - this.spent.since, 1);
+    return {
+      window: this.window,
+      onTheirWay: this.sent - this.acked,
+      sent: this.sent,
+      // Shares of the time: the receiver has not confirmed enough, the browser
+      // has not handed enough to the network, the next codes are being made.
+      waitingForReceiver: this.spent.window / total,
+      waitingForNetwork: this.spent.buffer / total,
+      preparing: this.spent.pull / total,
+    };
   }
 
   /** Sends codes as fast as the receiver takes them in. */
@@ -299,6 +312,7 @@ export class LanSender {
     this.window = WINDOW_START;
     this.gentleFrom = WINDOW_MAX;
     this.confirmedAt = performance.now();
+    this.spent = { window: 0, buffer: 0, pull: 0, since: performance.now() };
     while (this.channel === channel && channel.readyState === "open") {
       const waiting = this.sent - this.acked;
       const quiet = performance.now() - this.confirmedAt;
@@ -317,6 +331,7 @@ export class LanSender {
       const byWindow = waiting >= this.window;
       if (byWindow || channel.bufferedAmount > BUFFER_HIGH) {
         if (byWindow) this.windowLimited = true;
+        const waitingSince = performance.now();
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, 100);
           this.wake = () => {
@@ -325,14 +340,17 @@ export class LanSender {
           };
         });
         this.wake = undefined;
+        this.spent[byWindow ? "window" : "buffer"] += performance.now() - waitingSince;
         continue;
       }
       let codes: string[];
+      const pullingSince = performance.now();
       try {
         codes = await this.hooks.pull(BATCH);
       } catch {
         break;
       }
+      this.spent.pull += performance.now() - pullingSince;
       if (this.channel !== channel || channel.readyState !== "open") break;
       // Nothing was waiting: the clock for "no confirmation" starts now.
       if (this.sent === this.acked) this.confirmedAt = performance.now();

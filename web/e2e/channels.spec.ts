@@ -111,14 +111,12 @@ test("local network: after a handshake through the codes, the transfer travels o
     writeY4m(codesVideo, frames);
     await sender.getByRole("button", { name: /Two-way/ }).click();
 
-    // The receiver sees the offer, is asked, and answers with a code.
+    // The receiver sees the offer and answers with a code, without being asked.
     receiverBrowser = await playwright.chromium.launch({ channel: lanBrowser, args: fakeCamera(codesVideo) });
     const context = await receiverBrowser.newContext({ baseURL, permissions: ["camera"], acceptDownloads: true });
     const receiver = await context.newPage();
     await receiver.goto("./#/receive");
-    await expect(receiver.getByTestId("link-offer")).toBeVisible({ timeout: 30_000 });
-    await expect(receiver.getByTestId("link-answer")).toHaveCount(0);
-    await receiver.getByRole("button", { name: "Connect" }).click();
+    await expect(receiver.getByTestId("link-answer")).toBeVisible({ timeout: 30_000 });
     const answer = await captureImage(receiver, "link-answer");
     writeY4m(answerVideo, [answer, answer, answer]);
 
@@ -141,5 +139,21 @@ test("local network: after a handshake through the codes, the transfer travels o
   } finally {
     await receiverBrowser?.close();
     await senderBrowser.close();
+  }
+});
+
+test("measurements appear only with their preview feature", async ({ playwright, baseURL }) => {
+  const browser = await playwright.chromium.launch({ args: fakeCamera(textVideo) });
+  try {
+    const page = await (await browser.newContext({ baseURL, permissions: ["camera"] })).newPage();
+    await page.goto("./#/receive");
+    await expect(page.getByTestId("received-text")).toHaveText(FAKE_TEXT, { timeout: 60_000 });
+    await expect(page.getByTestId("scan-stats")).toHaveCount(0);
+    await enablePreview(page, /Show measurements/);
+    await page.goto("./#/receive");
+    // How long the decoder takes per picture, with codes in it and without.
+    await expect(page.getByTestId("scan-stats")).toHaveText(/\d+ reads\/s · \d+ ms with codes, \d+ ms without/, { timeout: 30_000 });
+  } finally {
+    await browser.close();
   }
 });

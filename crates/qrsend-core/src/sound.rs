@@ -1,74 +1,105 @@
 //! Small messages as sound: a speaker on one device, a microphone on the
 //! other. See docs/PROTOCOL.md §14.
 //!
-//! Slow (tens of bytes per second) but it needs no line of sight, which makes
-//! it a way back for feedback codes when the sender's camera cannot see the
-//! receiver's screen.
+//! Slow (under twenty bytes per second) but it needs no line of sight, which
+//! makes it a way back for feedback codes when the sender's camera cannot see
+//! the receiver's screen.
 //!
-//! Each symbol is a chord of three tones held for 40 ms, one tone out of 16
-//! in each of three groups (4 bits per tone, 12 bits per symbol). Symbols
-//! alternate between two banks of frequencies, so the echo of one symbol does
-//! not land on the tones of the next. A message is a two-symbol preamble, a
-//! length byte, the payload and a CRC.
+//! It is meant to be pleasant to hear, since people sit next to it: every
+//! symbol is two notes of one pentatonic scale, a lower and a higher one,
+//! struck like a music box (quick attack, fading away). Any two notes of that
+//! scale sound well together, whatever the data. Each note is one of eight,
+//! so a symbol carries six bits. A message is a two-symbol preamble, a length
+//! byte, the payload and a CRC.
 
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
 /// Seconds a symbol lasts.
 pub const SYMBOL_SECONDS: f32 = 0.04;
-/// Hz between neighboring tones: twice the resolution of a symbol-long
-/// window, so tones do not leak into each other.
-pub const TONE_SPACING: f32 = 50.0;
-/// Lowest tone, in Hz. The band ends at 6300 Hz: within what small speakers
-/// and microphones carry well.
-pub const BASE_FREQUENCY: f32 = 1500.0;
-const TONES: usize = 16;
-const GROUPS: usize = 3;
-const BANKS: usize = 2;
+/// The notes of each voice, in Hz: C major pentatonic, C5 to E6 for the
+/// lower voice and G6 to C8 for the higher one. Neighbors are at least 64 Hz
+/// apart, more than twice the resolution of a symbol-long window.
+pub const NOTES: [[f32; TONES]; VOICES] = [
+    [
+        523.25, 587.33, 659.26, 783.99, 880.00, 1046.50, 1174.66, 1318.51,
+    ],
+    [
+        1567.98, 1760.00, 2093.00, 2349.32, 2637.02, 3135.96, 3520.00, 4186.01,
+    ],
+];
+const TONES: usize = 8;
+const VOICES: usize = 2;
+/// Bits a note carries.
+const NOTE_BITS: usize = 3;
 /// Longest payload, in bytes.
 pub const MAX_PAYLOAD: usize = 255;
 
-/// Tones of the two preamble symbols, per group.
-const PREAMBLE: [[usize; GROUPS]; 2] = [[15, 0, 15], [0, 15, 0]];
+/// Notes of the two preamble symbols (lower voice, higher voice): the two
+/// voices cross from the ends of their ranges.
+const PREAMBLE: [[usize; VOICES]; 2] = [[0, 7], [7, 0]];
 /// The decoder looks for a preamble this many times per symbol.
 const HOPS_PER_SYMBOL: usize = 4;
-/// A tone counts as present when it is this much stronger than the average
-/// of the other tones of its group.
+/// A note counts as present when it is this much stronger than the average
+/// of the other notes of its voice.
 const DOMINANCE: f32 = 4.0;
-
-fn frequency(bank: usize, group: usize, tone: usize) -> f32 {
-    BASE_FREQUENCY + ((bank * GROUPS + group) * TONES + tone) as f32 * TONE_SPACING
-}
+/// Loudness of the two voices; the higher one is kept softer.
+const LEVEL: [f32; VOICES] = [0.32, 0.2];
 
 fn symbol_len(sample_rate: f32) -> usize {
     (SYMBOL_SECONDS * sample_rate).round() as usize
 }
 
-/// Payload bytes as the tones of each symbol (preamble included).
-fn symbols(payload: &[u8]) -> Vec<[usize; GROUPS]> {
+/// Payload bytes as the notes of each symbol (preamble included).
+fn symbols(payload: &[u8]) -> Vec<[usize; VOICES]> {
     let mut bytes = vec![payload.len() as u8];
     bytes.extend_from_slice(payload);
     let check = crc32fast::hash(&bytes) as u16;
     bytes.extend_from_slice(&check.to_le_bytes());
-    let mut nibbles: Vec<usize> = bytes
-        .iter()
-        .flat_map(|b| [(b >> 4) as usize, (b & 15) as usize])
-        .collect();
-    while !nibbles.len().is_multiple_of(GROUPS) {
-        nibbles.push(0);
+    // Three bits per note, most significant first, padded with zeros.
+    let mut notes: Vec<usize> = Vec::new();
+    let (mut acc, mut bits) = (0usize, 0);
+    for b in bytes {
+        acc = acc << 8 | b as usize;
+        bits += 8;
+        while bits >= NOTE_BITS {
+            bits -= NOTE_BITS;
+            notes.push(acc >> bits & (TONES - 1));
+        }
+    }
+    if bits > 0 {
+        notes.push(acc << (NOTE_BITS - bits) & (TONES - 1));
+    }
+    while !notes.len().is_multiple_of(VOICES) {
+        notes.push(0);
     }
     PREAMBLE
         .into_iter()
-        .chain(nibbles.as_chunks::<GROUPS>().0.iter().copied())
+        .chain(notes.as_chunks::<VOICES>().0.iter().copied())
         .collect()
+}
+
+/// Notes (three bits each) back to bytes; leftover bits are dropped.
+fn bytes_of(notes: &[usize]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0usize, 0);
+    for &n in notes {
+        acc = (acc << NOTE_BITS | n) & 0xFFFF;
+        bits += NOTE_BITS;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
 }
 
 /// How long a message of `payload_len` bytes sounds, in seconds.
 pub fn duration(payload_len: usize) -> f32 {
-    let nibbles = (payload_len + 3) * 2;
-    (2 + nibbles.div_ceil(GROUPS)) as f32 * SYMBOL_SECONDS
+    let notes = ((payload_len + 3) * 8).div_ceil(NOTE_BITS);
+    (2 + notes.div_ceil(VOICES)) as f32 * SYMBOL_SECONDS
 }
 
-/// Renders a message as samples in -1..1 (peak about 0.75).
+/// Renders a message as samples in -1..1 (peak about 0.5).
 ///
 /// # Panics
 /// If the payload is longer than [`MAX_PAYLOAD`].
@@ -78,24 +109,26 @@ pub fn encode(payload: &[u8], sample_rate: f32) -> Vec<f32> {
         "payload too long for a sound message"
     );
     let n = symbol_len(sample_rate);
-    // Fade each symbol in and out, or the jumps between tones click.
-    let ramp = (n / 10).max(1);
+    // Struck, not switched on: a few milliseconds of attack, then the note
+    // fades to about a third, and is taken away gently so nothing clicks.
+    let edge = (n / 10).max(1);
+    let fade = -(3.0f32.ln()) / n as f32;
     let mut out = Vec::new();
-    for (i, tones) in symbols(payload).into_iter().enumerate() {
+    for notes in symbols(payload) {
         for s in 0..n {
             let t = s as f32 / sample_rate;
-            let wave: f32 = tones
+            let wave: f32 = notes
                 .iter()
                 .enumerate()
-                .map(|(g, &tone)| (TAU * frequency(i % BANKS, g, tone) * t).sin())
+                .map(|(v, &note)| (TAU * NOTES[v][note] * t).sin() * LEVEL[v])
                 .sum();
-            let edge = s.min(n - 1 - s);
-            let gain = if edge < ramp {
-                0.5 - 0.5 * (std::f32::consts::PI * edge as f32 / ramp as f32).cos()
+            let near = s.min(n - 1 - s);
+            let ramp = if near < edge {
+                0.5 - 0.5 * (PI * near as f32 / edge as f32).cos()
             } else {
                 1.0
             };
-            out.push(wave * gain * 0.25);
+            out.push(wave * ramp * (fade * s as f32).exp());
         }
     }
     out
@@ -112,10 +145,10 @@ fn power(samples: &[f32], coefficient: f32) -> f32 {
     s1 * s1 + s2 * s2 - coefficient * s1 * s2
 }
 
-/// The strongest tone of each group in a symbol-long block, and how strongly
-/// it stands out (the weakest group's ratio to the rest of its group).
+/// The strongest note of each voice in a symbol-long block, and how strongly
+/// it stands out (the weaker voice's ratio to the rest of its notes).
 struct Chord {
-    tones: [usize; GROUPS],
+    notes: [usize; VOICES],
     clarity: f32,
     energy: f32,
 }
@@ -129,14 +162,14 @@ struct Reading {
     origin: usize,
     /// Where its next symbol starts.
     next: usize,
-    /// The tones read so far, after the preamble.
-    tones: Vec<usize>,
+    /// The notes read so far, after the preamble.
+    notes: Vec<usize>,
 }
 
 /// Listens to a stream of samples and returns the messages in it.
 pub struct Decoder {
-    /// Goertzel coefficients per bank, group and tone.
-    coefficients: [[[f32; TONES]; GROUPS]; BANKS],
+    /// Goertzel coefficients per voice and note.
+    coefficients: [[f32; TONES]; VOICES],
     symbol: usize,
     hop: usize,
     buffer: Vec<f32>,
@@ -146,17 +179,9 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(sample_rate: f32) -> Self {
-        let mut coefficients = [[[0.0; TONES]; GROUPS]; BANKS];
-        for (b, bank) in coefficients.iter_mut().enumerate() {
-            for (g, group) in bank.iter_mut().enumerate() {
-                for (t, c) in group.iter_mut().enumerate() {
-                    *c = 2.0 * (TAU * frequency(b, g, t) / sample_rate).cos();
-                }
-            }
-        }
         let symbol = symbol_len(sample_rate);
         Decoder {
-            coefficients,
+            coefficients: NOTES.map(|voice| voice.map(|f| 2.0 * (TAU * f / sample_rate).cos())),
             symbol,
             hop: (symbol / HOPS_PER_SYMBOL).max(1),
             buffer: Vec::new(),
@@ -164,25 +189,22 @@ impl Decoder {
         }
     }
 
-    fn read(&self, at: usize, bank: usize) -> Chord {
+    fn read(&self, at: usize) -> Chord {
         let block = &self.buffer[at..at + self.symbol];
         let mut out = Chord {
-            tones: [0; GROUPS],
+            notes: [0; VOICES],
             clarity: f32::INFINITY,
             energy: 0.0,
         };
-        for g in 0..GROUPS {
-            let powers: Vec<f32> = self.coefficients[bank][g]
-                .iter()
-                .map(|&c| power(block, c))
-                .collect();
+        for (v, coefficients) in self.coefficients.iter().enumerate() {
+            let powers = coefficients.map(|c| power(block, c));
             let (best, &max) = powers
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.total_cmp(b.1))
-                .expect("16 tones");
+                .expect("eight notes");
             let rest = (powers.iter().sum::<f32>() - max) / (TONES - 1) as f32;
-            out.tones[g] = best;
+            out.notes[v] = best;
             out.clarity = out.clarity.min(max / rest.max(1e-12));
             out.energy += max;
         }
@@ -194,12 +216,12 @@ impl Decoder {
         if at + 2 * self.symbol > self.buffer.len() {
             return None;
         }
-        let first = self.read(at, 0);
-        if first.tones != PREAMBLE[0] || first.clarity < DOMINANCE {
+        let first = self.read(at);
+        if first.notes != PREAMBLE[0] || first.clarity < DOMINANCE {
             return None;
         }
-        let second = self.read(at + self.symbol, 1);
-        (second.tones == PREAMBLE[1] && second.clarity >= DOMINANCE)
+        let second = self.read(at + self.symbol);
+        (second.notes == PREAMBLE[1] && second.clarity >= DOMINANCE)
             .then_some(first.energy + second.energy)
     }
 
@@ -232,7 +254,7 @@ impl Decoder {
                     self.reading = Some(Reading {
                         origin,
                         next: origin + 2 * self.symbol,
-                        tones: Vec::new(),
+                        notes: Vec::new(),
                     });
                 }
                 Some(mut r) => {
@@ -241,13 +263,9 @@ impl Decoder {
                         self.reading = Some(r);
                         break;
                     }
-                    // Data symbols continue the alternation of the preamble.
-                    let index = 2 + r.tones.len() / GROUPS;
-                    r.tones.extend(self.read(r.next, index % BANKS).tones);
+                    r.notes.extend(self.read(r.next).notes);
                     r.next += self.symbol;
-                    let (pairs, _) = r.tones.as_chunks::<2>();
-                    let bytes: Vec<u8> =
-                        pairs.iter().map(|&[hi, lo]| (hi << 4 | lo) as u8).collect();
+                    let bytes = bytes_of(&r.notes);
                     match bytes.first().map(|&len| len as usize + 3) {
                         Some(total) if bytes.len() >= total => {
                             let (body, check) = bytes[..total].split_at(total - 2);
@@ -317,7 +335,8 @@ mod tests {
                 );
             }
         }
-        assert!((duration(24) - 0.8).abs() < 0.01, "{}", duration(24));
+        // A feedback code of 24 bytes takes a second and a half.
+        assert!((duration(24) - 1.52).abs() < 0.01, "{}", duration(24));
     }
 
     #[test]

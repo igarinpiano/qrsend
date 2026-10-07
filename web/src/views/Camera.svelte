@@ -35,6 +35,8 @@
     }
   }
 
+  const showStats = featureOn("stats");
+
   // Receiving from the screen (a preview feature, and only where the browser can capture one).
   const screenOffered = featureOn("screenCapture") && Scanner.canCaptureScreen;
   let onScreen = $state(false);
@@ -118,6 +120,11 @@
     {/if}
     {#if stats}{onScreen ? "screen " : ""}{stats.width}×{stats.height} · {stats.engine === "native" ? "built-in detector" : "ZXing"} ·
       {stats.codes} codes{stats.colored ? " · color" : ""}{/if}
+    {#if stats && showStats}
+      <span data-testid="scan-stats">
+        · {stats.rate.toFixed(0)} reads/s · {stats.msWithCodes.toFixed(0)} ms with codes, {stats.msWithout.toFixed(0)} ms without
+      </span>
+    {/if}
   </span>
   <span class="row">
     {#if cameras.length > 1 && !fileProgress && !onScreen}
@@ -139,6 +146,13 @@
     {/if}
   </span>
 </div>
+
+{#if onScreen}
+  <p class="small muted">
+    A captured screen is read pixel for pixel: on the sender, choose “Fill the screen” for the codes and a higher speed —
+    one code at a time is as slow here as with a camera.
+  </p>
+{/if}
 
 <style>
   .camera {

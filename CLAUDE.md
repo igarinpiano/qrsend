@@ -22,7 +22,7 @@ crates/qrsend-core/  プロトコル本体（I/O は std::io トレイトのみ�
   schedule / sender   参考送信スケジュール（窓インターリーブ、Meta は毎パス＋差し込み）。フィードバックがあれば受信済みを送らず、窓が受信されるまで次へ進まない（Sender::apply_feedback / forget_receiver）
   receiver            受信状態機械（暗号・I/O なし。Event を返す）。直近 8192 フレームの重複を捨てる（カメラは同じコードを何度も見る）。1 セグメントは 1 つのシンボルサイズで集め、別サイズが「より多く運んできた」ら乗り換える（複数経路の同時利用、PROTOCOL §13）
   feedback            受信側 → 送信側のフィードバックコード（QSF1-…）と、送信側からの合図（notice、QSC1-…）。PROTOCOL §11
-  sound               音の変復調（1 シンボル = 0.04 秒の 3 音の和音、2 つの周波数帯を交互に使う）。フィードバックを送信側のマイクへ返す経路。PROTOCOL §14
+  sound               音の変復調（1 シンボル = 0.04 秒、五音音階の 2 声を 1 音ずつ、オルゴール風に減衰。ユーザーの要望: 聞いて不快でないこと）。フィードバックを送信側のマイクへ返す経路。PROTOCOL §14
   link                別の経路を張るためのリンクコード（QSL1-…、分割と組み立ての枠だけ。中身は経路ごと）。PROTOCOL §12
   manifest            manifest JSON とメタエンベロープ（"QSM"、署名枠つき）
   payload             ファイル内容の単純連結＋zstd、BLAKE3 検証、展開（UnpackSink）。Packer は pull（add_file）と push（begin_file / write_chunk / end_file）の両方
@@ -92,10 +92,12 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 - `recv` は未完了で終わると終了コード 2 と resume code を出す。
 - **作りかけの機能は Feature preview に置く**（ユーザーの方針: 基本は従来の方式。新機能は送信側が `#/preview` で個別にオンにする）。定義は `web/src/lib/prefs.ts` の `PREVIEW_FEATURES`、保存先は localStorage の `qrsend.preview.<id>`。オフのときは画面も送る内容も従来と同じにする。受信側には設定を作らず、送信側からの合図で自動的に従う形にする。
 - 経路が増えても受け皿は 1 つ: フレームは噴水符号なので、どの経路から来たフレームも同じ `recvPush` に入れればよい。送信側は 1 つの生成器（SendSession / FrameStream）から各経路に別々のフレームを配る。新しい経路を足すときはこの形を崩さない。
-- ローカルネットワーク（preview「Local network boost」、PROTOCOL §12・§13、`web/src/lib/lan.ts`）: 送信側が WebRTC の offer をリンクコードとしてストリームに混ぜ、受信側は利用者が Connect を押したら answer を QR で表示、送信側のカメラがそれを読んで接続する（STUN なし、ホスト候補のみ）。RTCPeerConnection は Worker に無いのでページ側で持ち、コードは `engine.sendTexts`（4096 バイトのシンボルの別フレーム列。SendSession の `wide`）で取り出して流す。画面は止めず、`sendTextChannelUp(true)` で末尾から 1 セグメントずつに切り替える。
+- ローカルネットワーク（preview「Local network boost」、PROTOCOL §12・§13、`web/src/lib/lan.ts`）: 送信側が WebRTC の offer をリンクコードとしてストリームに混ぜ、受信側は確認なしで answer を QR で表示し（ユーザーの判断: LAN は許可を待たなくてよい。音は毎回明示的な許可が必要）、送信側のカメラがそれを読んで接続する（STUN なし、ホスト候補のみ）。RTCPeerConnection は Worker に無いのでページ側で持ち、コードは `engine.sendTexts`（4096 バイトのシンボルの別フレーム列。SendSession の `wide`）で取り出して流す。画面は止めず、`sendTextChannelUp(true)` で末尾から 1 セグメントずつに切り替える。
   - 実測で分かった落とし穴: (1) 受信側が受け取ったメッセージごとに小さな返信を返すとデータチャネルが 15 → 0.6 MB/s に落ちる → 返信は 100 ms ごとに 1 通にまとめる。(2) 接続直後に一気に流し込むとパケットが捨てられて 8 秒止まる → 送ってよい量は 32 コードから倍々に増やす動的な窓（`LanSender`）。(3) QR 用の小さなシンボル（60 B）で 1 MiB のセグメントを符号化すると K=17,000 で前計算に数秒かかる → 修復シンボルの前計算は最初に必要になるまで遅らせた（`SegmentEncoder`）。
   - e2e の注意: macOS のファイアウォールは Playwright 同梱の Chromium 同士の LAN アドレス通信を通さない（ループバックを許可すると経路が混ざって遅くなる）。ローカルではインストール済みの Google Chrome（`channel: "chrome"`）を使い、CI（Linux）は同梱 Chromium を使う。`capturePlayer` は 10 fps に追いつかずコマを飛ばすので、全コマが必要なテストは先に Slower を押して表示を遅くする。
 - 音でのフィードバック（preview「Feedback by sound」、PROTOCOL §14、`web/src/lib/sound.ts`）: 送信側は notice の `HEARS_SOUND` を立ててマイクを開く（AudioWorklet の `tap.worklet.js` → メインスレッドの wasm `SoundDecoder`）。受信側は利用者が「Answer by sound」を押したら、フィードバックコードのバイト列を WAV にして `<audio>` で鳴らす（同じコードなら同じ WAV を再生し直す）。CSP の `connect-src 'self'` のためページ内から blob: を fetch できないので、e2e は受信側のコンテキストを `bypassCSP` で作って WAV を読み出し、Chrome の `--use-file-for-fake-audio-capture` で送信側のマイクに流す。実際のスピーカーとマイクでは未検証。
+- 計測値の表示（preview「Show measurements」）: カメラの読み取り（毎秒の回数、コードがある画像／無い画像それぞれの所要 ms）、受信側の取り込み（1 回あたりの ms と件数、待ち行列）、LAN 送信側が何を待っているか（受信側の確認待ち／ネットワーク待ち／生成）の割合を画面に出す。「なぜ遅いか」は推測で直さず、まずこれで実機の数字を見る（ユーザーの指摘: 原因を特定してから実装する）。`localStorage["qrsend.debug.zxing"]="1"` で内蔵検出器を使わず ZXing にできる（iPhone 相当の経路を Mac で測る用）。
+  - 実測（この Mac、1920×1080）: 内蔵検出器はコードあり 37〜48 ms／なし 25 ms、ZXing はあり 21〜25 ms／なし 28 ms。「コードが映っていないと読み取りが重くなる」は成り立たなかった。実機で「QR を読めなくすると LAN が 5〜6 → 3〜4 MB/s に落ちた」原因は未特定。
 - カラーコード（preview、PROTOCOL §2.3）: `drawColorGrid` が 1 枠に 3 コードを RGB で重ねる。受信は `scan.worker.ts` が 12 フレームに 1 回 RGB を分けて読み、3 成分の内容が違えばカラーとして読み続ける（送信側からの合図は無い）。
 - 画面キャプチャ受信（preview）: `Scanner.startScreen`（getDisplayMedia）。ヘッドレスのブラウザには共有できる画面が無いので、e2e は getDisplayMedia を仮想カメラのストリームに差し替えて確認している（実際の画面共有は未検証）。
 - **e2e でブラウザを起動するときは必ず `--use-fake-device-for-media-stream` を付ける**（`e2e/video.ts` の `fakeCamera`）。`--use-fake-ui-for-media-stream` だけだと権限が自動で通り、受信ページが開発機の本物のカメラを開いてしまう。

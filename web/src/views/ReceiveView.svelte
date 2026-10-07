@@ -6,6 +6,7 @@
   import type { RecvState } from "../lib/engine-types";
   import { bytes, duration, RateMeter } from "../lib/format";
   import { LINK_PREFIX, LanReceiver, LinkAssembler, canConnect, isOffer, type LinkMessage } from "../lib/lan";
+  import { featureOn } from "../lib/prefs";
   import { toDataUrl } from "../lib/qrdraw";
   import { feedbackWav } from "../lib/sound";
   import { copyText } from "../lib/save";
@@ -20,6 +21,13 @@
   let queued: string[] = [];
   let pushing = false;
   const meter = new RateMeter();
+
+  // Measurements (a preview feature): how fast received codes are taken in.
+  const showStats = featureOn("stats");
+  let intake = $state({ msPerBatch: 0, codesPerBatch: 0, waiting: 0, linkRate: 0 });
+  let linkBytes = 0;
+  let linkBytesAt = 0;
+  let linkBytesSeen = 0;
 
   // When the sender asks for it (two-way transfer), this screen shows it what
   // is still missing, so it sends only that and stops by itself. The code is
@@ -107,16 +115,17 @@
   const active = $derived(!!st && !error && watching);
 
   // The sender may offer a direct connection over the local network (its
-  // "Local network boost"). Nothing connects unless the person receiving
-  // agrees; the answer then goes back as a code on this screen, and the codes
-  // arriving through the connection join those from the camera.
+  // "Local network boost"). The offer is accepted as it comes: the answer goes
+  // back as a code on this screen, and the codes arriving through the
+  // connection join those from the camera. The person receiving can end the
+  // connection, and it is not taken up again in this transfer.
   // Replies through the connection are gathered into one message every so
   // often. (A small reply for every message received makes a browser's data
   // channel crawl: measured 0.6 MB/s instead of 15.)
   const REPLY_EVERY_MS = 100;
   const assembler = new LinkAssembler();
   let offer = $state<LinkMessage | undefined>();
-  let linkChoice = $state<"ask" | "yes" | "no">("ask");
+  let linkDeclined = $state(false);
   let linkState = $state<"none" | "answering" | "connected" | "closed">("none");
   let answerUrl = $state("");
   let linkError = $state("");
@@ -147,13 +156,20 @@
     if (!msg || !isOffer(msg) || !canConnect || msg.session !== info?.session) return;
     if (offer && offer.id === msg.id) return;
     offer = msg;
-    if (linkChoice === "yes") connect();
+    connect();
+  }
+
+  function disconnect() {
+    linkDeclined = true;
+    answerUrl = "";
+    linkState = "none";
+    clearInterval(replyTimer);
+    lan?.stop();
   }
 
   async function connect() {
-    linkChoice = "yes";
     linkError = "";
-    if (!offer) return;
+    if (!offer || linkDeclined) return;
     lan ??= new LanReceiver({
       codes: (codes) => {
         linkCodes.push(...codes);
@@ -220,8 +236,23 @@
         const fromLink = linkCodes.splice(0, 64);
         const batch = queued.concat(fromLink);
         queued = [];
+        const pushedAt = performance.now();
         apply(await engine.recvPush(batch));
         linkTaken += fromLink.length;
+        if (showStats) {
+          const now = performance.now();
+          const ease = (average: number, value: number) => (average === 0 ? value : average + (value - average) / 20);
+          // Codes are Base45 text: three characters carry two bytes.
+          for (const code of fromLink) linkBytes += (code.length * 2) / 3;
+          if (now - linkBytesAt > 1000) {
+            if (linkBytesAt) intake.linkRate = ((linkBytes - linkBytesSeen) * 1000) / (now - linkBytesAt);
+            linkBytesAt = now;
+            linkBytesSeen = linkBytes;
+          }
+          intake.msPerBatch = ease(intake.msPerBatch, now - pushedAt);
+          intake.codesPerBatch = ease(intake.codesPerBatch, batch.length);
+          intake.waiting = linkCodes.length;
+        }
       }
     } catch (e) {
       failure = e instanceof Error ? e.message : String(e);
@@ -258,11 +289,18 @@
   <Camera {ontexts} {active} allowFile={!result} />
 {/if}
 
+{#if showStats && intake.msPerBatch > 0 && !result}
+  <p class="small muted" data-testid="rx-stats">
+    Taking in: {intake.msPerBatch.toFixed(1)} ms per batch of {intake.codesPerBatch.toFixed(0)} codes · {intake.waiting} waiting
+    {#if intake.linkRate > 0}· network {bytes(Math.round(intake.linkRate))}/s{/if}
+  </p>
+{/if}
+
 {#if st?.feedbackBySound && soundChoice === "ask"}
   <div class="card stack" data-testid="sound-offer">
     <p>
-      <strong>The sender listens for feedback by sound.</strong> This device would answer with short chirps from its
-      speaker, so the sender sends only what is missing and stops when everything has arrived.
+      <strong>The sender listens for feedback by sound.</strong> This device would answer with short runs of soft notes
+      from its speaker, so the sender sends only what is missing and stops when everything has arrived.
     </p>
     <div class="row">
       <button class="primary" onclick={allowSound}>Answer by sound</button>
@@ -271,30 +309,28 @@
   </div>
 {/if}
 {#if soundChoice === "yes"}
-  <p class="small muted"><span class="badge ok">Sound</span> Answering the sender with chirps. Keep the devices close.</p>
+  <p class="small muted"><span class="badge ok">Sound</span> Answering the sender by sound. Keep the devices close.</p>
 {/if}
 <audio bind:this={speaker} data-testid="feedback-sound" data-code={soundCode}></audio>
 
-{#if offer && !result && linkChoice === "ask"}
-  <div class="card stack" data-testid="link-offer">
-    <p>
-      <strong>The sender offers a direct connection over the local network.</strong> It is much faster than the camera. Both
-      devices must be on the same network; nothing outside it is contacted.
-    </p>
-    <div class="row">
-      <button class="primary" onclick={connect}>Connect</button>
-      <button onclick={() => (linkChoice = "no")}>No, keep using the camera</button>
-    </div>
-  </div>
-{/if}
 {#if answerUrl && !result}
   <div class="card feedback">
     <img src={answerUrl} alt="Connection code for the sender" data-testid="link-answer" />
-    <p class="small muted">Show this code to the sender’s camera to connect. After that the devices no longer need to see each other.</p>
+    <div class="stack">
+      <p class="small muted">
+        The sender offers a direct connection over the local network, much faster than the camera. Show this code to the
+        sender’s camera to connect; after that the devices no longer need to see each other.
+      </p>
+      <button onclick={disconnect}>Use the camera only</button>
+    </div>
   </div>
 {/if}
 {#if linkState === "connected" && !result}
-  <p class="small" data-testid="link-connected"><span class="badge ok">Local network</span> Receiving directly from the sender, and through the camera as well.</p>
+  <p class="small row" data-testid="link-connected">
+    <span class="badge ok">Local network</span>
+    <span>Receiving directly from the sender, and through the camera as well.</span>
+    <button onclick={disconnect}>Disconnect</button>
+  </p>
 {:else if linkError}
   <p class="small muted">No direct connection ({linkError}); the camera carries on.</p>
 {/if}

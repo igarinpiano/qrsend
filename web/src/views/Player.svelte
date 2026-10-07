@@ -6,7 +6,7 @@
   import { bytes, duration, RateMeter } from "../lib/format";
   import { LINK_PREFIX, LanSender, canConnect, type LinkState } from "../lib/lan";
   import { featureOn } from "../lib/prefs";
-  import { Scanner } from "../lib/scanner";
+  import { Scanner, type ScanStats } from "../lib/scanner";
   import { Ear, canListen } from "../lib/sound";
 
   /** `grid` is codes per side, or 0 to fill the screen. */
@@ -70,6 +70,11 @@
   const cameraFeature = featureOn("twoWay") || lanFeature;
   const soundFeature = featureOn("sound") && canListen;
   const twoWayFeature = cameraFeature || soundFeature;
+  // Measurements (a preview feature): what this side spends its time on.
+  const showStats = featureOn("stats");
+  let eyeStats = $state<ScanStats | undefined>();
+  let linkStats = $state<LanSender["measurements"] | undefined>();
+  const percent = (share: number) => `${Math.round(share * 100)}%`;
   let ear: Ear | undefined;
   let watching = $state(false);
   let hearing = $state(false);
@@ -121,7 +126,7 @@
       problems.push(e instanceof DOMException && e.name === "NotAllowedError" ? `${what} access denied` : `no ${what}`);
     if (cameraFeature) {
       try {
-        scanner ??= new Scanner(eye, onTexts);
+        scanner ??= new Scanner(eye, onTexts, showStats ? (s) => (eyeStats = s) : undefined);
         await scanner.start(undefined, "user");
         watching = true;
       } catch (e) {
@@ -161,6 +166,7 @@
   }
 
   function watch() {
+    if (showStats) linkStats = linkUp ? lan?.measurements : undefined;
     if (!report || finished) return;
     silentFor = performance.now() - heardAt;
     if (silentFor > FEEDBACK_LOST_MS) forget();
@@ -310,6 +316,24 @@
         {/if}
       </span>
     </div>
+    {#if showStats && (linkStats || eyeStats)}
+      <div class="info small" data-testid="tx-stats">
+        {#if linkStats}
+          <span>
+            Network: {linkStats.sent} codes sent, {linkStats.onTheirWay} of {linkStats.window} on their way · waiting for the
+            receiver {percent(linkStats.waitingForReceiver)}, for the network {percent(linkStats.waitingForNetwork)}, preparing
+            {percent(linkStats.preparing)}
+          </span>
+        {/if}
+        {#if eyeStats}
+          <span>
+            Camera: {eyeStats.rate.toFixed(0)} reads/s · {eyeStats.msWithCodes.toFixed(0)} ms with codes, {eyeStats.msWithout.toFixed(
+              0,
+            )} ms without
+          </span>
+        {/if}
+      </div>
+    {/if}
     <div class="row">
       <!-- svelte-ignore a11y_media_has_caption -->
       <video class="eye" class:on={watching} bind:this={eye} playsinline muted></video>

@@ -136,12 +136,13 @@ loaded (PWA).
 - **Feature preview** (footer link): new ways of sending that are still being
   worked on. Each is off until the sender turns it on; otherwise everything
   works as before.
-  - *Feedback by sound*: the receiver answers with short chirps from its
-    speaker, heard by the sender's microphone — two-way transfer without a
-    camera that sees the receiver's screen. The receiver is asked first.
+  - *Feedback by sound*: the receiver answers with short runs of soft notes
+    from its speaker, heard by the sender's microphone — two-way transfer
+    without a camera that sees the receiver's screen. The receiver is asked
+    every time before it makes a sound.
   - *Local network boost*: once each device has seen the other's screen, they
-    also connect directly over the local network (no server, nothing outside
-    the network is contacted, and the receiver is asked first). Both ways are
+    also connect directly over the local network (no server, and nothing
+    outside the network is contacted). Both ways are
     then used at once — megabytes per second instead of kilobytes — and the
     screen carries on alone if the connection drops.
   - *Color codes*: three codes in one, as the red, green and blue parts of

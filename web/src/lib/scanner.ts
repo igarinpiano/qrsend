@@ -11,7 +11,15 @@ export interface ScanStats {
   height: number;
   /** The stream is being read as color codes. */
   colored?: boolean;
+  /** Pictures read per second, lately. */
+  rate: number;
+  /** Milliseconds the decoder took per picture, lately: with codes in it, and without. */
+  msWithCodes: number;
+  msWithout: number;
 }
+
+/** A running average that follows the last twenty or so values. */
+const follow = (average: number, value: number) => (average === 0 ? value : average + (value - average) / 20);
 
 type VideoWithRvfc = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: () => void) => number;
@@ -28,16 +36,32 @@ export class Scanner {
   /** Counts stop() calls, so slow async steps notice they were superseded. */
   private turn = 0;
   private decoded?: () => void;
-  stats: ScanStats = { frames: 0, codes: 0, engine: "…", width: 0, height: 0 };
+  stats: ScanStats = { frames: 0, codes: 0, engine: "…", width: 0, height: 0, rate: 0, msWithCodes: 0, msWithout: 0 };
+  private readAt = 0;
 
   constructor(
     private video: VideoWithRvfc,
     private onTexts: (texts: string[]) => void,
     private onStats?: (s: ScanStats) => void,
   ) {
-    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean }>) => {
+    // For telling what a slow device spends its time on: a browser setting
+    // that makes the decoder skip the platform's own detector, as on devices
+    // that have none (iPhone, iPad).
+    try {
+      if (localStorage.getItem("qrsend.debug.zxing") === "1") this.worker.postMessage({ zxing: true });
+    } catch {
+      /* no storage: nothing to force */
+    }
+    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean; ms?: number }>) => {
       this.busy = false;
       this.stats.frames++;
+      const now = performance.now();
+      if (this.readAt) this.stats.rate = follow(this.stats.rate, 1000 / Math.max(now - this.readAt, 1));
+      this.readAt = now;
+      if (e.data.ms !== undefined) {
+        if (e.data.texts.length) this.stats.msWithCodes = follow(this.stats.msWithCodes, e.data.ms);
+        else this.stats.msWithout = follow(this.stats.msWithout, e.data.ms);
+      }
       this.stats.codes += e.data.texts.length;
       this.stats.engine = e.data.engine;
       this.stats.colored = !!e.data.colored;
