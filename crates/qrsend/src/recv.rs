@@ -386,7 +386,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                             );
                         }
                         pb.set_style(
-                            ProgressStyle::with_template("{bar:28.cyan/blue} {msg}").unwrap(),
+                            ProgressStyle::with_template("{bar:16.cyan/blue} {wide_msg}").unwrap(),
                         );
                         pb.set_length(1000);
                         session = Some(s);
@@ -439,10 +439,12 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 String::new()
             };
             let line = format!(
-                "{}% · {} of {} · {} codes to go · {}/s{eta}",
+                "{}% · {} of {} · {} of {} codes, {} to go · {}/s{eta}",
                 done * 100 / p.total_bytes.max(1),
                 util::human_bytes(done),
                 util::human_bytes(p.total_bytes),
+                p.total_symbols - p.remaining_symbols,
+                p.total_symbols,
                 p.remaining_symbols,
                 util::human_bytes(rate as u64),
             );

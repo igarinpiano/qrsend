@@ -109,7 +109,8 @@
     <div class="row spread small muted">
       <span data-testid="remaining">
         {#if total}
-          {pct.toFixed(0)}% · {bytes(total - left)} of {bytes(total)} · {info.remaining_codes} codes to go
+          {pct.toFixed(0)}% · {bytes(total - left)} of {bytes(total)} · {(info.total_codes ?? 0) - (info.remaining_codes ?? 0)} of {info.total_codes}
+          codes, {info.remaining_codes} to go
         {/if}
       </span>
       <span>

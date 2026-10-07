@@ -59,7 +59,8 @@ export interface RecvInfo {
   /** Bytes on the wire in total and still missing; null before the first code. */
   total_bytes: number | null;
   remaining_bytes: number | null;
-  /** About how many more codes it takes to finish. */
+  /** Codes the whole transfer takes (without redundancy), and about how many more it takes to finish. */
+  total_codes: number | null;
   remaining_codes: number | null;
 }
 

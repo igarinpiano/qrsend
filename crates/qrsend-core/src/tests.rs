@@ -112,6 +112,7 @@ fn full_pipeline_with_loss() {
         if let Some(p) = rx.progress() {
             // The remaining work only ever shrinks.
             assert!(p.remaining_bytes <= last_remaining && p.remaining_bytes <= p.total_bytes);
+            assert!(p.remaining_symbols <= p.total_symbols);
             last_remaining = p.remaining_bytes;
         }
         let text = frame.to_qr_text();

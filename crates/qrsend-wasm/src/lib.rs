@@ -719,6 +719,7 @@ struct Info {
     /// codes that takes. Null until the first code has been read.
     total_bytes: Option<f64>,
     remaining_bytes: Option<f64>,
+    total_codes: Option<f64>,
     remaining_codes: Option<f64>,
 }
 
@@ -1003,6 +1004,7 @@ impl Receive {
             useful: useful as f64,
             total_bytes: progress.map(|p| p.total_bytes as f64),
             remaining_bytes: progress.map(|p| p.remaining_bytes as f64),
+            total_codes: progress.map(|p| p.total_symbols as f64),
             remaining_codes: progress.map(|p| p.remaining_symbols as f64),
         })
     }

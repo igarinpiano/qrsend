@@ -68,6 +68,9 @@ pub struct Progress {
     /// Bytes still to be received, counting partly received segments
     /// proportionally.
     pub remaining_bytes: u64,
+    /// Codes the whole transfer takes at the current symbol size, without
+    /// counting redundancy (an estimate, like `total_bytes`).
+    pub total_symbols: u64,
     /// Codes still needed at the current symbol size (a lower bound: codes
     /// that repeat what is already known do not count).
     pub remaining_symbols: u64,
@@ -184,11 +187,12 @@ impl Receiver {
         };
         for i in 0..=p.seg_count {
             let l = len(i);
+            let k = l.div_ceil(t as u64).max(1);
             out.total_bytes += l;
+            out.total_symbols += k;
             if self.is_done(i) {
                 continue;
             }
-            let k = l.div_ceil(t as u64).max(1);
             // A decoder needs at least one more symbol until it completes.
             let have = match self.decoders.get(&i) {
                 Some((d, _)) if d.symbol_size() == t => (d.received() as u64).min(k - 1),

@@ -150,12 +150,15 @@ impl FrameStream {
     /// for a receiver that misses up to the redundancy), and the nominal speed.
     pub fn status(&self, fps: f64, codes: usize) -> String {
         let per_pass = self.frames_per_pass().max(1);
-        let left = per_pass - self.frames % per_pass;
+        let shown = self.frames % per_pass;
+        let left = per_pass - shown;
         let per_second = fps * codes as f64;
         let rate = self.symbol_size() as f64 * per_second;
         format!(
-            "pass {} · {} codes left ({}) · {:.1} fps × {} · ~{}/s · running {}",
+            "pass {} · {} of {} codes, {} left ({}) · {:.1} fps × {} · ~{}/s · running {}",
             self.pass() + 1,
+            shown,
+            per_pass,
             left,
             util::human_duration(left as f64 / per_second),
             fps,

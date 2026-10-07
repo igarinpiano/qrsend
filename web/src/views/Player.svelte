@@ -104,7 +104,8 @@
   const perTick = $derived(cols * rows);
   // Codes still to show before this pass is over (a receiver that saw
   // everything is done by then).
-  const left = $derived(info.framesPerPass - (frames % info.framesPerPass));
+  const shown = $derived(frames % info.framesPerPass);
+  const left = $derived(info.framesPerPass - shown);
   const rate = $derived(info.symbolSize * fps * perTick);
 </script>
 
@@ -117,7 +118,8 @@
         {#if error}
           {error}
         {:else}
-          Pass {pass + 1} · {left} codes left ({duration(left / (fps * perTick))}) · {cols}×{rows} · ~{bytes(rate)}/s
+          Pass {pass + 1} · {shown} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows} ·
+          ~{bytes(rate)}/s
           {info.encrypted ? "· encrypted" : "· not encrypted"}
         {/if}
       </span>
