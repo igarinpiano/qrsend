@@ -46,7 +46,14 @@
   const info = $derived(st?.info ?? undefined);
   const result = $derived(st?.result);
   const error = $derived(failure || st?.error || "");
-  const active = $derived(!!st && !result && !error);
+  // A short transfer can be over before the sender's first notice has been
+  // read. The camera then stays on a little longer, only to learn whether the
+  // sender wants to be told that everything arrived.
+  const LINGER_MS = 8000;
+  let lingering = $state(false);
+  let lingerTimer: ReturnType<typeof setTimeout> | undefined;
+  const watching = $derived(!result || lingering);
+  const active = $derived(!!st && !error && watching);
 
   // The sender may offer a direct connection over the local network (its
   // "Local network boost"). Nothing connects unless the person receiving
@@ -122,6 +129,11 @@
   }
 
   function apply(next: RecvState) {
+    if (next.result && !st?.result && !next.feedback) {
+      lingering = true;
+      lingerTimer = setTimeout(() => (lingering = false), LINGER_MS);
+    }
+    if (next.result && next.feedback) lingering = false;
     st = next;
     showFeedback(next);
     // The sender should hear at once that everything has arrived.
@@ -137,6 +149,7 @@
       .then(apply)
       .catch((e) => (failure = e instanceof Error ? e.message : String(e)));
     return () => {
+      clearTimeout(lingerTimer);
       clearInterval(replyTimer);
       lan?.stop();
       engine.recvStop().catch(() => {});
@@ -166,7 +179,15 @@
   }
 
   function ontexts(texts: string[]) {
-    if (!st || result || error) return;
+    if (!st || error) return;
+    if (result) {
+      // Everything is here, but a sender that asks for feedback only now
+      // (a short transfer can be over before its first notice) must still be
+      // told so.
+      const notices = feedback ? [] : texts.filter((t) => t.startsWith("QSC1-"));
+      if (notices.length) engine.recvPush(notices).then(apply).catch(() => {});
+      return;
+    }
     for (const t of texts) {
       if (t.startsWith(LINK_PREFIX)) onLinkCode(t);
       else queued.push(t);
@@ -181,8 +202,8 @@
 
 <h2>Receive</h2>
 
-{#if !result}
-  <Camera {ontexts} {active} allowFile />
+{#if watching}
+  <Camera {ontexts} {active} allowFile={!result} />
 {/if}
 
 {#if offer && !result && linkChoice === "ask"}

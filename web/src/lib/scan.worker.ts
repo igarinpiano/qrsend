@@ -53,15 +53,15 @@ async function detect(source: ImageBitmap | ImageData, native: BarcodeDetector |
 }
 
 /**
- * Colour codes stack three codes as the red, green and blue parts of the
- * picture. Returns what each part holds, read as a grey picture of its own.
+ * Color codes stack three codes as the red, green and blue parts of the
+ * picture. Returns what each part holds, read as a gray picture of its own.
  */
-async function detectColours(bitmap: ImageBitmap, native: BarcodeDetector | null): Promise<string[][]> {
+async function detectColors(bitmap: ImageBitmap, native: BarcodeDetector | null): Promise<string[][]> {
   const rgba = pixels(bitmap).data;
   const out: string[][] = [];
   for (let c = 0; c < 3; c++) {
-    const grey = new ImageData(bitmap.width, bitmap.height);
-    const d = grey.data;
+    const gray = new ImageData(bitmap.width, bitmap.height);
+    const d = gray.data;
     for (let i = 0; i < rgba.length; i += 4) {
       const v = rgba[i + c];
       d[i] = v;
@@ -69,33 +69,33 @@ async function detectColours(bitmap: ImageBitmap, native: BarcodeDetector | null
       d[i + 2] = v;
       d[i + 3] = 255;
     }
-    out.push(await detect(grey, native));
+    out.push(await detect(gray, native));
   }
   return out;
 }
 
-// Nothing tells a receiver that the codes are coloured. Seen as a grey
-// picture, a coloured frame still yields a code now and then (mostly the
+// Nothing tells a receiver that the codes are colored. Seen as a gray
+// picture, a colored frame still yields a code now and then (mostly the
 // green one), so every so often the three parts are read separately: if they
-// hold different codes, the stream is coloured and is read that way from then
+// hold different codes, the stream is colored and is read that way from then
 // on; if they all hold the same, it is black and white.
-const COLOUR_PROBE_EVERY = 12;
-let coloured = false;
+const COLOR_PROBE_EVERY = 12;
+let colored = false;
 let sinceProbe = 0;
 
 async function scan(bitmap: ImageBitmap, native: BarcodeDetector | null): Promise<string[]> {
   sinceProbe++;
-  if (!coloured && sinceProbe < COLOUR_PROBE_EVERY) return detect(bitmap, native);
-  const parts = await detectColours(bitmap, native);
+  if (!colored && sinceProbe < COLOR_PROBE_EVERY) return detect(bitmap, native);
+  const parts = await detectColors(bitmap, native);
   const all = [...new Set(parts.flat())];
   const most = Math.max(...parts.map((p) => p.length));
   if (all.length > most) {
-    coloured = true;
-  } else if (sinceProbe >= COLOUR_PROBE_EVERY) {
-    // Three times the same (or nothing at all): not coloured.
-    coloured = false;
+    colored = true;
+  } else if (sinceProbe >= COLOR_PROBE_EVERY) {
+    // Three times the same (or nothing at all): not colored.
+    colored = false;
   }
-  if (sinceProbe >= COLOUR_PROBE_EVERY) sinceProbe = 0;
+  if (sinceProbe >= COLOR_PROBE_EVERY) sinceProbe = 0;
   return all;
 }
 
@@ -112,9 +112,9 @@ self.onmessage = async (e: MessageEvent<{ bitmap?: ImageBitmap; zxing?: boolean 
     const native = await nativeDetector();
     if (native) engine = "native";
     texts = await scan(bitmap, native);
-    self.postMessage({ texts, engine, coloured });
+    self.postMessage({ texts, engine, colored });
   } catch (err) {
-    self.postMessage({ texts: [], engine, coloured, error: String(err) });
+    self.postMessage({ texts: [], engine, colored, error: String(err) });
   } finally {
     bitmap.close();
   }

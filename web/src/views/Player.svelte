@@ -2,7 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { engine } from "../lib/engine";
   import type { FrameBatch, ReceiverReport, SendStarted } from "../lib/engine-types";
-  import { drawColourGrid, drawGrid, fitGrid } from "../lib/qrdraw";
+  import { drawColorGrid, drawGrid, fitGrid } from "../lib/qrdraw";
   import { bytes, duration, RateMeter } from "../lib/format";
   import { LINK_PREFIX, LanSender, canConnect, type LinkState } from "../lib/lan";
   import { featureOn } from "../lib/prefs";
@@ -147,12 +147,12 @@
     return fitGrid(info.modules, info.quiet, canvas.clientWidth * dpr, canvas.clientHeight * dpr, MIN_MODULE_PX);
   }
 
-  // Colour codes (a preview feature): three codes per cell.
-  const layers = featureOn("colour") ? 3 : 1;
+  // Color codes (a preview feature): three codes per cell.
+  const layers = featureOn("color") ? 3 : 1;
 
   function draw() {
     if (!shown) return;
-    const paint = layers === 3 ? drawColourGrid : drawGrid;
+    const paint = layers === 3 ? drawColorGrid : drawGrid;
     paint(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet);
   }
 
@@ -272,9 +272,9 @@
           {#if quiet}
             <span data-testid="receiver-quiet">· not heard for {Math.round(silentFor / 1000)}s, sending on</span>
           {/if}
-          · screen {cols}×{rows}{layers === 3 ? " ×3 colours" : ""} ~{bytes(rate)}/s
+          · screen {cols}×{rows}{layers === 3 ? " ×3 colors" : ""} ~{bytes(rate)}/s
         {:else}
-          Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows}{layers === 3 ? " ×3 colours" : ""} ·
+          Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows}{layers === 3 ? " ×3 colors" : ""} ·
           ~{bytes(rate)}/s
           {info.encrypted ? "· encrypted" : "· not encrypted"}
         {/if}

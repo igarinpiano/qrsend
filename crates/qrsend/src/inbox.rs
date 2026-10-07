@@ -31,7 +31,7 @@ pub enum InboxCmd {
         /// Copy received text to the clipboard
         #[arg(long, conflicts_with = "stdout")]
         copy: bool,
-        /// Remove the session from the inbox afterwards
+        /// Remove the session from the inbox afterward
         #[arg(long)]
         remove: bool,
     },

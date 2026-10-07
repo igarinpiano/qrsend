@@ -14,7 +14,7 @@ export function fitGrid(modules: number, quiet: number, w: number, h: number, mi
 
 /**
  * Draws `count` codes of `modules × modules` from `data` (row-major, 1 = dark)
- * in a `cols × rows` grid centred on the canvas. Returns the module size in
+ * in a `cols × rows` grid centered on the canvas. Returns the module size in
  * device pixels.
  */
 export function drawGrid(
@@ -65,14 +65,14 @@ export function drawGrid(
 }
 
 /** Fill styles by which of the three stacked codes is dark: bit 0 red, bit 1 green, bit 2 blue. */
-const COLOURS = ["#fff", "#0ff", "#f0f", "#00f", "#ff0", "#0f0", "#f00", "#000"];
+const COLORS = ["#fff", "#0ff", "#f0f", "#00f", "#ff0", "#0f0", "#f00", "#000"];
 
 /**
  * Like `drawGrid`, but every cell stacks three codes: one in each of the red,
  * green and blue parts of the picture (a dark module switches that part off).
  * `data` holds `3 × cells` codes; cell `n` shows codes `3n`, `3n+1`, `3n+2`.
  */
-export function drawColourGrid(
+export function drawColorGrid(
   canvas: HTMLCanvasElement,
   data: Uint8Array,
   modules: number,
@@ -110,14 +110,14 @@ export function drawColourGrid(
       let current = 0;
       for (let x = 0; x <= modules; x++) {
         const at = base + row + x;
-        const colour = x < modules ? data[at] | (data[at + size] << 1) | (data[at + 2 * size] << 2) : -1;
-        if (colour === current) continue;
+        const color = x < modules ? data[at] | (data[at + size] << 1) | (data[at + 2 * size] << 2) : -1;
+        if (color === current) continue;
         if (current > 0) {
-          ctx.fillStyle = COLOURS[current];
+          ctx.fillStyle = COLORS[current];
           ctx.fillRect(ox + run * scale, oy + y * scale, (x - run) * scale, scale);
         }
         run = x;
-        current = colour;
+        current = color;
       }
     }
   }

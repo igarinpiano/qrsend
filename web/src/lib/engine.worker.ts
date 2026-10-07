@@ -28,6 +28,8 @@ const READ_CHUNK = 4 << 20;
 /** Texts up to this size are shown in the page; larger ones are offered as a file. */
 const MAX_INLINE_TEXT = 4 << 20;
 const FLAG_ENCRYPTED = 1;
+/** Codes in which a sender says what it can do (see `SenderNotice` in the core). */
+const NOTICE_PREFIX = "QSC1-";
 
 function emit(event: EngineEvent): void {
   self.postMessage(event);
@@ -426,7 +428,12 @@ async function recvStart(session?: string): Promise<RecvState> {
 async function recvPush(texts: string[]): Promise<RecvState> {
   const s = receiving;
   if (!s) throw new Error("not receiving");
-  if (s.result || s.error) return state(s);
+  if (s.result || s.error) {
+    // The data is in, but the sender may only now say that it reads
+    // feedback: it still has to learn that everything arrived.
+    if (s.result) for (const text of texts) if (text.startsWith(NOTICE_PREFIX)) s.r.push(text);
+    return state(s);
+  }
   s.notice = undefined;
   const store = await fileStore();
   for (const text of texts) {

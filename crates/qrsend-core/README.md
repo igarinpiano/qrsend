@@ -7,7 +7,7 @@ through a stream of QR codes.
 - RaptorQ (RFC 6330) fountain coding of fixed-size segments
 - Manifest with BLAKE3 hashes, zstd-compressed payloads
 - Device identities, age (X25519) encryption and Ed25519-signed manifests
-- Path sanitisation, resume codes, QR rendering and detection
+- Path sanitization, resume codes, QR rendering and detection
 
 No I/O beyond `std::io` traits, so the same code runs natively and in
 WebAssembly. The wire format is specified in

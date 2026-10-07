@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::Sender;
 
-/// One greyscale picture to scan for QR codes.
+/// One grayscale picture to scan for QR codes.
 pub struct LumaFrame {
     pub width: usize,
     pub height: usize,
@@ -180,7 +180,7 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>, dedupe: bool) -> Resul
         c if c.starts_with("420") => 2 * cw * ch,
         c if c.starts_with("422") => 2 * cw * h,
         c if c.starts_with("444") => 2 * w * h,
-        c => bail!("unsupported Y4M colour space C{c}"),
+        c => bail!("unsupported Y4M color space C{c}"),
     };
     let mut skip = vec![0u8; chroma];
     let mut last = None;

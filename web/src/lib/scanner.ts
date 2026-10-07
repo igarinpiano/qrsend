@@ -9,8 +9,8 @@ export interface ScanStats {
   engine: string;
   width: number;
   height: number;
-  /** The stream is being read as colour codes. */
-  coloured?: boolean;
+  /** The stream is being read as color codes. */
+  colored?: boolean;
 }
 
 type VideoWithRvfc = HTMLVideoElement & {
@@ -35,12 +35,12 @@ export class Scanner {
     private onTexts: (texts: string[]) => void,
     private onStats?: (s: ScanStats) => void,
   ) {
-    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string; coloured?: boolean }>) => {
+    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean }>) => {
       this.busy = false;
       this.stats.frames++;
       this.stats.codes += e.data.texts.length;
       this.stats.engine = e.data.engine;
-      this.stats.coloured = !!e.data.coloured;
+      this.stats.colored = !!e.data.colored;
       if (e.data.texts.length) this.onTexts(e.data.texts);
       this.onStats?.({ ...this.stats });
       this.decoded?.();

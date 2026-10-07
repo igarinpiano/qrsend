@@ -93,7 +93,7 @@ impl std::str::FromStr for Density {
 
 /// Encodes `text` as one alphanumeric segment. Base45 output is always valid
 /// alphanumeric data, and a single segment makes capacity exact (the generic
-/// segment optimiser can pick mixes that overflow a fixed version).
+/// segment optimizer can pick mixes that overflow a fixed version).
 #[cfg(test)]
 fn encode_alphanumeric(text: &[u8], p: QrParams) -> qrcode::types::QrResult<QrCode> {
     let mut bits = qrcode::bits::Bits::new(Version::Normal(p.version as i16));
@@ -144,7 +144,7 @@ impl QrParams {
     }
 }
 
-/// Gap between neighbouring codes and around the grid, in modules. Adjacent
+/// Gap between neighboring codes and around the grid, in modules. Adjacent
 /// codes share it, so every code still has the 4-module quiet zone.
 pub const QUIET: usize = 4;
 
@@ -301,7 +301,7 @@ pub fn render_text(text: &str) -> Result<QrMatrix, QrError> {
     Ok(QrMatrix { width, modules })
 }
 
-/// 8-bit greyscale image view used for detection.
+/// 8-bit grayscale image view used for detection.
 pub struct Luma<'a> {
     pub width: usize,
     pub height: usize,
@@ -344,7 +344,7 @@ pub fn detect(img: Luma<'_>) -> Vec<String> {
         .collect()
 }
 
-/// Rasterises a matrix with a quiet zone into a greyscale buffer (0 = dark).
+/// Rasterizes a matrix with a quiet zone into a grayscale buffer (0 = dark).
 pub fn rasterize(m: &QrMatrix, scale: usize, quiet: usize) -> (usize, Vec<u8>) {
     let side = (m.width + 2 * quiet) * scale;
     let mut px = vec![255u8; side * side];

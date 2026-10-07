@@ -72,7 +72,7 @@ pub struct Receiver {
     feedback_seq: u32,
 }
 
-/// How many recent frames are remembered to recognise repeats.
+/// How many recent frames are remembered to recognize repeats.
 const RECENT_FRAMES: usize = 8192;
 
 /// Segment, ESI and symbol size: what makes two frames carry the same data.

@@ -1,7 +1,7 @@
 # Publishes a release: GitHub Releases → npm → crates.io, in that fixed order.
 # Pick the destinations when running it; unselected stages are skipped, and a
 # failed stage stops the later ones. Manual only: Actions → publish-all → Run
-# workflow. (Modelled on igarinpiano/dirlens.)
+# workflow. (Modeled on igarinpiano/dirlens.)
 #
 # Authentication uses Trusted Publishing (OIDC) for both registries — no
 # tokens are stored in this repository.

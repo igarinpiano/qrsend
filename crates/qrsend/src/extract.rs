@@ -98,7 +98,7 @@ fn apply_metadata(path: &Path, entry: &Entry) {
     #[cfg(unix)]
     if let Some(mode) = entry.mode {
         use std::os::unix::fs::PermissionsExt;
-        // Only the executable bit is honoured.
+        // Only the executable bit is honored.
         let perm = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(perm));
     }
@@ -137,7 +137,7 @@ fn free_name(dir: &Path, name: &str) -> PathBuf {
         .unwrap()
 }
 
-/// Moves `src` to `dst` honouring the conflict policy.
+/// Moves `src` to `dst` honoring the conflict policy.
 fn place(
     src: &Path,
     dst: &Path,

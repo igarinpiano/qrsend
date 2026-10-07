@@ -18,7 +18,7 @@
 #   npm 11.10+), so the next release can publish it from GitHub Actions.
 # - A failure does not stop the run; a summary is printed at the end.
 # - The main package `qrsend-cli` is published last, and only when every platform
-#   package exists afterwards (its optionalDependencies must all resolve), unless
+#   package exists afterward (its optionalDependencies must all resolve), unless
 #   --main is given.
 #
 # Binaries come from the GitHub Release v<version> (qrsend-<version>-<target>

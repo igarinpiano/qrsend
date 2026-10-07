@@ -1,4 +1,4 @@
-//! Receiver-side path sanitisation. See docs/PROTOCOL.md §7.
+//! Receiver-side path sanitization. See docs/PROTOCOL.md §7.
 
 use std::path::{Path, PathBuf};
 
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn neutralises_hostile_names() {
+    fn neutralizes_hostile_names() {
         assert_eq!(ok("ab:c*d?.txt"), "ab_c_d_.txt");
         assert_eq!(ok("trailing. ./x"), "trailing/x");
         assert_eq!(ok("CON"), "_CON");

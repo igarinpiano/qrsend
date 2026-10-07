@@ -7,7 +7,7 @@ QR コードのストリームでテキスト・ファイル・フォルダを�
 
 ## ユーザーについて
 
-- やり取りは日本語。docs も日本語。**アプリの UI・CLI のメッセージ・README は英語のみ**。
+- やり取りは日本語。docs も日本語。**アプリの UI・CLI のメッセージ・README は英語のみ**。英語は**アメリカ式の綴り**（color、behavior、center、recognize、toward。コメントや識別子も同じ）。
 - Rust 好き。Web フロントエンドには詳しくないので、Web 側の判断は具体例つきで説明する。
 - 方針として決まっていること: 大容量優先（時間がかかるのは可、圧縮は手を抜かない）、暗号化は公開鍵方式（age ＋ 送信者署名、Trusted devices）、UI フレームワークは Svelte 5。
 - 目指す理想形（ユーザーの言葉）: 一方的に送るだけでなく、転送前・転送中に受信側から必要な情報（密度・サイズ・位置・ピント・カメラ性能など）を送り返して自動調節する。QR 以外も含む複数の通信手段を同時に使い、最速の組み合わせを選ぶ。配置は正方形に限らない。設計変更のときは、逆方向チャネルと複数トランスポートの余地を塞がないこと。
@@ -93,7 +93,7 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 - ローカルネットワーク（preview「Local network boost」、PROTOCOL §12・§13、`web/src/lib/lan.ts`）: 送信側が WebRTC の offer をリンクコードとしてストリームに混ぜ、受信側は利用者が Connect を押したら answer を QR で表示、送信側のカメラがそれを読んで接続する（STUN なし、ホスト候補のみ）。RTCPeerConnection は Worker に無いのでページ側で持ち、コードは `engine.sendTexts`（4096 バイトのシンボルの別フレーム列。SendSession の `wide`）で取り出して流す。画面は止めず、`sendTextChannelUp(true)` で末尾から 1 セグメントずつに切り替える。
   - 実測で分かった落とし穴: (1) 受信側が受け取ったメッセージごとに小さな返信を返すとデータチャネルが 15 → 0.6 MB/s に落ちる → 返信は 100 ms ごとに 1 通にまとめる。(2) 接続直後に一気に流し込むとパケットが捨てられて 8 秒止まる → 送ってよい量は 32 コードから倍々に増やす動的な窓（`LanSender`）。(3) QR 用の小さなシンボル（60 B）で 1 MiB のセグメントを符号化すると K=17,000 で前計算に数秒かかる → 修復シンボルの前計算は最初に必要になるまで遅らせた（`SegmentEncoder`）。
   - e2e の注意: macOS のファイアウォールは Playwright 同梱の Chromium 同士の LAN アドレス通信を通さない（ループバックを許可すると経路が混ざって遅くなる）。ローカルではインストール済みの Google Chrome（`channel: "chrome"`）を使い、CI（Linux）は同梱 Chromium を使う。`capturePlayer` は 10 fps に追いつかずコマを飛ばすので、全コマが必要なテストは先に Slower を押して表示を遅くする。
-- カラーコード（preview、PROTOCOL §2.3）: `drawColourGrid` が 1 枠に 3 コードを RGB で重ねる。受信は `scan.worker.ts` が 12 フレームに 1 回 RGB を分けて読み、3 成分の内容が違えばカラーとして読み続ける（送信側からの合図は無い）。
+- カラーコード（preview、PROTOCOL §2.3）: `drawColorGrid` が 1 枠に 3 コードを RGB で重ねる。受信は `scan.worker.ts` が 12 フレームに 1 回 RGB を分けて読み、3 成分の内容が違えばカラーとして読み続ける（送信側からの合図は無い）。
 - 画面キャプチャ受信（preview）: `Scanner.startScreen`（getDisplayMedia）。ヘッドレスのブラウザには共有できる画面が無いので、e2e は getDisplayMedia を仮想カメラのストリームに差し替えて確認している（実際の画面共有は未検証）。
 - **e2e でブラウザを起動するときは必ず `--use-fake-device-for-media-stream` を付ける**（`e2e/video.ts` の `fakeCamera`）。`--use-fake-ui-for-media-stream` だけだと権限が自動で通り、受信ページが開発機の本物のカメラを開いてしまう。
 - Two-way transfer（逆方向チャネル、0.1.2〜、Web のみ、preview）: 送信側がオンだと SendSession がデータの合間に notice（QSC1）を混ぜる。受信側はそれを見たセッションに限りフィードバック QR を表示し（0.3 秒以上の間隔で描き直す）、送信プレーヤーが自分のカメラ（前面優先）で読んで `engine.sendFeedback` に渡す。途切れたら 2 秒で `sendReceiverSilent(false)`（窓の完成待ちをやめる）、10 秒で `sendReceiverSilent(true)`（全送信に戻る）。`COMPLETE` は展開まで終わってから立てる。フィードバックは認証なしの助言で、到達の証明には使わない。順方向は逆方向に依存させない（PROTOCOL §11.3）。e2e（`two-way.spec.ts`）は 2 つのブラウザの仮想カメラを Y4M でつないで往復させる。

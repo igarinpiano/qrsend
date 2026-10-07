@@ -7,23 +7,23 @@ import { blank, captureImage, capturePlayer, enablePreview, fakeCamera, writeY4m
 
 // Other ways for the codes to travel than black-and-white through a camera.
 
-test("colour codes: three codes per cell, recognised by the receiver on its own", async ({ playwright, baseURL }) => {
+test("color codes: three codes per cell, recognized by the receiver on its own", async ({ playwright, baseURL }) => {
   fs.mkdirSync(WORK, { recursive: true });
-  const video = path.join(WORK, "colour.y4m");
+  const video = path.join(WORK, "color.y4m");
   const data = Buffer.from(Array.from({ length: 6000 }, (_, i) => (i * 7919) % 251));
 
   const senderBrowser = await playwright.chromium.launch();
   let receiverBrowser: Awaited<ReturnType<typeof playwright.chromium.launch>> | undefined;
   try {
     const sender = await (await senderBrowser.newContext({ baseURL, viewport: { width: 1000, height: 700 } })).newPage();
-    await enablePreview(sender, /Colour codes/);
+    await enablePreview(sender, /Color codes/);
     await sender.goto("./#/send");
-    await sender.locator('input[type="file"]').first().setInputFiles({ name: "colour.bin", mimeType: "application/octet-stream", buffer: data });
+    await sender.locator('input[type="file"]').first().setInputFiles({ name: "color.bin", mimeType: "application/octet-stream", buffer: data });
     await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
     await sender.getByLabel("Density").selectOption("low");
     await sender.getByLabel("Codes on screen").selectOption("2");
     await sender.getByRole("button", { name: "Start sending" }).click();
-    await expect(sender.getByText("×3 colours")).toBeVisible();
+    await expect(sender.getByText("×3 colors")).toBeVisible();
     const frames = await capturePlayer(sender, 30);
     expect(frames.length).toBeGreaterThan(10);
     writeY4m(video, frames);
@@ -32,10 +32,10 @@ test("colour codes: three codes per cell, recognised by the receiver on its own"
     const context = await receiverBrowser.newContext({ baseURL, permissions: ["camera"], acceptDownloads: true });
     const receiver = await context.newPage();
     await receiver.goto("./#/receive");
-    await expect(receiver.getByTestId("received-file")).toHaveText(["colour.bin"], { timeout: 90_000 });
+    await expect(receiver.getByTestId("received-file")).toHaveText(["color.bin"], { timeout: 90_000 });
     const [download] = await Promise.all([
       receiver.waitForEvent("download"),
-      receiver.getByRole("listitem").filter({ hasText: "colour.bin" }).getByRole("button", { name: "Save" }).click(),
+      receiver.getByRole("listitem").filter({ hasText: "color.bin" }).getByRole("button", { name: "Save" }).click(),
     ]);
     expect(fs.readFileSync(await download.path()).equals(data)).toBe(true);
   } finally {

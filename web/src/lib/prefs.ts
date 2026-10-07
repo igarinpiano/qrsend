@@ -38,14 +38,14 @@ export const PREVIEW_FEATURES = [
     ],
   },
   {
-    id: "colour",
-    title: "Colour codes",
+    id: "color",
+    title: "Color codes",
     side: "sending",
     summary:
-      "Shows three codes in one, as the red, green and blue parts of the picture: up to three times the data per frame. Receivers notice by themselves. Works best where colours arrive unchanged (screen capture, a good camera held steady and close); a washed-out picture reads fewer codes, never wrong ones.",
+      "Shows three codes in one, as the red, green and blue parts of the picture: up to three times the data per frame. Receivers notice by themselves. Works best where colors arrive unchanged (screen capture, a good camera held steady and close); a washed-out picture reads fewer codes, never wrong ones.",
     steps: [
-      "Start sending as usual; the player shows coloured codes.",
-      "If the receiver's count of scanned codes grows more slowly than without colours, the camera cannot tell the colours apart well enough: turn this off again.",
+      "Start sending as usual; the player shows colored codes.",
+      "If the receiver's count of scanned codes grows more slowly than without colors, the camera cannot tell the colors apart well enough: turn this off again.",
     ],
   },
   {

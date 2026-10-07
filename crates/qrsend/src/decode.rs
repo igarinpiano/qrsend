@@ -5,7 +5,7 @@
 //!
 //! Dense frames (dozens of codes, small modules) defeat both when run on the
 //! whole picture. QRSend lays codes out on a regular lattice, so every decoded
-//! code predicts where its neighbours are; each predicted cell is cropped and
+//! code predicts where its neighbors are; each predicted cell is cropped and
 //! decoded on its own, which is far more reliable.
 
 use std::collections::{HashSet, VecDeque};
@@ -227,7 +227,7 @@ fn quick_seed(f: &LumaFrame) -> Option<(String, Quad, usize)> {
     if !is_frame(&text) || pts.len() < 3 {
         return None;
     }
-    // Finder-pattern centres; the code extends a little beyond them.
+    // Finder-pattern centers; the code extends a little beyond them.
     let span = (pts[1].x - pts[2].x).hypot(pts[1].y - pts[2].y) as f64;
     let around: Quad = [0, 1, 2, 0].map(|i| (pts[i].x as f64, pts[i].y as f64));
     let cell = crop(f, &around, span * 0.6)?;
@@ -297,7 +297,7 @@ fn detect_with_cells(f: &LumaFrame) -> (Vec<String>, Vec<(Quad, usize)>) {
         }
     }
 
-    // Lattice cells already handled, keyed by their centre on a coarse raster.
+    // Lattice cells already handled, keyed by their center on a coarse raster.
     let key = |q: &Quad, m: usize| {
         let side = ((q[1].0 - q[0].0).hypot(q[1].1 - q[0].1)).max(1.0);
         let cell = side * (m + QUIET) as f64 / m as f64 / 2.0;

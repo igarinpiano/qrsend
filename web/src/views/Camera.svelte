@@ -117,7 +117,7 @@
       {fileProgress.name}: {fileProgress.at.toFixed(1)} / {fileProgress.duration.toFixed(1)} s ·
     {/if}
     {#if stats}{onScreen ? "screen " : ""}{stats.width}×{stats.height} · {stats.engine === "native" ? "built-in detector" : "ZXing"} ·
-      {stats.codes} codes{stats.coloured ? " · colour" : ""}{/if}
+      {stats.codes} codes{stats.colored ? " · color" : ""}{/if}
   </span>
   <span class="row">
     {#if cameras.length > 1 && !fileProgress && !onScreen}

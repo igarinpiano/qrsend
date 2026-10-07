@@ -176,8 +176,8 @@ impl FrameStream {
     }
 }
 
-/// Lays out `codes` row by row in a `cols × rows` grid centred in a `w × h`
-/// pixel area, calling `fill(x, y, w, h)` for every dark module. Neighbouring
+/// Lays out `codes` row by row in a `cols × rows` grid centered in a `w × h`
+/// pixel area, calling `fill(x, y, w, h)` for every dark module. Neighboring
 /// codes share one quiet zone. Returns the module size used (at least 1).
 pub fn layout_grid(
     codes: &[QrMatrix],

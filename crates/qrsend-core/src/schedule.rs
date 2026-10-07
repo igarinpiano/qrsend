@@ -400,7 +400,7 @@ mod tests {
         assert!(first.iter().all(|&i| i <= 1), "{first:?}");
         s.set_backwards(true);
         // The last segment first (meta has had its share in this pass), then
-        // towards the front, one segment at a time.
+        // toward the front, one segment at a time.
         let seen: Vec<u32> = (0..3 * n).map(|_| s.next_slot().seg_index).collect();
         let mut order = seen.clone();
         order.dedup();

@@ -11,7 +11,7 @@ rebuilds the data from any large-enough subset of them.
   segment. Missing pieces can be requested with a short *resume code*.
 - **Private and verified.** End-to-end encryption to paired devices (age) and
   signed manifests; every segment and file is checked against BLAKE3 hashes,
-  paths are sanitised and decompression is bounded.
+  paths are sanitized and decompression is bounded.
 - **CLI and browser.** A single Rust binary, plus a web app (work in progress)
   sharing the same Rust core through WebAssembly.
 
@@ -141,8 +141,8 @@ loaded (PWA).
     the network is contacted, and the receiver is asked first). Both ways are
     then used at once — megabytes per second instead of kilobytes — and the
     screen carries on alone if the connection drops.
-  - *Colour codes*: three codes in one, as the red, green and blue parts of
-    the picture — up to three times the data per frame. Receivers recognise
+  - *Color codes*: three codes in one, as the red, green and blue parts of
+    the picture — up to three times the data per frame. Receivers recognize
     them on their own.
   - *Receive from the screen*: read the codes straight from a window or
     screen (a remote desktop, a virtual machine, a shared screen in a call)
@@ -181,9 +181,9 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] Web app (PWA) with camera receive, pairing and inbox
 - [x] Streaming storage (OPFS) and non-extractable keys in the browser
 - [x] Dense grids and video export / import
-- [x] A back channel from receiver to sender: acknowledgements (web app, feature preview)
+- [x] A back channel from receiver to sender: acknowledgments (web app, feature preview)
 - [ ] Auto-tuning speed and density from that feedback; two-way mode in the CLI
-- [x] More transports side by side: text over any byte channel (CLI), colour codes, screen capture, local network (web app, feature preview)
+- [x] More transports side by side: text over any byte channel (CLI), color codes, screen capture, local network (web app, feature preview)
 - [ ] Sound as a back channel; these transports in the CLI
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
