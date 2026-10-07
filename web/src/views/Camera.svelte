@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { ADVICE } from "../lib/guide";
   import { featureOn } from "../lib/prefs";
   import { Scanner, type ScanStats } from "../lib/scanner";
 
@@ -36,10 +37,14 @@
   }
 
   const showStats = featureOn("stats");
+  // Camera guidance (a preview feature): advice on how to hold the camera.
+  // A captured screen or a video file needs none.
+  const guideFeature = featureOn("guide");
 
   // Receiving from the screen (a preview feature, and only where the browser can capture one).
   const screenOffered = featureOn("screenCapture") && Scanner.canCaptureScreen;
   let onScreen = $state(false);
+  const advice = $derived(guideFeature && started && !onScreen && !fileProgress ? stats?.advice : undefined);
 
   async function useScreen() {
     if (!scanner) return;
@@ -84,6 +89,7 @@
 
   onMount(() => {
     scanner = new Scanner(video, (t) => ontexts(t), (s) => (stats = s));
+    scanner.guide(guideFeature);
     ready = true;
     return () => scanner?.dispose();
   });
@@ -105,6 +111,9 @@
 <div class="camera">
   <!-- svelte-ignore a11y_media_has_caption -->
   <video bind:this={video} playsinline muted></video>
+  {#if advice}
+    <p class="advice" role="status" data-testid="camera-advice">{ADVICE[advice]}</p>
+  {/if}
   {#if !started}
     <div class="overlay">
       {#if error}<p>{error}</p>{/if}
@@ -179,6 +188,18 @@
     padding: 16px;
     text-align: center;
     color: #fff;
+  }
+  .advice {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    margin: 0;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.85);
+    color: #fff;
+    text-align: center;
   }
   .picker {
     width: auto;

@@ -38,15 +38,15 @@ export async function cameraFrom(page: Page, channel: string) {
 
 /**
  * Broadcasts the element matching `selector` (a canvas or an image) on
- * `channel` every `everyMs`, on a white ground and enlarged by `scale`.
+ * `channel` every `everyMs`, enlarged by `scale` on a white ground `margin`
+ * pixels wide all around.
  */
-export async function broadcast(page: Page, channel: string, selector: string, everyMs: number, scale = 1) {
+export async function broadcast(page: Page, channel: string, selector: string, everyMs: number, scale = 1, margin = 24) {
   await page.evaluate(
-    ([name, sel, every, zoom]) => {
+    ([name, sel, every, zoom, margin]) => {
       const out = new BroadcastChannel(name);
       const stage = document.createElement("canvas");
       const ctx = stage.getContext("2d")!;
-      const margin = 24;
       setInterval(async () => {
         const el = document.querySelector(sel) as HTMLCanvasElement | HTMLImageElement | null;
         if (!el) return;
@@ -61,6 +61,6 @@ export async function broadcast(page: Page, channel: string, selector: string, e
         out.postMessage(await createImageBitmap(stage));
       }, every);
     },
-    [channel, selector, everyMs, scale] as const,
+    [channel, selector, everyMs, scale, margin] as const,
   );
 }

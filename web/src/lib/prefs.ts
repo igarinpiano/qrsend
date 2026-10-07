@@ -73,6 +73,17 @@ export const PREVIEW_FEATURES = [
     ],
   },
   {
+    id: "guide",
+    title: "Camera guidance",
+    side: "receiving",
+    summary:
+      "While receiving, tells you how to hold the camera when something is off: move closer (the codes are small in the picture and there is room), move back (the codes reach the edge, so some may be outside), ask for fewer codes (they fill the picture and are still too small), or hold still (the picture is blurred). The advice comes from where the decoder finds the codes, how large their dots come out, and how sharp the picture is compared with a moment ago.",
+    steps: [
+      "Open Receive and point the camera at the sender's screen as usual.",
+      "Advice appears over the camera picture only when something is off, and goes away once it is not.",
+    ],
+  },
+  {
     id: "screenCapture",
     title: "Receive from the screen",
     side: "receiving",

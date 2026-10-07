@@ -1,6 +1,7 @@
 // Feeds pictures to the decoding worker, one at a time: live from a camera
 // or a captured screen, or frame by frame from a video file (a recording of a
 // sender's screen).
+import { Guide, type Advice, type Look } from "./guide";
 import ScanWorker from "./scan.worker?worker";
 import { recoverFromLoadFailure } from "./update";
 
@@ -17,6 +18,8 @@ export interface ScanStats {
   /** Milliseconds the decoder took per picture, lately: with codes in it, and without. */
   msWithCodes: number;
   msWithout: number;
+  /** With `guide(true)`: advice for whoever holds the camera. */
+  advice?: Advice;
 }
 
 /** A running average that follows the last twenty or so values. */
@@ -62,7 +65,9 @@ export class Scanner {
       recoverFromLoadFailure().catch(() => {});
     };
     this.worker.onerror = loadFailed;
-    this.worker.onmessage = (e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean; ms?: number; error?: string }>) => {
+    this.worker.onmessage = (
+      e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean; ms?: number; error?: string; look?: Look }>,
+    ) => {
       if (e.data.error && /fetch|wasm|import/i.test(e.data.error)) loadFailed();
       this.busy = false;
       this.stats.frames++;
@@ -76,10 +81,19 @@ export class Scanner {
       this.stats.codes += e.data.texts.length;
       this.stats.engine = e.data.engine;
       this.stats.colored = !!e.data.colored;
+      this.stats.advice = e.data.look && this.adviser ? this.adviser.notice(e.data.look) : undefined;
       if (e.data.texts.length) this.onTexts(e.data.texts);
       this.onStats?.({ ...this.stats });
       this.decoded?.();
     };
+  }
+
+  private adviser?: Guide;
+
+  /** Whether to work out advice on holding the camera (`stats.advice`). */
+  guide(on: boolean): void {
+    this.adviser = on ? new Guide() : undefined;
+    this.worker.postMessage({ guide: on });
   }
 
   static async cameras(): Promise<MediaDeviceInfo[]> {
