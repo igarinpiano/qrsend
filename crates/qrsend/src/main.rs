@@ -26,7 +26,8 @@ use clap::{CommandFactory, Parser, Subcommand};
     long_about = "Send any data — text, files, folders — through a stream of QR codes.\n\n\
         No network, no pairing server: the sender shows an endless stream of\n\
         fountain-coded QR codes and the receiver rebuilds the data from any\n\
-        sufficiently large subset of them."
+        sufficiently large subset of them.",
+    after_long_help = "QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries."
 )]
 struct Cli {
     #[command(subcommand)]

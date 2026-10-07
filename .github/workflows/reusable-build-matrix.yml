@@ -6,6 +6,10 @@
 # - Linux, Android and the BSDs use cross (cross-rs): zstd-sys compiles C, and
 #   cross images bring the C toolchain for each target plus an old glibc.
 #   Native ubuntu-latest builds would require a new glibc ("Check glibc floor").
+#   `cross: true` is the tagged cross release, whose images link against old
+#   glibc versions; `cross: git` is cross from its main branch, used only for
+#   targets the release cannot build (LoongArch, current Android NDKs) — its
+#   images are much newer (glibc 2.39), so it must not be used for the rest.
 # - `features: --no-default-features` drops the window display (minifb). It is
 #   used where dlopen of X11/Wayland cannot work (static musl) or makes no
 #   sense (Android, BSDs, small boards); those builds show codes in the
@@ -57,12 +61,12 @@ jobs:
           - { target: riscv64gc-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
           - { target: powerpc64le-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
           - { target: s390x-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: loongarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: loongarch64-unknown-linux-gnu, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
           # ── optional: Android (Termux) and BSDs ──────────────────
-          - { target: aarch64-linux-android, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: armv7-linux-androideabi, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: x86_64-linux-android, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: i686-linux-android, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: aarch64-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
+          - { target: armv7-linux-androideabi, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
+          - { target: x86_64-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
+          - { target: i686-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
           - { target: x86_64-unknown-freebsd, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
           - { target: x86_64-unknown-netbsd, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
           - { target: x86_64-unknown-illumos, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
@@ -81,10 +85,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install cross
-        if: matrix.cross
-        # From git: the last tagged release predates several targets
-        # (LoongArch, newer Android NDKs). --force replaces an older cached copy.
+      - name: Install cross (release)
+        if: matrix.cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Install cross (git)
+        if: matrix.cross == 'git'
         run: cargo install cross --git https://github.com/cross-rs/cross --locked --force
       - name: Build (release, native)
         if: ${{ !matrix.cross && !matrix.universal }}

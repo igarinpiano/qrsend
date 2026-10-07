@@ -17,3 +17,5 @@ Features: `zstd-native` (default, C library), `zstdmt`, `ruzstd` (pure Rust,
 for WebAssembly).
 
 License: Apache-2.0
+
+QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.

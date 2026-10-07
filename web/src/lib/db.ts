@@ -1,19 +1,27 @@
-// Minimal IndexedDB helpers. Everything QRSend keeps lives here, in this
-// browser only: the device identity, trusted devices and received segments.
+// Minimal IndexedDB helpers. Small records only: the device identity (as
+// non-extractable keys), trusted devices and the list of receive sessions.
+// Transfer data itself lives in OPFS files (see storage.ts).
 
 const DB_NAME = "qrsend";
-const VERSION = 1;
+const VERSION = 2;
 
 let opening: Promise<IDBDatabase> | undefined;
 
 function db(): Promise<IDBDatabase> {
   opening ??= new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (e) => {
       const d = req.result;
-      d.createObjectStore("kv");
-      d.createObjectStore("sessions", { keyPath: "session" });
-      d.createObjectStore("segments");
+      if (e.oldVersion < 1) {
+        d.createObjectStore("kv");
+        d.createObjectStore("sessions", { keyPath: "session" });
+      }
+      if (e.oldVersion === 1) {
+        // v1 kept received segments in IndexedDB; they are in OPFS now, and
+        // unfinished v1 sessions cannot be continued.
+        d.deleteObjectStore("segments");
+        req.transaction!.objectStore("sessions").clear();
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);

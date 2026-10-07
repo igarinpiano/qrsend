@@ -1,33 +1,12 @@
-// This browser's device identity and its trusted devices.
-import { Identity, parseDeviceId, ready } from "./core";
+// The devices this browser trusts (their public IDs only).
+import { parseDeviceId, ready } from "./core";
 import * as db from "./db";
+import type { DeviceInfo } from "./keys";
 
-export interface DeviceInfo {
-  name: string;
-  fingerprint: string;
-  id: string;
-}
+export type { DeviceInfo };
 
 export interface Trusted extends DeviceInfo {
   added: number;
-}
-
-export async function loadIdentity(): Promise<Identity | undefined> {
-  await ready();
-  const secret = await db.get<string>("kv", "identity");
-  return secret ? Identity.parse(secret) : undefined;
-}
-
-export async function createIdentity(name: string): Promise<Identity> {
-  await ready();
-  const id = Identity.generate(name);
-  await db.put("kv", id.secret(), "identity");
-  return id;
-}
-
-export async function renameIdentity(id: Identity, name: string): Promise<void> {
-  id.rename(name);
-  await db.put("kv", id.secret(), "identity");
 }
 
 export async function trustedDevices(): Promise<Trusted[]> {

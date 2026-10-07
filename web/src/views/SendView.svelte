@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { SendBuilder, ready, symbolSize, type SendSession } from "../lib/core";
-  import { loadIdentity, trustedDevices, type Trusted } from "../lib/devices";
+  import { ready, symbolSize } from "../lib/core";
+  import { trustedDevices, type Trusted } from "../lib/devices";
+  import { engine, onEngineEvent } from "../lib/engine";
+  import type { SendItem, SendStarted } from "../lib/engine-types";
   import { bytes } from "../lib/format";
   import Player from "./Player.svelte";
 
@@ -13,6 +15,7 @@
   }
 
   const DENSITIES = {
+    auto: { version: 0, ec: "L", label: "Automatic" },
     low: { version: 15, ec: "M", label: "Low — small screens, older cameras" },
     normal: { version: 25, ec: "L", label: "Normal" },
     high: { version: 32, ec: "L", label: "High — large screens" },
@@ -20,38 +23,47 @@
   } as const;
   type Density = keyof typeof DENSITIES;
 
+  // Codes per side; 0 fills the screen with as many as fit.
+  const GRIDS = [1, 2, 3, 4, 5, 6, 8, 0];
+
   let mode = $state<"files" | "text">("files");
   let items = $state<Item[]>([]);
   let text = $state("");
   let devices = $state<Trusted[]>([]);
   let selected = $state<string[]>([]);
   let anyone = $state(false);
-  let density = $state<Density>("normal");
+  let density = $state<Density>("auto");
   let fps = $state(10);
   let grid = $state(1);
   let busy = $state(false);
+  let packed = $state<{ done: number; total: number } | undefined>();
   let error = $state("");
-  let session = $state<SendSession | undefined>();
+  let info = $state<SendStarted | undefined>();
   let dragging = $state(false);
   let perCode = $state(0);
 
-  onMount(async () => {
-    devices = await trustedDevices();
-    if (devices.length === 0) anyone = true;
-    const shared = [params.get("title"), params.get("text"), params.get("url")].filter(Boolean).join("\n");
-    const fromQuery = new URLSearchParams(location.search);
-    const sharedQuery = [fromQuery.get("title"), fromQuery.get("text"), fromQuery.get("url")].filter(Boolean).join("\n");
-    if (shared || sharedQuery) {
-      mode = "text";
-      text = shared || sharedQuery;
-    }
-    await ready();
-    updateCapacity();
+  onMount(() => {
+    (async () => {
+      devices = await trustedDevices();
+      if (devices.length === 0) anyone = true;
+      const shared = [params.get("title"), params.get("text"), params.get("url")].filter(Boolean).join("\n");
+      const fromQuery = new URLSearchParams(location.search);
+      const sharedQuery = [fromQuery.get("title"), fromQuery.get("text"), fromQuery.get("url")].filter(Boolean).join("\n");
+      if (shared || sharedQuery) {
+        mode = "text";
+        text = shared || sharedQuery;
+      }
+      await ready();
+      updateCapacity();
+    })();
+    return onEngineEvent((e) => {
+      if (e.event === "send-progress") packed = { done: e.done, total: e.total };
+    });
   });
 
   function updateCapacity() {
     const d = DENSITIES[density];
-    perCode = symbolSize(d.version, d.ec);
+    perCode = d.version ? symbolSize(d.version, d.ec) : 0;
   }
 
   const total = $derived(mode === "text" ? new TextEncoder().encode(text).length : items.reduce((s, i) => s + i.file.size, 0));
@@ -96,33 +108,31 @@
     mode = "files";
   }
 
+  /** Files plus the folders that contain them, in path order (a folder before its content). */
+  function sendItems(): SendItem[] {
+    const dirs = new Set<string>();
+    for (const i of items) {
+      const parts = i.path.split("/");
+      for (let n = 1; n < parts.length; n++) dirs.add(parts.slice(0, n).join("/"));
+    }
+    return [...[...dirs].map((path): SendItem => ({ path })), ...items.map((i): SendItem => ({ path: i.path, file: i.file }))].sort(
+      (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    );
+  }
+
   async function start() {
     error = "";
     busy = true;
+    packed = undefined;
     try {
-      await ready();
-      const builder = new SendBuilder();
-      if (mode === "text") {
-        builder.setText(text);
-      } else {
-        const dirs = new Set<string>();
-        for (const i of items) {
-          const parts = i.path.split("/");
-          for (let n = 1; n < parts.length; n++) dirs.add(parts.slice(0, n).join("/"));
-        }
-        const entries = [
-          ...[...dirs].map((path) => ({ path, file: undefined as File | undefined })),
-          ...items.map((i) => ({ path: i.path, file: i.file as File | undefined })),
-        ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-        for (const e of entries) {
-          if (!e.file) builder.addDir(e.path);
-          else builder.addFile(e.path, new Uint8Array(await e.file.arrayBuffer()), e.file.lastModified);
-        }
-      }
-      if (!anyone) for (const fp of selected) builder.addRecipient(devices.find((d) => d.fingerprint === fp)!.id);
-      const me = await loadIdentity();
       const d = DENSITIES[density];
-      session = builder.build(me, d.version, d.ec, 0.1);
+      info = await engine.sendStart({
+        items: mode === "text" ? [] : sendItems(),
+        text: mode === "text" ? text : undefined,
+        recipients: anyone ? [] : selected.map((fp) => devices.find((dev) => dev.fingerprint === fp)!.id),
+        density: d.version ? { version: d.version, ec: d.ec } : null,
+        redundancy: 0.1,
+      });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -131,8 +141,8 @@
   }
 </script>
 
-{#if session}
-  <Player {session} {fps} {grid} onclose={() => (session = undefined)} />
+{#if info}
+  <Player {info} {fps} {grid} onclose={() => (info = undefined)} />
 {/if}
 
 <h2>Send</h2>
@@ -187,7 +197,7 @@
       <textarea bind:value={text} placeholder="Paste or type anything…"></textarea>
     </label>
   {/if}
-  <p class="muted small">Total: {bytes(total)}{total > 400 * 1024 * 1024 ? " — large transfers are better sent with the qrsend CLI" : ""}</p>
+  <p class="muted small">Total: {bytes(total)}</p>
 </div>
 
 <div class="card">
@@ -224,16 +234,32 @@
   <label class="field">
     <span>Codes on screen</span>
     <select bind:value={grid}>
-      <option value={1}>1</option>
-      <option value={2}>2 × 2 (large screens)</option>
+      {#each GRIDS as g}
+        <option value={g}>{g === 0 ? "As many as fit the screen" : g === 1 ? "1" : `${g} × ${g}`}</option>
+      {/each}
     </select>
   </label>
-  <p class="muted small">{perCode} bytes per code · about {bytes(perCode * fps * grid * grid)}/s before losses</p>
+  <p class="muted small">
+    {#if perCode && grid}
+      {perCode} bytes per code · about {bytes(perCode * fps * grid * grid)}/s before losses
+    {:else if perCode}
+      {perCode} bytes per code
+    {:else}
+      The code size is chosen from the amount of data: small codes for small transfers.
+    {/if}
+    {#if grid !== 1}More codes at once need a sharp camera held close, or a screen recording.{/if}
+  </p>
 </div>
 
 {#if error}<p class="error">{error}</p>{/if}
 
-<button class="primary wide" disabled={!canSend} onclick={start}>{busy ? "Preparing…" : "Start sending"}</button>
+<button class="primary wide" disabled={!canSend} onclick={start}>
+  {#if busy}
+    Preparing…{packed && packed.total ? ` ${Math.floor((packed.done / packed.total) * 100)}%` : ""}
+  {:else}
+    Start sending
+  {/if}
+</button>
 
 <style>
   .tabs {

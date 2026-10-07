@@ -54,6 +54,14 @@
   {/key}
 </main>
 
+<footer class="small muted">
+  <p>
+    <a href="https://github.com/igarinpiano/qrsend">QRSend</a> is open source (Apache-2.0). Nothing you send or receive
+    leaves your devices.
+  </p>
+  <p>QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.</p>
+</footer>
+
 <style>
   header {
     position: sticky;
@@ -90,6 +98,14 @@
     font-weight: 600;
     font-size: 0.95rem;
     white-space: nowrap;
+  }
+  footer {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 0 16px 32px;
+  }
+  footer p {
+    margin: 0 0 4px;
   }
   nav a.active {
     color: var(--text);

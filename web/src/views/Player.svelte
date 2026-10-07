@@ -1,11 +1,16 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import type { SendSession } from "../lib/core";
-  import { drawGrid, type Matrix } from "../lib/qrdraw";
+  import { engine } from "../lib/engine";
+  import type { FrameBatch, SendStarted } from "../lib/engine-types";
+  import { drawGrid, fitGrid } from "../lib/qrdraw";
   import { bytes, duration } from "../lib/format";
 
-  let { session, fps: initialFps, grid, onclose }: { session: SendSession; fps: number; grid: number; onclose: () => void } =
+  /** `grid` is codes per side, or 0 to fill the screen. */
+  let { info, fps: initialFps, grid, onclose }: { info: SendStarted; fps: number; grid: number; onclose: () => void } =
     $props();
+
+  // Smallest module size (device pixels) an automatic grid may use.
+  const MIN_MODULE_PX = 3;
 
   let canvas: HTMLCanvasElement;
   let root: HTMLDivElement;
@@ -13,29 +18,60 @@
   let paused = $state(false);
   let frames = $state(0);
   let pass = $state(0);
-  let codes: Matrix[] = [];
-  const perPass = $derived(session.framesPerPass);
-  const symbol = $derived(session.symbolSize);
+  let cols = $state(1);
+  let rows = $state(1);
+  let error = $state("");
+  let shown: FrameBatch | undefined;
+
+  function layout(): [number, number] {
+    if (grid > 0) return [grid, grid];
+    const dpr = window.devicePixelRatio || 1;
+    return fitGrid(info.modules, info.quiet, canvas.clientWidth * dpr, canvas.clientHeight * dpr, MIN_MODULE_PX);
+  }
+
+  function draw() {
+    if (shown) drawGrid(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet);
+  }
 
   onMount(() => {
     let raf = 0;
     let next = performance.now();
+    let stopped = false;
+    let ready: FrameBatch | undefined;
+    let fetching = false;
     let lock: WakeLockSentinel | undefined;
     navigator.wakeLock?.request("screen").then((l) => (lock = l)).catch(() => {});
     root.requestFullscreen?.().catch(() => {});
 
+    const fetchNext = () => {
+      if (fetching || stopped) return;
+      fetching = true;
+      const [c, r] = layout();
+      engine
+        .sendFrames(c * r)
+        .then((batch) => {
+          ready = batch;
+          [cols, rows] = [c, r];
+        })
+        .catch((e) => (error = e instanceof Error ? e.message : String(e)))
+        .finally(() => (fetching = false));
+    };
+
     const tick = (now: number) => {
-      if (!paused && now >= next) {
-        codes = Array.from({ length: grid * grid }, () => session.nextQr());
-        drawGrid(canvas, codes, grid);
-        frames = session.frames;
-        pass = session.pass;
+      if (!paused && now >= next && ready) {
+        shown = ready;
+        ready = undefined;
+        draw();
+        frames = shown.frames;
+        pass = shown.pass;
         next = Math.max(next + 1000 / fps, now);
       }
+      if (!ready && !paused) fetchNext();
       raf = requestAnimationFrame(tick);
     };
+    fetchNext();
     raf = requestAnimationFrame(tick);
-    const onResize = () => drawGrid(canvas, codes, grid);
+    const onResize = () => draw();
     window.addEventListener("resize", onResize);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === " ") paused = !paused;
@@ -45,10 +81,12 @@
     };
     window.addEventListener("keydown", onKey);
     return () => {
+      stopped = true;
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
       lock?.release().catch(() => {});
+      engine.sendStop().catch(() => {});
     };
   });
 
@@ -63,18 +101,25 @@
     onclose();
   }
 
-  const progress = $derived(((frames % perPass) / perPass) * 100);
-  const rate = $derived(symbol * fps * grid * grid);
+  const perTick = $derived(cols * rows);
+  const progress = $derived(((frames % info.framesPerPass) / info.framesPerPass) * 100);
+  const rate = $derived(info.symbolSize * fps * perTick);
 </script>
 
 <div class="player" bind:this={root}>
   <canvas bind:this={canvas} data-frames={frames} aria-label="QR code stream"></canvas>
   <div class="bar">
     <div class="info small">
-      <strong>{session.summary}</strong>
+      <strong>{info.summary}</strong>
       <span>
-        Pass {pass + 1} · {progress.toFixed(0)}% · {frames} codes · ~{bytes(rate)}/s · one pass ≈ {duration(perPass / (fps * grid * grid))}
-        {session.encrypted ? "· encrypted" : "· not encrypted"}
+        {#if error}
+          {error}
+        {:else}
+          Pass {pass + 1} · {progress.toFixed(0)}% · {frames} codes · {cols}×{rows} · ~{bytes(rate)}/s · one pass ≈ {duration(
+            info.framesPerPass / (fps * perTick),
+          )}
+          {info.encrypted ? "· encrypted" : "· not encrypted"}
+        {/if}
       </span>
     </div>
     <div class="row">

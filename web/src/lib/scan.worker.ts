@@ -56,7 +56,8 @@ self.onmessage = async (e: MessageEvent<{ bitmap?: ImageBitmap; zxing?: boolean 
       const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
       ctx.drawImage(bitmap, 0, 0);
       const image = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-      const results = await readBarcodes(image, { formats: ["QRCode"], maxNumberOfSymbols: 4, tryHarder: true });
+      // Grids can hold many codes; ask for all of them.
+      const results = await readBarcodes(image, { formats: ["QRCode"], maxNumberOfSymbols: 255, tryHarder: true });
       texts = results.filter((r) => r.isValid).map((r) => r.text);
     }
     self.postMessage({ texts, engine });

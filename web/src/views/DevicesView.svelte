@@ -1,22 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { renderText, type Identity } from "../lib/core";
-  import {
-    createIdentity,
-    forget,
-    inspect,
-    loadIdentity,
-    renameIdentity,
-    trust,
-    trustedDevices,
-    type DeviceInfo,
-    type Trusted,
-  } from "../lib/devices";
+  import { renderText } from "../lib/core";
+  import { forget, inspect, trust, trustedDevices, type DeviceInfo, type Trusted } from "../lib/devices";
+  import { createIdentity, identityInfo, loadIdentity, renameIdentity, type StoredIdentity } from "../lib/keys";
   import { toDataUrl } from "../lib/qrdraw";
   import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
 
-  let me = $state<Identity | undefined>();
+  let me = $state<StoredIdentity | undefined>();
   let mine = $state<DeviceInfo | undefined>();
   let qr = $state("");
   let name = $state(guessName());
@@ -37,7 +28,7 @@
   async function load() {
     me = await loadIdentity();
     if (me) {
-      mine = me.info() as DeviceInfo;
+      mine = identityInfo(me);
       qr = toDataUrl(renderText(mine.id), 5);
     }
     devices = await trustedDevices();
@@ -53,7 +44,7 @@
   async function rename() {
     const next = prompt("Device name", mine?.name);
     if (me && next) {
-      await renameIdentity(me, next);
+      me = await renameIdentity(me, next);
       await load();
     }
   }
@@ -109,6 +100,9 @@
       <summary class="small">Show ID as text</summary>
       <code data-testid="my-id">{mine.id}</code>
     </details>
+    {#if me?.kind === "legacy"}
+      <p class="small muted">This browser cannot keep these keys in its protected key store; they are stored as site data.</p>
+    {/if}
     <p class="small muted">
       To receive encrypted transfers, show this code to the sending device (Devices → Scan, or
       <code>qrsend devices add</code>) and check that it displays the same fingerprint.
@@ -120,7 +114,10 @@
       <input type="text" bind:value={name} />
     </label>
     <button class="primary" onclick={create}>Create device ID</button>
-    <p class="small muted">The keys stay in this browser. Clearing site data deletes them.</p>
+    <p class="small muted">
+      The private keys are created inside this browser and cannot be exported — not even by this page. Clearing site data
+      deletes them.
+    </p>
   {/if}
 </div>
 

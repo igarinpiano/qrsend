@@ -1,9 +1,33 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { WORK, cli, hasCli } from "./fixtures";
+import { WORK, cli, cliBoth, hasCli, readIds } from "./fixtures";
 
 test.skip(!hasCli, "qrsend CLI binary not built");
+
+/** Saves frames drawn by the player as PNG files for the CLI to read. */
+async function captureFrames(page: Page, dir: string, count: number): Promise<number> {
+  await expect(page.getByLabel("QR code stream")).toBeVisible();
+  const frames: string[] = await page.evaluate(async (wanted) => {
+    const canvas = document.querySelector("canvas")!;
+    const out: string[] = [];
+    let last = canvas.dataset.frames;
+    const until = Date.now() + 30_000;
+    while (out.length < wanted && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 20));
+      if (canvas.dataset.frames !== last) {
+        last = canvas.dataset.frames;
+        out.push(canvas.toDataURL("image/png"));
+      }
+    }
+    return out;
+  }, count);
+  fs.mkdirSync(dir, { recursive: true });
+  frames.forEach((url, i) =>
+    fs.writeFileSync(path.join(dir, `f${String(i).padStart(3, "0")}.png`), Buffer.from(url.split(",")[1], "base64")),
+  );
+  return frames.length;
+}
 
 test("web → CLI: frames rendered by the browser decode in the CLI", async ({ page }) => {
   const message = "Sent from the browser 🌐";
@@ -13,28 +37,54 @@ test("web → CLI: frames rendered by the browser decode in the CLI", async ({ p
   await page.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
   await page.getByLabel("Density").selectOption("low");
   await page.getByRole("button", { name: "Start sending" }).click();
-  await expect(page.getByLabel("QR code stream")).toBeVisible();
-
-  const frames: string[] = await page.evaluate(async () => {
-    const canvas = document.querySelector("canvas")!;
-    const out: string[] = [];
-    let last = canvas.dataset.frames;
-    const until = Date.now() + 30_000;
-    while (out.length < 12 && Date.now() < until) {
-      await new Promise((r) => setTimeout(r, 20));
-      if (canvas.dataset.frames !== last) {
-        last = canvas.dataset.frames;
-        out.push(canvas.toDataURL("image/png"));
-      }
-    }
-    return out;
-  });
-  expect(frames.length).toBeGreaterThan(4);
 
   const dir = path.join(WORK, "web-frames");
-  fs.mkdirSync(dir, { recursive: true });
-  frames.forEach((url, i) =>
-    fs.writeFileSync(path.join(dir, `f${String(i).padStart(3, "0")}.png`), Buffer.from(url.split(",")[1], "base64")),
-  );
+  expect(await captureFrames(page, dir, 12)).toBeGreaterThan(4);
   expect(cli(["recv", "--images", dir])).toContain(message);
+});
+
+test("web → CLI: files in a 3×3 grid with automatic code size", async ({ page }) => {
+  const data = Buffer.from("grid ".repeat(4000));
+  await page.goto("./#/send");
+  await page.locator('input[type="file"]').first().setInputFiles({ name: "grid.txt", mimeType: "text/plain", buffer: data });
+  await page.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+  await page.getByLabel("Codes on screen").selectOption("3");
+  await page.getByRole("button", { name: "Start sending" }).click();
+
+  const dir = path.join(WORK, "web-grid");
+  expect(await captureFrames(page, dir, 6)).toBeGreaterThan(1);
+  const out = path.join(WORK, "web-grid-out");
+  cli(["recv", "--images", dir, "-o", out]);
+  expect(fs.readFileSync(path.join(out, "grid.txt")).equals(data)).toBe(true);
+});
+
+test("web → CLI: encrypted for a paired device and signed by the browser's key", async ({ page }) => {
+  const ids = readIds();
+  const message = "Browser to CLI, encrypted 🔒";
+  // The browser creates its own identity (non-extractable keys) and pairs both ways.
+  await page.goto("./#/devices");
+  await page.getByRole("button", { name: "Create device ID" }).click();
+  await page.getByText("Show ID as text").click();
+  const browserId = (await page.getByTestId("my-id").textContent())!;
+  await page.getByPlaceholder("qrsend-id:1:age1…").fill(ids.cli);
+  await page.getByRole("button", { name: "Check" }).click();
+  await page.getByRole("button", { name: "Yes, trust it" }).click();
+  cli(["devices", "add", browserId, "--name", "browser", "--yes"], "cli");
+
+  await page.goto("./#/send");
+  await page.getByRole("tab", { name: "Text" }).click();
+  await page.getByPlaceholder("Paste or type anything…").fill(message);
+  await page.getByRole("checkbox", { name: /cli/ }).check();
+  await page.getByRole("button", { name: "Start sending" }).click();
+
+  const dir = path.join(WORK, "web-encrypted");
+  expect(await captureFrames(page, dir, 16)).toBeGreaterThan(4);
+  const received = cliBoth(["recv", "--images", dir], "cli");
+  expect(received.stdout).toContain(message);
+  expect(received.stderr).toContain("browser ✓");
+  expect(received.stderr).toContain("Encrypted for this device");
+  // A device it was not addressed to cannot read it.
+  const other = cliBoth(["recv", "--images", dir], "webdev");
+  expect(other.status).not.toBe(0);
+  expect(other.stderr).toContain("encrypted for another device");
 });

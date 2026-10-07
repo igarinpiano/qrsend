@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listSessions } from "../lib/inbox";
+  import { engine } from "../lib/engine";
 
   let pending = $state(0);
   onMount(async () => {
-    pending = (await listSessions()).filter((s) => !s.complete).length;
+    pending = (await engine.inboxList()).filter((s) => !s.complete).length;
   });
 </script>
 

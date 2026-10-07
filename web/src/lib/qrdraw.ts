@@ -1,12 +1,31 @@
 // Draws QR module matrices onto a canvas, crisp (integer module size).
+// Codes in a grid share one quiet zone, like the CLI's layout.
+
 export interface Matrix {
   width: number;
   modules: Uint8Array;
 }
 
-const QUIET = 4;
+/** Columns and rows that fit `w × h` pixels with modules of at least `minPx`. */
+export function fitGrid(modules: number, quiet: number, w: number, h: number, minPx: number): [number, number] {
+  const fit = (px: number) => Math.max(1, Math.floor((Math.floor(px / minPx) - quiet) / (modules + quiet)));
+  return [fit(w), fit(h)];
+}
 
-export function drawGrid(canvas: HTMLCanvasElement, codes: Matrix[], grid: number): void {
+/**
+ * Draws `count` codes of `modules × modules` from `data` (row-major, 1 = dark)
+ * in a `cols × rows` grid centred on the canvas. Returns the module size in
+ * device pixels.
+ */
+export function drawGrid(
+  canvas: HTMLCanvasElement,
+  data: Uint8Array,
+  modules: number,
+  count: number,
+  cols: number,
+  rows: number,
+  quiet: number,
+): number {
   const dpr = window.devicePixelRatio || 1;
   const w = Math.floor(canvas.clientWidth * dpr);
   const h = Math.floor(canvas.clientHeight * dpr);
@@ -17,21 +36,23 @@ export function drawGrid(canvas: HTMLCanvasElement, codes: Matrix[], grid: numbe
   const ctx = canvas.getContext("2d", { alpha: false })!;
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, w, h);
-  if (codes.length === 0) return;
-  const cellW = Math.floor(w / grid);
-  const cellH = Math.floor(h / grid);
-  const span = codes[0].width + 2 * QUIET;
-  const scale = Math.max(1, Math.floor(Math.min(cellW, cellH) / span));
-  const side = span * scale;
+  if (count === 0) return 0;
+  const extW = cols * (modules + quiet) + quiet;
+  const extH = rows * (modules + quiet) + quiet;
+  const scale = Math.max(1, Math.floor(Math.min(w / extW, h / extH)));
+  const x0 = Math.floor((w - extW * scale) / 2);
+  const y0 = Math.floor((h - extH * scale) / 2);
+  const pitch = (modules + quiet) * scale;
   ctx.fillStyle = "#000";
-  codes.forEach((code, n) => {
-    const ox = (n % grid) * cellW + Math.floor((cellW - side) / 2) + QUIET * scale;
-    const oy = Math.floor(n / grid) * cellH + Math.floor((cellH - side) / 2) + QUIET * scale;
-    const { width, modules } = code;
-    for (let y = 0; y < width; y++) {
+  for (let n = 0; n < Math.min(count, cols * rows); n++) {
+    const ox = x0 + quiet * scale + (n % cols) * pitch;
+    const oy = y0 + quiet * scale + Math.floor(n / cols) * pitch;
+    const base = n * modules * modules;
+    for (let y = 0; y < modules; y++) {
       let run = -1;
-      for (let x = 0; x <= width; x++) {
-        const dark = x < width && modules[y * width + x] === 1;
+      const row = base + y * modules;
+      for (let x = 0; x <= modules; x++) {
+        const dark = x < modules && data[row + x] === 1;
         if (dark && run < 0) run = x;
         if (!dark && run >= 0) {
           ctx.fillRect(ox + run * scale, oy + y * scale, (x - run) * scale, scale);
@@ -39,13 +60,15 @@ export function drawGrid(canvas: HTMLCanvasElement, codes: Matrix[], grid: numbe
         }
       }
     }
-  });
+  }
+  return scale;
 }
 
 /** Renders a single matrix to a data URL (device ID codes). */
 export function toDataUrl(code: Matrix, scale = 6): string {
+  const quiet = 4;
   const canvas = document.createElement("canvas");
-  const side = (code.width + 2 * QUIET) * scale;
+  const side = (code.width + 2 * quiet) * scale;
   canvas.width = canvas.height = side;
   const ctx = canvas.getContext("2d")!;
   ctx.fillStyle = "#fff";
@@ -53,6 +76,6 @@ export function toDataUrl(code: Matrix, scale = 6): string {
   ctx.fillStyle = "#000";
   for (let y = 0; y < code.width; y++)
     for (let x = 0; x < code.width; x++)
-      if (code.modules[y * code.width + x]) ctx.fillRect((x + QUIET) * scale, (y + QUIET) * scale, scale, scale);
+      if (code.modules[y * code.width + x]) ctx.fillRect((x + quiet) * scale, (y + quiet) * scale, scale, scale);
   return canvas.toDataURL("image/png");
 }

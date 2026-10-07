@@ -276,16 +276,24 @@ qrsend completions <SHELL>
 - 動画入力の実装方式（ffmpeg への依存を許容するか）
 - ID のバックアップと、複数端末間での ID 移行の扱い
 
-## 16. 実装状況（2026-10-02 時点）
+## 16. 実装状況（2026-10-07 時点）
 
 | 項目 | 状況 |
 |---|---|
 | プロトコル core（フレーム・RaptorQ・セグメント・manifest・resume code） | 実装済み |
-| CLI 送信（ウィンドウ / ターミナル / PNG・Y4M 書き出し、グリッド表示） | 実装済み |
-| CLI 受信（カメラ〔ffmpeg 経由〕/ 動画 / 画像、Inbox、再開） | 実装済み（カメラ取り込みは実機未検証） |
+| CLI 送信（ウィンドウ / ターミナル / PNG・動画書き出し） | 実装済み。グリッドは `N`・`COLSxROWS`（64×64 まで）・`auto` |
+| 動画の書き出しと読み込み | 実装済み。`--dense` でフレームを最大限に埋める。読み込みは格子をたどる方式で 1 フレーム数百コードに対応 |
+| CLI 受信（カメラ〔ffmpeg 経由〕/ 動画 / 画像、Inbox、再開） | 実装済み（カメラ取り込みは実機未検証）。テキスト受信後にコピー・保存を選べる |
 | デバイス ID・ペアリング・age 暗号化・送信者署名 | 実装済み（CLI・Web とも） |
-| Web 版（送信・カメラ受信・ペアリング・Inbox・ZIP / フォルダ保存・PWA） | 実装済み（データはメモリ上。大容量は CLI 推奨） |
-| CLI ⇄ Web の相互運用 | E2E テストで検証（CLI の Y4M → Chrome 仮想カメラ、ブラウザ描画 → CLI） |
-| GitHub Pages 公開 | ワークフロー準備済み。リポジトリが private のため未公開 |
-| Web の OPFS ストリーミング保存・non-extractable 鍵 | 未実装 |
-| 双方向自動調整・カラー高密度モード・WebRTC ターボ | 未実装 |
+| 密度の自動選択 | 実装済み（小さな転送は小さなコード、dense 書き出しはフレームに最適なバージョン） |
+| Web 版（送信・カメラ受信・動画ファイル受信・ペアリング・Inbox・保存・PWA） | 実装済み。データは Worker 内で OPFS にストリーミング。グリッドは 8×8 まで、または画面いっぱい |
+| Web の秘密鍵 | WebCrypto の non-extractable 鍵（X25519 / Ed25519）。非対応ブラウザのみ従来方式。旧形式の ID は自動移行 |
+| CLI ⇄ Web の相互運用 | E2E テストで検証（平文・暗号化・署名、多セグメント、ZIP） |
+| 配布 | crates.io、npm（`qrsend-cli` + 機種別。新しい機種は `@qrsend/cli-bin-*`）、GitHub Releases、GitHub Pages |
+| ビルド対象 | macOS / Windows / Linux（glibc・musl）に加え、32bit・ARMv6/v7・RISC-V・ppc64le・s390x・LoongArch・Android・FreeBSD・NetBSD・illumos（追加分は best-effort） |
+| 受信側から送信側への逆方向チャネル（自動調節・確認応答） | 未実装（次の大きな目標） |
+| 複数の通信手段の併用（カラーコード・LAN・音など） | 未実装 |
+
+---
+
+QR コードは株式会社デンソーウェーブの登録商標です。QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.

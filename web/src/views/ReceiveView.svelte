@@ -1,139 +1,92 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { Receive } from "../lib/core";
   import { persist } from "../lib/db";
-  import { bytes, duration } from "../lib/format";
-  import { getSession, newReceive, restore, saveRecord, saveSegment, type SessionRecord } from "../lib/inbox";
-  import { copyText, type FileEntry } from "../lib/save";
+  import { engine } from "../lib/engine";
+  import type { RecvState } from "../lib/engine-types";
+  import { bytes } from "../lib/format";
+  import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
   import Result from "./Result.svelte";
 
   let { params }: { params: URLSearchParams } = $props();
 
-  interface Info {
-    session: string | null;
-    encrypted: boolean;
-    total: number;
-    done: number;
-    complete: boolean;
-    kind: "text" | "files" | null;
-    summary: string | null;
-    plain_length: number | null;
-    wire_length: number | null;
-    sender_name: string | null;
-    sender_status: "trusted" | "unverified" | "unsigned" | null;
-    sender: string | null;
-    entries: { path: string; dir: boolean; size: number }[];
-    useful: number;
-  }
-
-  interface PushResult {
-    locked: string | null;
-    foreign: string | null;
-    completed: number[];
-    meta: boolean;
-    rejected: number[];
-    error: string | null;
-  }
-
-  let r: Receive | undefined;
-  let info = $state<Info | undefined>();
-  let error = $state("");
-  let notice = $state("");
-  let active = $state(true);
-  let result = $state<{ kind: "text"; text: string } | { kind: "files"; entries: FileEntry[] } | undefined>();
-  let resumeCode = $state<string | undefined>();
-  let record: SessionRecord | undefined;
-  let queue: Promise<void> = Promise.resolve();
-  let started = performance.now();
+  let st = $state<RecvState | undefined>();
+  let failure = $state("");
   let rate = $state(0);
+  let queued: string[] = [];
+  let pushing = false;
+  let started = performance.now();
+  let locked = false;
 
-  onMount(async () => {
-    persist();
-    const session = params.get("session");
-    try {
-      r = session ? await restore(session) : await newReceive();
-      if (session) record = await getSession(session);
-      refresh();
-      if (r.isComplete()) finish();
-    } catch (e) {
-      error = String(e);
+  const info = $derived(st?.info ?? undefined);
+  const result = $derived(st?.result);
+  const error = $derived(failure || st?.error || "");
+  const active = $derived(!!st && !result && !error);
+
+  function apply(next: RecvState) {
+    st = next;
+    if (next.info?.session && !locked) {
+      locked = true;
+      started = performance.now();
     }
+    if (next.info) rate = next.info.useful / Math.max((performance.now() - started) / 1000, 0.001);
+  }
+
+  onMount(() => {
+    persist();
+    engine
+      .recvStart(params.get("session") ?? undefined)
+      .then(apply)
+      .catch((e) => (failure = e instanceof Error ? e.message : String(e)));
+    return () => {
+      engine.recvStop().catch(() => {});
+    };
   });
 
-  function refresh() {
-    if (!r) return;
-    info = r.info() as Info;
-    resumeCode = r.resumeCode() ?? undefined;
-    const secs = (performance.now() - started) / 1000;
-    rate = info.useful / Math.max(secs, 0.001);
+  // Codes arrive faster than they are stored; send them on in batches, one
+  // request at a time.
+  async function flush() {
+    if (pushing) return;
+    pushing = true;
+    try {
+      while (queued.length && !result && !error) {
+        const batch = queued;
+        queued = [];
+        apply(await engine.recvPush(batch));
+      }
+    } catch (e) {
+      failure = e instanceof Error ? e.message : String(e);
+    } finally {
+      pushing = false;
+    }
   }
 
   function ontexts(texts: string[]) {
-    if (!r || result || error) return;
-    for (const text of texts) {
-      const res = r.push(text) as PushResult;
-      if (res.foreign) notice = `Ignoring codes of another transfer (${res.foreign}).`;
-      if (res.locked) {
-        const p = r.params() as { session: string; flags: number; segShift: number; segCount: number };
-        record = { ...p, created: Date.now(), updated: Date.now(), done: 0, total: p.segCount + 1, complete: false };
-        started = performance.now();
-      }
-      if (res.error) {
-        error = res.error;
-        active = false;
-      }
-      if (res.rejected.length) notice = `${res.rejected.length} segment(s) failed verification and will be received again.`;
-    }
-    const completed = r.takeCompleted() as { index: number; data: Uint8Array }[];
-    refresh();
-    if (record && info) {
-      const rec = record;
-      rec.done = info.done;
-      rec.summary = info.summary ?? undefined;
-      const snapshot = { ...rec };
-      queue = queue.then(async () => {
-        for (const c of completed) await saveSegment(rec.session, c.index, c.data);
-        await saveRecord(snapshot);
-      });
-    }
-    if (r.isComplete()) finish();
-  }
-
-  async function finish() {
-    if (!r || result) return;
-    active = false;
-    try {
-      result = r.extract() as typeof result;
-      if (record) {
-        record.complete = true;
-        record.done = record.total;
-        const rec = { ...record };
-        queue = queue.then(() => saveRecord(rec));
-      }
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
+    if (!st || result || error) return;
+    queued.push(...texts);
+    flush();
   }
 
   const pct = $derived(info && info.total ? (info.done / info.total) * 100 : 0);
-  const name = $derived(info?.session ? `qrsend-${info.session}` : "qrsend");
 </script>
 
 <h2>Receive</h2>
 
 {#if !result}
-  <Camera {ontexts} {active} />
+  <Camera {ontexts} {active} allowFile />
 {/if}
 
 {#if error}
   <p class="error" role="alert">{error}</p>
 {/if}
-{#if notice && !error}
-  <p class="muted small">{notice}</p>
+{#if st?.notice && !error}
+  <p class="muted small">{st.notice}</p>
+{/if}
+{#if st && !st.persistent}
+  <p class="muted small">This browser offers no file storage here (private window?), so received data is kept in memory only.</p>
 {/if}
 
-{#if info?.session}
+{#if info?.session && !result}
   <div class="card stack">
     <div class="row spread">
       <strong class="ellipsis">{info.summary ?? "Waiting for the file list…"}</strong>
@@ -159,30 +112,28 @@
       <span>{info.done} / {info.total} segments</span>
       <span>
         {#if info.wire_length}{bytes(info.wire_length)}{/if}
-        {#if rate > 0 && !result} · {rate.toFixed(1)} useful codes/s{/if}
+        {#if rate > 0} · {rate.toFixed(1)} useful codes/s{/if}
       </span>
     </div>
-    {#if resumeCode && !result}
+    {#if st?.resumeCode}
       <details>
         <summary class="small">Missing pieces? Resume code</summary>
         <p class="small">Run this on the sending computer to resend only what is missing:</p>
         <p class="row">
-          <code>qrsend send --resume {resumeCode}</code>
-          <button onclick={() => copyText(resumeCode!)}>Copy</button>
+          <code>qrsend send --resume {st.resumeCode}</code>
+          <button onclick={() => copyText(st!.resumeCode!)}>Copy</button>
         </p>
         <p class="small muted">Progress is saved — you can leave and continue later from the Inbox.</p>
       </details>
     {/if}
   </div>
-{:else if !error}
-  <p class="muted">Point the camera at the sender’s screen. Keep the whole code in view; distance matters more than focus.</p>
+{:else if !error && !result}
+  <p class="muted">
+    Point the camera at the sender’s screen and keep the whole code in view — or pick a video recording of the screen.
+  </p>
 {/if}
 
 {#if result}
-  <Result {result} {name} />
+  <Result {result} />
   <p class="small muted">Kept in your <a href="#/inbox">Inbox</a> until you delete it.</p>
-{/if}
-
-{#if info && !info.session && !error}
-  <p class="small muted">Estimated speed appears once codes are detected.{rate > 0 ? ` ${duration(0)}` : ""}</p>
 {/if}

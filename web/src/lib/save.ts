@@ -1,14 +1,29 @@
-// Getting received data out of the browser.
-import { zipSync, type Zippable } from "fflate";
+// Getting received data out of the browser. Entries are Blob slices of the
+// session's output file in OPFS, so nothing here loads file contents into
+// memory: downloads, folder writes and ZIP archives all stream from disk.
+import type { OutEntry } from "./engine-types";
+import { zipBlob } from "./zip";
 
 export interface FileEntry {
   path: string;
   dir: boolean;
-  data?: Uint8Array;
+  size: number;
   mtime?: number;
+  blob?: Blob;
 }
 
-export function download(data: Uint8Array | Blob, filename: string): void {
+/** Turns the entries of a result into Blob slices of its output file. */
+export function sliceEntries(out: Blob, entries: OutEntry[]): FileEntry[] {
+  return entries.map((e) => ({
+    path: e.path,
+    dir: e.dir,
+    size: e.size,
+    mtime: e.mtime,
+    blob: e.dir ? undefined : out.slice(e.offset, e.offset + e.size),
+  }));
+}
+
+export function download(data: Blob | Uint8Array, filename: string): void {
   const blob = data instanceof Blob ? data : new Blob([data as Uint8Array<ArrayBuffer>]);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -24,13 +39,8 @@ export function basename(path: string): string {
   return path.split("/").pop() || path;
 }
 
-export function zip(entries: FileEntry[]): Uint8Array {
-  const tree: Zippable = {};
-  for (const e of entries) {
-    if (e.dir) tree[e.path + "/"] = new Uint8Array();
-    else tree[e.path] = [e.data!, { mtime: e.mtime ? new Date(e.mtime) : undefined, level: 0 }];
-  }
-  return zipSync(tree);
+export function zip(entries: FileEntry[], onProgress?: (done: number, total: number) => void): Promise<Blob> {
+  return zipBlob(entries, onProgress);
 }
 
 export const canPickFolder = typeof window !== "undefined" && "showDirectoryPicker" in window;
@@ -70,9 +80,7 @@ export async function saveToFolder(entries: FileEntry[]): Promise<number> {
     const dir = await subdir(root, parts.slice(0, -1));
     const name = await freeName(dir, parts[parts.length - 1]);
     const handle = await dir.getFileHandle(name, { create: true });
-    const w = await handle.createWritable();
-    await w.write(e.data! as Uint8Array<ArrayBuffer>);
-    await w.close();
+    await e.blob!.stream().pipeTo(await handle.createWritable());
     written++;
   }
   return written;

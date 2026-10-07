@@ -65,8 +65,12 @@ qrsend send --text "hello from the other screen" --to phone --to tablet
 tar c project | qrsend send - --name project.tar --plain
 ```
 
-Useful options: `--density low|normal|high|max`, `--fps 12`, `--grid 2`
-(2×2 codes at once), `--display terminal`.
+Useful options: `--fps 12`, `--display terminal`, and
+
+- `--density auto|low|normal|high|max` — the default `auto` uses small,
+  easy-to-scan codes for small transfers;
+- `--grid 3`, `--grid 8x4` or `--grid auto` — several codes at once (any
+  rectangle up to 64×64; `auto` fills the window).
 
 Receive with a webcam, from a recording of the sender's screen, or from image files:
 
@@ -83,19 +87,39 @@ qrsend send --resume QSR1-XXXXXXXX
 ```
 
 and receive again — progress is kept in the inbox (`qrsend inbox list`).
+After a text arrives you can copy it to the clipboard or save it as a file
+(also `qrsend recv --copy`, `qrsend inbox export <id> --copy`).
 
-Export instead of displaying (for testing, or to play the stream elsewhere):
+### As a video
+
+Write the stream to a video instead of showing it — to play on any screen, TV
+or projector and record, or to move data through a screen capture:
 
 ```bash
-qrsend send big.iso --export-y4m stream.y4m   # also usable as a fake camera in Chrome
-qrsend send notes.md --export-frames frames/
+qrsend send big.iso --dense --export-video stream.mp4   # needs ffmpeg; .y4m needs nothing
+qrsend recv --video stream.mp4 -o out/                   # the file, or a recording of it
 ```
+
+`--dense` fills every frame with as many codes as fit, choosing the code size
+that carries the most data (`--size 3840x2160`, `--scale` pixels per module,
+`--fps`, `--passes` for extra repair codes). A 1080p frame at 2 px per module
+holds about 40 KB — over 1 MB/s at 30 fps when captured without loss. Reading
+finds one code, then walks the grid from it, so frames with hundreds of codes
+decode too. `--export-frames DIR` writes PNG frames instead.
 
 ## Web app
 
 The same protocol runs in the browser (Rust core compiled to WebAssembly):
-send text, files and folders, receive with the camera, pair devices and keep
-unfinished transfers in an inbox. It works offline once loaded (PWA).
+send text, files and folders, receive with the camera or from a video file,
+pair devices and keep unfinished transfers in an inbox. It works offline once
+loaded (PWA).
+
+- Data is streamed to and from the browser's private file storage (OPFS) in a
+  background worker, so large transfers do not have to fit in memory; saving
+  as files, to a folder or as a ZIP reads straight from disk.
+- The device's private keys are WebCrypto keys that cannot be exported — not
+  even by the page itself.
+- Up to 8×8 codes at once, or as many as fit the screen.
 
 ```bash
 cd web && npm ci && npm run wasm && npm run dev
@@ -103,8 +127,6 @@ cd web && npm ci && npm run wasm && npm run dev
 
 It is hosted at <https://igarinpiano.github.io/qrsend/>, and each release also
 ships an offline copy (`qrsend-web-*.zip`).
-The browser keeps everything in memory, so very large transfers are better
-handled by the CLI.
 
 ## How it works
 
@@ -123,11 +145,15 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] Live camera capture in the CLI (via ffmpeg)
 - [x] Device identities, public-key encryption (age) and sender signatures
 - [x] Web app (PWA) with camera receive, pairing and inbox
-- [ ] Streaming storage (OPFS) for very large transfers in the browser
-- [ ] Higher-throughput modes (colour codes, two-way auto-tuning)
+- [x] Streaming storage (OPFS) and non-extractable keys in the browser
+- [x] Dense grids and video export / import
+- [ ] A back channel from receiver to sender (auto-tuning, acknowledgements)
+- [ ] More transports side by side (colour codes, local network, sound)
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
 
 ## License
 
 Apache-2.0
+
+QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.
