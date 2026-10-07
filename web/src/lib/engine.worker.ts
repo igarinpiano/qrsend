@@ -5,7 +5,7 @@
 // packed bodies, read segments and write extracted files, and those calls are
 // served synchronously from OPFS files. Data therefore flows disk → core →
 // disk in small pieces; nothing large is held in memory, on either side.
-import { Identity, Receive, SendJob, SendSession, quietModules, ready, stanzaKeys } from "./core";
+import { Identity, Receive, SendJob, SendSession, linkSplit, quietModules, ready, stanzaKeys } from "./core";
 import * as db from "./db";
 import { trustedDevices } from "./devices";
 import type {
@@ -57,6 +57,8 @@ function parseRanges(text: string): number[] {
 
 interface SendState {
   session: SendSession;
+  /** Session id (hex). */
+  id: string;
   body: RandomFile;
 }
 
@@ -146,7 +148,7 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       req.density?.ec ?? "L",
       req.redundancy,
     );
-    sending = { session, body };
+    sending = { session, id: info.session, body };
     const params = session.params() as { version: number; ec: string; modules: number; symbolSize: number };
     return {
       session: info.session,
@@ -170,6 +172,14 @@ function sendFrames(count: number): FrameBatch {
   const data = sending.session.nextBatch(count);
   const { frames, pass, framesPerPass } = sending.session;
   return { data, count, frames, pass, framesPerPass };
+}
+
+const LINK_OFFER = 1;
+
+function sendLinkOffer(payload: Uint8Array | null, id: number): void {
+  if (!sending) return;
+  const { session } = sending;
+  session.setLinkCodes(payload ? (linkSplit(sending.id, LINK_OFFER, id, payload, session.codeChars) as string[]) : []);
 }
 
 function sendFeedback(text: string): ReceiverReport | null {
@@ -509,6 +519,12 @@ const api: EngineApi = {
   sendStart,
   sendFrames: async (count) => sendFrames(count),
   sendStop,
+  sendTexts: async (count) => {
+    if (!sending) throw new Error("no transfer is being sent");
+    return sending.session.nextTexts(count) as string[];
+  },
+  sendTextChannelUp: async (up) => sending?.session.setTextChannelUp(up),
+  sendLinkOffer: async (payload, id) => sendLinkOffer(payload, id),
   sendAskForFeedback: async (on) => sending?.session.askForFeedback(on),
   sendFeedback: async (text) => sendFeedback(text),
   sendReceiverSilent: async (forget) => sending?.session.receiverSilent(forget),

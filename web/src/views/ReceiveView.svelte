@@ -5,6 +5,7 @@
   import { engine } from "../lib/engine";
   import type { RecvState } from "../lib/engine-types";
   import { bytes, duration, RateMeter } from "../lib/format";
+  import { LINK_PREFIX, LanReceiver, LinkAssembler, canConnect, isOffer, type LinkMessage } from "../lib/lan";
   import { toDataUrl } from "../lib/qrdraw";
   import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
@@ -47,9 +48,84 @@
   const error = $derived(failure || st?.error || "");
   const active = $derived(!!st && !result && !error);
 
+  // The sender may offer a direct connection over the local network (its
+  // "Local network boost"). Nothing connects unless the person receiving
+  // agrees; the answer then goes back as a code on this screen, and the codes
+  // arriving through the connection join those from the camera.
+  // Replies through the connection are gathered into one message every so
+  // often. (A small reply for every message received makes a browser's data
+  // channel crawl: measured 0.6 MB/s instead of 15.)
+  const REPLY_EVERY_MS = 100;
+  const assembler = new LinkAssembler();
+  let offer = $state<LinkMessage | undefined>();
+  let linkChoice = $state<"ask" | "yes" | "no">("ask");
+  let linkState = $state<"none" | "answering" | "connected" | "closed">("none");
+  let answerUrl = $state("");
+  let linkError = $state("");
+  let lan: LanReceiver | undefined;
+  let linkCodes: string[] = [];
+  let linkTaken = 0;
+  let linkAcked = 0;
+  let feedbackSent = "";
+  let replyTimer: ReturnType<typeof setInterval> | undefined;
+
+  /** Tells the sender how far we are: codes taken in ("A<n>") and the latest feedback. */
+  function reply() {
+    if (!lan?.connected) return;
+    const lines: string[] = [];
+    if (linkTaken !== linkAcked) {
+      linkAcked = linkTaken;
+      lines.push(`A${linkTaken}`);
+    }
+    if (st?.feedback && st.feedback !== feedbackSent) {
+      feedbackSent = st.feedback;
+      lines.push(st.feedback);
+    }
+    if (lines.length) lan.send(lines.join("\n"));
+  }
+
+  function onLinkCode(code: string) {
+    const msg = assembler.add(code);
+    if (!msg || !isOffer(msg) || !canConnect || msg.session !== info?.session) return;
+    if (offer && offer.id === msg.id) return;
+    offer = msg;
+    if (linkChoice === "yes") connect();
+  }
+
+  async function connect() {
+    linkChoice = "yes";
+    linkError = "";
+    if (!offer) return;
+    lan ??= new LanReceiver({
+      codes: (codes) => {
+        linkCodes.push(...codes);
+        flush();
+      },
+      state: (state) => {
+        linkState = state;
+        clearInterval(replyTimer);
+        if (state === "connected") {
+          answerUrl = "";
+          replyTimer = setInterval(reply, REPLY_EVERY_MS);
+        }
+      },
+    });
+    try {
+      linkState = "answering";
+      const answer = await lan.accept(offer);
+      await ready();
+      answerUrl = toDataUrl(renderText(answer), 5);
+    } catch (e) {
+      linkState = "closed";
+      linkError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   function apply(next: RecvState) {
     st = next;
     showFeedback(next);
+    // The sender should hear at once that everything has arrived.
+    if (next.result) reply();
     // What matters while waiting: how much is left and how fast it goes.
     if (next.info?.remaining_bytes != null) rate = meter.update(performance.now(), next.info.remaining_bytes);
   }
@@ -61,6 +137,8 @@
       .then(apply)
       .catch((e) => (failure = e instanceof Error ? e.message : String(e)));
     return () => {
+      clearInterval(replyTimer);
+      lan?.stop();
       engine.recvStop().catch(() => {});
     };
   });
@@ -71,10 +149,14 @@
     if (pushing) return;
     pushing = true;
     try {
-      while (queued.length && !result && !error) {
-        const batch = queued;
+      while ((queued.length || linkCodes.length) && !result && !error) {
+        // A connection delivers codes much faster than they can be taken in:
+        // take them in pieces, and tell the sender how far we are.
+        const fromLink = linkCodes.splice(0, 64);
+        const batch = queued.concat(fromLink);
         queued = [];
         apply(await engine.recvPush(batch));
+        linkTaken += fromLink.length;
       }
     } catch (e) {
       failure = e instanceof Error ? e.message : String(e);
@@ -85,7 +167,10 @@
 
   function ontexts(texts: string[]) {
     if (!st || result || error) return;
-    queued.push(...texts);
+    for (const t of texts) {
+      if (t.startsWith(LINK_PREFIX)) onLinkCode(t);
+      else queued.push(t);
+    }
     flush();
   }
 
@@ -100,7 +185,31 @@
   <Camera {ontexts} {active} allowFile />
 {/if}
 
-{#if feedbackUrl}
+{#if offer && !result && linkChoice === "ask"}
+  <div class="card stack" data-testid="link-offer">
+    <p>
+      <strong>The sender offers a direct connection over the local network.</strong> It is much faster than the camera. Both
+      devices must be on the same network; nothing outside it is contacted.
+    </p>
+    <div class="row">
+      <button class="primary" onclick={connect}>Connect</button>
+      <button onclick={() => (linkChoice = "no")}>No, keep using the camera</button>
+    </div>
+  </div>
+{/if}
+{#if answerUrl && !result}
+  <div class="card feedback">
+    <img src={answerUrl} alt="Connection code for the sender" data-testid="link-answer" />
+    <p class="small muted">Show this code to the sender’s camera to connect. After that the devices no longer need to see each other.</p>
+  </div>
+{/if}
+{#if linkState === "connected" && !result}
+  <p class="small" data-testid="link-connected"><span class="badge ok">Local network</span> Receiving directly from the sender, and through the camera as well.</p>
+{:else if linkError}
+  <p class="small muted">No direct connection ({linkError}); the camera carries on.</p>
+{/if}
+
+{#if feedbackUrl && linkState !== "answering"}
   <div class="card feedback">
     <img src={feedbackUrl} alt="Feedback code for the sender" data-testid="feedback" data-code={feedback} />
     <p class="small muted">

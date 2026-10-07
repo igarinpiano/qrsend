@@ -19,7 +19,8 @@ use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use qrsend_core::crypto::{self, DeviceIdentity, DevicePublic, OpenMetaError, SharedSecrets};
 use qrsend_core::fec;
 use qrsend_core::feedback::{self, Feedback, SenderNotice};
-use qrsend_core::frame::{FLAG_ENCRYPTED, Frame, META_INDEX};
+use qrsend_core::frame::{self, FLAG_ENCRYPTED, Frame, META_INDEX};
+use qrsend_core::link::{self, LinkPart};
 use qrsend_core::manifest::{
     Body, Entry, EntryType, Kind, MANIFEST_VERSION, Manifest, MetaEnvelope, MetaSignature,
     session_hex, signed_message,
@@ -571,6 +572,7 @@ fn summary(m: &Manifest) -> String {
 }
 
 /// Reads segments from JavaScript (`read(index) -> Uint8Array`; 0 is meta).
+#[derive(Clone)]
 struct JsSource(Function);
 
 impl SegmentSource for JsSource {
@@ -587,19 +589,36 @@ impl SegmentSource for JsSource {
 #[wasm_bindgen]
 pub struct SendSession {
     sender: Sender<JsSource>,
+    /// A second stream over the same data for channels that carry text
+    /// instead of pictures, in symbols too large for a QR code (far less
+    /// coding work per byte). Created when first used.
+    wide: Option<Sender<JsSource>>,
+    source: JsSource,
+    redundancy: f64,
     params: QrParams,
     frames: u64,
-    /// Codes shown since feedback was asked for (None: not asked).
-    asking: Option<u64>,
+    /// Whether the stream tells the receiver that feedback codes are read.
+    asking: bool,
+    /// Link codes (an offer to connect another way) to mix into the stream.
+    link: Vec<String>,
+    /// Codes shown since something besides data had to be said.
+    since_extras: u64,
+    extra_turn: usize,
 }
 
-/// How often a notice replaces a data code while feedback is asked for: often
-/// at first so the receiver learns of it at once, rarely once it answers.
-fn notice_interval(asked_for: u64, answered: bool) -> u64 {
-    match (answered, asked_for) {
-        (true, _) => 64,
-        (false, ..240) => 8,
-        (false, _) => 32,
+/// Symbol size of the stream for text channels: a 1 MiB segment is 256
+/// symbols instead of thousands.
+const WIDE_SYMBOL_SIZE: usize = 4096;
+
+/// How often something besides data replaces a data code: often while a link
+/// offer is waiting or the receiver has not answered yet (so it learns of it
+/// at once), rarely otherwise.
+fn extra_interval(shown: u64, offering: bool, answered: bool) -> u64 {
+    match (offering, answered, shown) {
+        (true, ..) => 6,
+        (false, true, _) => 64,
+        (false, false, ..240) => 8,
+        (false, false, _) => 32,
     }
 }
 
@@ -641,11 +660,18 @@ impl SendSession {
             redundancy,
             ..ScheduleConfig::default()
         };
+        let source = JsSource(read);
         Ok(SendSession {
-            sender: Sender::new(layout, JsSource(read), config, None),
+            sender: Sender::new(layout, source.clone(), config, None),
+            wide: None,
+            source,
+            redundancy,
             params,
             frames: 0,
-            asking: None,
+            asking: false,
+            link: Vec::new(),
+            since_extras: 0,
+            extra_turn: 0,
         })
     }
 
@@ -655,15 +681,50 @@ impl SendSession {
         let w = self.params.modules();
         let mut out = Vec::with_capacity(n * w * w);
         for _ in 0..n {
-            let text = match self.notice() {
-                Some(notice) => notice.encode(),
-                None => self.sender.next_frame().map_err(js_err)?.to_qr_text(),
-            };
+            let text = self.next_code(false)?;
             let m = qr::render(&text, self.params).map_err(js_err)?;
             out.extend(m.modules.into_iter().map(u8::from));
         }
         self.frames += n as u64;
         Ok(Uint8Array::from(&out[..]))
+    }
+
+    /// The next `n` codes as text, for channels that carry text instead of
+    /// pictures (a network connection). These are frames of the same
+    /// transfer in much larger symbols than a QR code holds; a receiver
+    /// collects a segment in one size at a time, so a channel like this
+    /// takes over from the screen rather than adding to it.
+    #[wasm_bindgen(js_name = nextTexts)]
+    pub fn next_texts(&mut self, n: usize) -> JsResult<Array> {
+        let out = Array::new();
+        for _ in 0..n {
+            out.push(&self.next_code(true)?.into());
+        }
+        Ok(out)
+    }
+
+    /// Characters one code of this stream holds at most.
+    #[wasm_bindgen(getter, js_name = codeChars)]
+    pub fn code_chars(&self) -> usize {
+        qrsend_core::base45::encoded_len(frame::OVERHEAD + self.sender.layout().symbol_size)
+    }
+
+    /// Whether another channel is carrying `nextTexts` codes right now. While
+    /// it does, the picture codes start from the end of the transfer, so the
+    /// two channels bring different parts instead of the same ones.
+    #[wasm_bindgen(js_name = setTextChannelUp)]
+    pub fn set_text_channel_up(&mut self, up: bool) {
+        self.sender.set_backwards(up);
+    }
+
+    /// Link codes (see `linkSplit`) to repeat in the stream until replaced;
+    /// an empty list stops them.
+    #[wasm_bindgen(js_name = setLinkCodes)]
+    pub fn set_link_codes(&mut self, codes: Vec<String>) {
+        if codes != self.link {
+            self.link = codes;
+            self.since_extras = 0;
+        }
     }
 
     /// The next frame as QR text (for tests).
@@ -697,30 +758,45 @@ impl SendSession {
     /// this sender can read feedback codes.
     #[wasm_bindgen(js_name = askForFeedback)]
     pub fn ask_for_feedback(&mut self, on: bool) {
-        match (on, self.asking) {
-            (true, None) => self.asking = Some(0),
-            (false, Some(_)) => self.asking = None,
-            _ => {}
+        if on && !self.asking {
+            self.since_extras = 0;
         }
+        self.asking = on;
     }
 
     /// Takes a feedback code shown by the receiver (`QSF1-…`) into account:
     /// only what it still lacks is sent from now on. Returns
-    /// `{ complete, remainingCodes, totalCodes, frames }`, or null when the
+    /// `{ complete, remainingBytes, totalBytes, frames }`, or null when the
     /// text is not feedback for this transfer.
     #[wasm_bindgen(js_name = applyFeedback)]
     pub fn apply_feedback(&mut self, text: &str) -> JsResult<JsValue> {
         let Ok(feedback) = Feedback::decode(text) else {
             return Ok(JsValue::NULL);
         };
+        if let Some(wide) = &mut self.wide {
+            wide.apply_feedback(feedback.clone());
+        }
         if !self.sender.apply_feedback(feedback) {
             return Ok(JsValue::NULL);
         }
         let f = self.sender.feedback().expect("just applied");
+        let layout = self.sender.layout();
+        let total = layout.meta_len as u64 + layout.body_len;
+        // The receiver counts what is left in codes of the size it mostly
+        // gets (which depends on the channel); bytes mean the same everywhere.
+        let size = match f.symbol_size {
+            0 => layout.symbol_size as u64,
+            n => n as u64,
+        };
+        let remaining = if f.complete {
+            0
+        } else {
+            (f.remaining_symbols * size).min(total)
+        };
         to_js(&ReceiverReport {
             complete: f.complete,
-            remaining_codes: f.remaining_symbols as f64,
-            total_codes: self.sender.total_symbols() as f64,
+            remaining_bytes: remaining as f64,
+            total_bytes: total as f64,
             frames: f.frames as f64,
         })
     }
@@ -730,33 +806,115 @@ impl SendSession {
     /// true: for long (assume nothing, send everything again).
     #[wasm_bindgen(js_name = receiverSilent)]
     pub fn receiver_silent(&mut self, forget: bool) {
-        if forget {
-            self.sender.forget_receiver();
-        } else {
-            self.sender.receiver_quiet();
+        for sender in std::iter::once(&mut self.sender).chain(&mut self.wide) {
+            if forget {
+                sender.forget_receiver();
+            } else {
+                sender.receiver_quiet();
+            }
         }
     }
 }
 
 impl SendSession {
-    /// The notice to show instead of the next data code, if one is due.
-    fn notice(&mut self) -> Option<SenderNotice> {
-        let shown = self.asking.as_mut()?;
-        let due = shown.is_multiple_of(notice_interval(*shown, self.sender.feedback().is_some()));
-        *shown += 1;
-        due.then(|| SenderNotice {
-            session_id: self.sender.layout().session_id,
-            wants_feedback: true,
+    /// The next code of the stream: a data frame, or now and then something
+    /// else the receiver should know (a notice, a link offer).
+    fn next_code(&mut self, wide: bool) -> JsResult<String> {
+        if let Some(extra) = self.extra() {
+            return Ok(extra);
+        }
+        let sender = if wide {
+            self.wide_sender()
+        } else {
+            &mut self.sender
+        };
+        Ok(sender.next_frame().map_err(js_err)?.to_qr_text())
+    }
+
+    fn wide_sender(&mut self) -> &mut Sender<JsSource> {
+        let (narrow, source, redundancy) = (&self.sender, &self.source, self.redundancy);
+        self.wide.get_or_insert_with(|| {
+            let layout = SessionLayout {
+                symbol_size: WIDE_SYMBOL_SIZE,
+                ..*narrow.layout()
+            };
+            let config = ScheduleConfig {
+                redundancy,
+                ..ScheduleConfig::default()
+            };
+            let mut wide = Sender::new(layout, source.clone(), config, None);
+            if let Some(feedback) = narrow.feedback() {
+                wide.apply_feedback(feedback.clone());
+            }
+            wide
         })
     }
+
+    fn extra(&mut self) -> Option<String> {
+        let count = self.asking as usize + self.link.len();
+        if count == 0 {
+            return None;
+        }
+        let shown = self.since_extras;
+        self.since_extras += 1;
+        let answered = self.sender.feedback().is_some();
+        if !shown.is_multiple_of(extra_interval(shown, !self.link.is_empty(), answered)) {
+            return None;
+        }
+        let turn = self.extra_turn % count;
+        self.extra_turn = self.extra_turn.wrapping_add(1);
+        if self.asking && turn == 0 {
+            return Some(
+                SenderNotice {
+                    session_id: self.sender.layout().session_id,
+                    wants_feedback: true,
+                }
+                .encode(),
+            );
+        }
+        Some(self.link[turn - self.asking as usize].clone())
+    }
+}
+
+/// Splits a link message (`kind` 1 = offer, 2 = answer; `id` tells messages
+/// of one kind apart) into codes of at most `max_chars` characters.
+#[wasm_bindgen(js_name = linkSplit)]
+pub fn link_split(
+    session: &str,
+    kind: u8,
+    id: u8,
+    payload: &[u8],
+    max_chars: usize,
+) -> JsResult<Vec<String>> {
+    let session_id = u32::from_str_radix(session, 16).map_err(js_err)?;
+    link::split(session_id, kind, id, payload, max_chars).map_err(js_err)
+}
+
+/// Parses one link code: `{ session, kind, id, part, parts, payload }`, or
+/// null when the text is not a (valid) link code.
+#[wasm_bindgen(js_name = linkParse)]
+pub fn link_parse(text: &str) -> JsResult<JsValue> {
+    let Ok(p) = LinkPart::decode(text) else {
+        return Ok(JsValue::NULL);
+    };
+    let out = Object::new();
+    let set = |k: &str, v: JsValue| Reflect::set(&out, &k.into(), &v).map(drop);
+    set("session", session_hex(p.session_id).into())
+        .and_then(|_| set("kind", p.kind.into()))
+        .and_then(|_| set("id", p.id.into()))
+        .and_then(|_| set("part", p.part.into()))
+        .and_then(|_| set("parts", p.parts.into()))
+        .and_then(|_| set("payload", Uint8Array::from(&p.payload[..]).into()))
+        .map_err(|_| js_err("cannot build the result"))?;
+    Ok(out.into())
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReceiverReport {
     complete: bool,
-    remaining_codes: f64,
-    total_codes: f64,
+    remaining_bytes: f64,
+    total_bytes: f64,
     frames: f64,
 }
 

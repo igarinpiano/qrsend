@@ -283,6 +283,7 @@ fn feedback_for_another_session_is_ignored() {
         truncated: false,
         frames: 0,
         remaining_symbols: 0,
+        symbol_size: 0,
         missing: vec![],
     };
     assert!(!sender.apply_feedback(other.clone()));
@@ -355,4 +356,64 @@ fn transfer_survives_losing_the_back_channel() {
         }
     }
     assert_eq!(got, body);
+}
+
+/// Frames of two symbol sizes may arrive for one segment (two channels at
+/// once). Strays of another size must not throw away progress; a channel that
+/// brings more takes over.
+#[test]
+fn a_segment_is_collected_in_the_size_that_brings_most() {
+    let body = noise(40_000, 11);
+    let meta = noise(100, 12);
+    let layout = |symbol_size| SessionLayout {
+        session_id: 5,
+        flags: 0,
+        seg_shift: 16,
+        meta_len: meta.len() as u32,
+        body_len: body.len() as u64,
+        symbol_size,
+    };
+    let source = || MemorySource {
+        meta: meta.clone(),
+        body: body.clone(),
+        seg_shift: 16,
+    };
+    let quiet = ScheduleConfig {
+        meta_interval: 0,
+        ..ScheduleConfig::default()
+    };
+    let mut narrow = Sender::new(layout(100), source(), quiet.clone(), Some(&[1]));
+    let mut wide = Sender::new(layout(2000), source(), quiet, Some(&[1]));
+    let body_frame = |s: &mut Sender<MemorySource>| loop {
+        let f = s.next_frame().unwrap();
+        if f.header.seg_index == 1 {
+            return f;
+        }
+    };
+    let mut rx = Receiver::new();
+    for _ in 0..200 {
+        rx.push(body_frame(&mut narrow));
+    }
+    assert_eq!(rx.partial(), vec![(1, 200, 400)]);
+    // 20 kB are collected; 10 kB of the other size going by change nothing.
+    for _ in 0..5 {
+        rx.push(body_frame(&mut wide));
+    }
+    rx.push(body_frame(&mut narrow));
+    assert_eq!(rx.partial(), vec![(1, 201, 400)]);
+    // The other channel keeps delivering, mixed with the first: once it has
+    // brought more, the segment is collected in its size and soon complete.
+    let mut done = false;
+    for _ in 0..40 {
+        rx.push(body_frame(&mut narrow));
+        for ev in rx.push(body_frame(&mut wide)) {
+            if let Event::Completed { index: 1, data } = ev {
+                assert_eq!(data, body);
+                done = true;
+            }
+        }
+    }
+    assert!(done);
+    // Progress is counted in the size that carried the data.
+    assert_eq!(rx.progress().unwrap().symbol_size, 2000);
 }

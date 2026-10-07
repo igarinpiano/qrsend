@@ -10,6 +10,7 @@ pub mod crypto;
 pub mod fec;
 pub mod feedback;
 pub mod frame;
+pub mod link;
 pub mod manifest;
 pub mod payload;
 pub mod qr;

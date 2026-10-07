@@ -53,9 +53,13 @@ pub struct Scheduler {
     frame_no: u64,
     meta_j: u64,
     pass: u64,
+    /// The order segments are gone through in a pass (positions into
+    /// `segments`): meta first, then the body from the front or from the back.
+    order: Vec<usize>,
+    backwards: bool,
     /// Positions (into `segments`) interleaved at the moment.
     window: Vec<usize>,
-    /// First position after the current window.
+    /// First index into `order` after the current window.
     next_start: usize,
     pos: usize,
     /// The receiver is answering: stay on a window until it is acknowledged.
@@ -89,9 +93,11 @@ impl Scheduler {
                     needed: true,
                 }
             })
-            .collect();
+            .collect::<Vec<Seg>>();
         let mut s = Scheduler {
             config,
+            order: (0..segments.len()).collect(),
+            backwards: false,
             segments,
             frame_no: 0,
             meta_j: 0,
@@ -134,6 +140,28 @@ impl Scheduler {
         }
     }
 
+    /// Goes through the body from the last segment to the first (or back to
+    /// the usual order). Two channels sending the same transfer take opposite
+    /// ends, so that each brings something the other has not sent yet.
+    ///
+    /// Backwards, one segment is sent at a time instead of a window of them:
+    /// this is the slower channel of two, and preparing a segment for it
+    /// (thousands of small symbols) must not hold up the faster one.
+    pub fn set_backwards(&mut self, backwards: bool) {
+        if backwards == self.backwards {
+            return;
+        }
+        self.backwards = backwards;
+        let body = 1..self.segments.len();
+        self.order = if backwards {
+            std::iter::once(0).chain(body.rev()).collect()
+        } else {
+            std::iter::once(0).chain(body).collect()
+        };
+        self.next_start = 0;
+        self.fill_window();
+    }
+
     /// Whether to stay on a window until the receiver has it. Turned off
     /// while the receiver is not heard from: what it reported last still
     /// holds, but nothing tells any more when a window is complete.
@@ -153,14 +181,19 @@ impl Scheduler {
     }
 
     fn fill_window(&mut self) -> bool {
-        let w = self.config.window.max(1);
+        let w = if self.backwards {
+            1
+        } else {
+            self.config.window.max(1)
+        };
         self.window.clear();
         self.pos = 0;
         self.extensions = 0;
         let mut i = self.next_start;
-        while i < self.segments.len() && self.window.len() < w {
-            if self.segments[i].needed {
-                self.window.push(i);
+        while i < self.order.len() && self.window.len() < w {
+            let pos = self.order[i];
+            if self.segments[pos].needed {
+                self.window.push(pos);
             }
             i += 1;
         }
@@ -352,6 +385,26 @@ mod tests {
         s.forget_receiver();
         let all: Vec<u32> = (0..6 * n).map(|_| s.next_slot().seg_index).collect();
         assert!((0..=4).all(|i| all.contains(&i)), "{all:?}");
+    }
+
+    #[test]
+    fn backwards_starts_at_the_other_end() {
+        let cfg = ScheduleConfig {
+            meta_interval: 0,
+            window: 2,
+            ..Default::default()
+        };
+        let mut s = Scheduler::new(cfg, 1, (1..=6).map(|i| (i, 10)).collect());
+        let n = symbols_per_pass(10, 0.1);
+        let first: Vec<u32> = (0..n).map(|_| s.next_slot().seg_index).collect();
+        assert!(first.iter().all(|&i| i <= 1), "{first:?}");
+        s.set_backwards(true);
+        // The last segment first (meta has had its share in this pass), then
+        // towards the front, one segment at a time.
+        let seen: Vec<u32> = (0..3 * n).map(|_| s.next_slot().seg_index).collect();
+        let mut order = seen.clone();
+        order.dedup();
+        assert_eq!(order, [6, 5, 4], "{seen:?}");
     }
 
     #[test]

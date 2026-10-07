@@ -48,7 +48,11 @@ export const fakeCamera = (video: string) => [
   `--use-file-for-fake-video-capture=${video}`,
 ];
 
-/** The player's canvas, once per displayed frame. */
+/**
+ * The player's canvas, once per displayed frame. Reading a frame out takes
+ * about as long as the player shows it at 10 fps, so frames are skipped at
+ * that speed; slow the player down first when every frame matters.
+ */
 export async function capturePlayer(page: Page, count: number): Promise<Picture[]> {
   await expect(page.getByLabel("QR code stream")).toBeVisible();
   return page.evaluate(async (wanted) => {

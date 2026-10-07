@@ -26,6 +26,18 @@ export const PREVIEW_FEATURES = [
     ],
   },
   {
+    id: "lan",
+    title: "Local network boost",
+    side: "sending",
+    summary:
+      "Once each device has seen the other's screen, the two also connect directly over the local network (Wi-Fi or cable), which is far faster than a camera. Both ways are then used at once: the connection carries the transfer from its start while the screen carries it from its end, and the receiver keeps whatever arrives first. The connection is arranged through the codes themselves: no server, no account, and nothing outside the local network is contacted. The receiver is asked before it connects. If the connection fails or drops, the screen simply carries on.",
+    steps: [
+      "Both devices must be on the same network, and — for a moment — this device's camera must see the receiver's screen.",
+      "Start sending as usual. The receiver is asked whether to connect and then shows a code; hold it up to this device's camera.",
+      "Once connected, the devices no longer need to see each other (though it helps: the screen keeps contributing).",
+    ],
+  },
+  {
     id: "colour",
     title: "Colour codes",
     side: "sending",

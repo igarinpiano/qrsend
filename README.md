@@ -136,6 +136,11 @@ loaded (PWA).
 - **Feature preview** (footer link): new ways of sending that are still being
   worked on. Each is off until the sender turns it on; otherwise everything
   works as before.
+  - *Local network boost*: once each device has seen the other's screen, they
+    also connect directly over the local network (no server, nothing outside
+    the network is contacted, and the receiver is asked first). Both ways are
+    then used at once — megabytes per second instead of kilobytes — and the
+    screen carries on alone if the connection drops.
   - *Colour codes*: three codes in one, as the red, green and blue parts of
     the picture — up to three times the data per frame. Receivers recognise
     them on their own.
@@ -178,7 +183,8 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] Dense grids and video export / import
 - [x] A back channel from receiver to sender: acknowledgements (web app, feature preview)
 - [ ] Auto-tuning speed and density from that feedback; two-way mode in the CLI
-- [ ] More transports side by side (colour codes, local network, sound)
+- [x] More transports side by side: text over any byte channel (CLI), colour codes, screen capture, local network (web app, feature preview)
+- [ ] Sound as a back channel; these transports in the CLI
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
 

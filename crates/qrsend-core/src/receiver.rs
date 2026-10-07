@@ -60,14 +60,23 @@ pub struct Receiver {
     symbol_size: usize,
     /// The frames read most recently, to tell new ones from repeats (a camera
     /// usually sees every displayed code more than once).
-    recent: HashSet<(u32, u32)>,
-    recent_order: VecDeque<(u32, u32)>,
+    recent: HashSet<FrameKey>,
+    recent_order: VecDeque<FrameKey>,
+    /// Per segment: the other symbol size on offer and how many bytes of it
+    /// went by unused (see `push`).
+    other_size: HashMap<u32, (usize, u64)>,
+    /// Bytes taken in per symbol size, to report progress in the size that
+    /// carries the transfer.
+    size_bytes: HashMap<usize, u64>,
     distinct: u64,
     feedback_seq: u32,
 }
 
 /// How many recent frames are remembered to recognise repeats.
 const RECENT_FRAMES: usize = 8192;
+
+/// Segment, ESI and symbol size: what makes two frames carry the same data.
+type FrameKey = (u32, u32, usize);
 
 /// How far a transfer has come, in terms a person watching it cares about.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -111,6 +120,8 @@ impl Receiver {
             symbol_size: 0,
             recent: HashSet::new(),
             recent_order: VecDeque::new(),
+            other_size: HashMap::new(),
+            size_bytes: HashMap::new(),
             distinct: 0,
             feedback_seq: 0,
         }
@@ -156,8 +167,9 @@ impl Receiver {
     /// repeats: the same ones are needed again.
     fn drop_decoder(&mut self, index: u32) {
         self.decoders.remove(&index);
-        self.recent.retain(|&(i, _)| i != index);
-        self.recent_order.retain(|&(i, _)| i != index);
+        self.other_size.remove(&index);
+        self.recent.retain(|key| key.0 != index);
+        self.recent_order.retain(|key| key.0 != index);
     }
 
     /// Locks onto a session without a frame (restoring saved state).
@@ -192,7 +204,13 @@ impl Receiver {
     /// Remaining work, once a session is locked and a frame has been seen.
     pub fn progress(&self) -> Option<Progress> {
         let p = self.params?;
-        let t = self.symbol_size;
+        // Count in the symbol size most of the data arrives in: with several
+        // channels at once the latest frame may be of any of them.
+        let t = self
+            .size_bytes
+            .iter()
+            .max_by_key(|&(&size, &bytes)| (bytes, size))
+            .map_or(self.symbol_size, |(&size, _)| size);
         if t == 0 {
             return None;
         }
@@ -239,6 +257,7 @@ impl Receiver {
             truncated: missing.len() > feedback::MAX_RANGES,
             frames: self.distinct,
             remaining_symbols: self.progress().map_or(0, |p| p.remaining_symbols),
+            symbol_size: self.progress().map_or(0, |p| p.symbol_size as u32),
             missing,
         })
     }
@@ -277,20 +296,37 @@ impl Receiver {
             return events;
         }
         let symbol_size = frame.symbol.len();
-        // The symbol size may change between sender runs (e.g. another QR
-        // density after a resume); a decoder only combines equal-size symbols.
-        if self
-            .decoders
-            .get(&h.seg_index)
-            .is_some_and(|(d, _)| d.symbol_size() != symbol_size)
-        {
-            self.drop_decoder(h.seg_index);
-        }
         // A repeat of a frame read a moment ago carries nothing new.
-        let key = (h.seg_index, h.esi);
-        if !self.recent.insert(key) {
+        let key = (h.seg_index, h.esi, symbol_size);
+        if self.recent.contains(&key) {
             return events;
         }
+        // A decoder only combines equal-size symbols, but frames of several
+        // sizes may arrive for one segment: another QR density after a
+        // resume, or two channels at once (a screen and a network link). The
+        // segment is collected in the size that brings the most: frames of
+        // another size are passed over until they would have brought more
+        // than has been collected, and then the segment starts over in that
+        // size. A few strays cost nothing; a faster channel takes over at once.
+        if !self.is_done(h.seg_index)
+            && let Some((d, _)) = self.decoders.get(&h.seg_index)
+            && d.symbol_size() != symbol_size
+        {
+            let collected = d.received() as u64 * d.symbol_size() as u64;
+            let other = self
+                .other_size
+                .entry(h.seg_index)
+                .or_insert((symbol_size, 0));
+            if other.0 != symbol_size {
+                *other = (symbol_size, 0);
+            }
+            other.1 += symbol_size as u64;
+            if other.1 <= collected {
+                return events;
+            }
+            self.drop_decoder(h.seg_index);
+        }
+        self.recent.insert(key);
         self.recent_order.push_back(key);
         if self.recent_order.len() > RECENT_FRAMES
             && let Some(old) = self.recent_order.pop_front()
@@ -303,6 +339,7 @@ impl Receiver {
         }
         self.tick += 1;
         self.symbol_size = symbol_size;
+        *self.size_bytes.entry(symbol_size).or_insert(0) += symbol_size as u64;
         if !self.decoders.contains_key(&h.seg_index) && self.decoders.len() >= self.max_decoders {
             self.evict();
         }

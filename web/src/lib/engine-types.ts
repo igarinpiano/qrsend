@@ -46,8 +46,9 @@ export interface FrameBatch {
 export interface ReceiverReport {
   /** The receiver has everything: stop sending. */
   complete: boolean;
-  remainingCodes: number;
-  totalCodes: number;
+  /** Bytes on the wire the receiver still lacks, and in total. */
+  remainingBytes: number;
+  totalBytes: number;
   /** Distinct codes the receiver has read. */
   frames: number;
 }
@@ -128,6 +129,15 @@ export interface EngineApi {
   sendStart(req: SendRequest): Promise<SendStarted>;
   sendFrames(count: number): Promise<FrameBatch>;
   sendStop(): Promise<void>;
+  /** The next codes of the stream as text, for channels other than the screen. */
+  sendTexts(count: number): Promise<string[]>;
+  /**
+   * Whether another channel is carrying `sendTexts` codes right now. While it does, the codes on the screen start
+   * from the end of the transfer, so the two channels bring different parts.
+   */
+  sendTextChannelUp(up: boolean): Promise<void>;
+  /** An offer to connect another way, repeated in the stream until replaced (`null`: none). */
+  sendLinkOffer(payload: Uint8Array | null, id: number): Promise<void>;
   /** Whether the stream tells the receiver that this sender reads feedback codes. */
   sendAskForFeedback(on: boolean): Promise<void>;
   /** A code read by the sender's camera; null unless it is feedback for this transfer. */

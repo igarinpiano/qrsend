@@ -117,6 +117,12 @@ impl<S: SegmentSource> Sender<S> {
         }
     }
 
+    /// Sends the body from its end towards its start (see
+    /// `Scheduler::set_backwards`).
+    pub fn set_backwards(&mut self, backwards: bool) {
+        self.scheduler.set_backwards(backwards);
+    }
+
     /// The latest feedback, unless the receiver was forgotten.
     pub fn feedback(&self) -> Option<&Feedback> {
         self.feedback.as_ref()

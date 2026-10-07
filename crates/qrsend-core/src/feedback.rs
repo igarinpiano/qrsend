@@ -78,6 +78,8 @@ pub struct Feedback {
     pub frames: u64,
     /// Codes still needed (see `receiver::Progress::remaining_symbols`).
     pub remaining_symbols: u64,
+    /// The symbol size `remaining_symbols` is counted in (0: not told).
+    pub symbol_size: u32,
     /// Missing segments as sorted, non-adjacent `(first, count)` ranges
     /// (0 = meta).
     pub missing: Vec<(u32, u32)>,
@@ -164,6 +166,7 @@ impl Feedback {
             put_leb(&mut data, len as u64);
             end = start as u64 + len as u64;
         }
+        put_leb(&mut data, self.symbol_size as u64);
         let check = crc32fast::hash(&data) as u16;
         data.extend_from_slice(&check.to_le_bytes());
         format!("{PREFIX}{}", base45::encode(&data))
@@ -200,7 +203,12 @@ impl Feedback {
             }
             missing.push((start as u32, len as u32));
         }
-        // Anything after the ranges belongs to a later revision of the format.
+        let symbol_size = if pos < payload.len() {
+            get_leb(payload, &mut pos)? as u32
+        } else {
+            0
+        };
+        // Anything after that belongs to a later revision of the format.
         Ok(Feedback {
             session_id,
             seq,
@@ -208,6 +216,7 @@ impl Feedback {
             truncated: state & STATE_TRUNCATED != 0,
             frames,
             remaining_symbols,
+            symbol_size,
             missing,
         })
     }
@@ -225,6 +234,7 @@ mod tests {
             truncated: false,
             frames: 123_456,
             remaining_symbols: 7_890,
+            symbol_size: 181,
             missing: vec![(0, 1), (5, 3), (1000, 24)],
         }
     }
@@ -236,7 +246,7 @@ mod tests {
         assert!(text.starts_with(PREFIX));
         assert_eq!(Feedback::decode(&text).unwrap(), f);
         // Small enough for a small QR code.
-        assert!(text.len() < 50, "{}", text.len());
+        assert!(text.len() < 55, "{}", text.len());
         assert!(f.needs(0) && f.needs(7) && f.needs(1023));
         assert!(!f.needs(1) && !f.needs(8) && !f.needs(1024));
     }
@@ -312,5 +322,18 @@ mod tests {
         longer.extend_from_slice(&check.to_le_bytes());
         let text = format!("{PREFIX}{}", base45::encode(&longer));
         assert_eq!(Feedback::decode(&text).unwrap(), f);
+        // And a code without the symbol size (the first draft) still reads.
+        let ranges_end = data.len() - 2 - 2;
+        let mut shorter = data[..ranges_end].to_vec();
+        let check = crc32fast::hash(&shorter) as u16;
+        shorter.extend_from_slice(&check.to_le_bytes());
+        let old = Feedback::decode(&format!("{PREFIX}{}", base45::encode(&shorter))).unwrap();
+        assert_eq!(
+            old,
+            Feedback {
+                symbol_size: 0,
+                ..f
+            }
+        );
     }
 }

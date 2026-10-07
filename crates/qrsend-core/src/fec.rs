@@ -25,11 +25,18 @@ fn oti(seg_len: u32, symbol_size: usize) -> ObjectTransmissionInformation {
 }
 
 /// Produces encoding symbols for one segment.
+///
+/// Source symbols are slices of the data. Repair symbols need RaptorQ's
+/// intermediate symbols, which take long to compute for thousands of small
+/// symbols (seconds for a 1 MiB segment in QR-sized symbols), so that is put
+/// off until the first repair symbol is asked for: a segment starts flowing
+/// at once, and a receiver that gets every source symbol never costs it.
 pub struct SegmentEncoder {
     padded: Vec<u8>,
+    seg_len: u32,
     symbol_size: usize,
     k: u32,
-    inner: SourceBlockEncoder,
+    inner: std::sync::OnceLock<SourceBlockEncoder>,
 }
 
 impl SegmentEncoder {
@@ -40,12 +47,12 @@ impl SegmentEncoder {
         assert!(k <= MAX_SOURCE_SYMBOLS, "segment too large for symbol size");
         let mut padded = data.to_vec();
         padded.resize(k as usize * symbol_size, 0);
-        let inner = SourceBlockEncoder::new(0, &oti(data.len() as u32, symbol_size), &padded);
         SegmentEncoder {
             padded,
+            seg_len: data.len() as u32,
             symbol_size,
             k,
-            inner,
+            inner: std::sync::OnceLock::new(),
         }
     }
 
@@ -62,7 +69,10 @@ impl SegmentEncoder {
             let start = esi as usize * self.symbol_size;
             (esi, self.padded[start..start + self.symbol_size].to_vec())
         } else {
-            let packet = self.inner.repair_packets(esi - self.k, 1).remove(0);
+            let inner = self.inner.get_or_init(|| {
+                SourceBlockEncoder::new(0, &oti(self.seg_len, self.symbol_size), &self.padded)
+            });
+            let packet = inner.repair_packets(esi - self.k, 1).remove(0);
             let (id, data) = packet.split();
             debug_assert_eq!(id.encoding_symbol_id(), esi);
             (esi, data)
