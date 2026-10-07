@@ -50,6 +50,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --release
+      - name: Core with the pure-Rust zstd backend (as in the web build)
+        run: cargo test --release -p qrsend-core --no-default-features --features ruzstd
       - name: Build without window support
         run: cargo build -p qrsend --no-default-features
 

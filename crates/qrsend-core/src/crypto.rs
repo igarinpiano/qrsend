@@ -206,8 +206,144 @@ impl DeviceIdentity {
         }
     }
 
-    fn age_identity(&self) -> &dyn age::Identity {
+    /// Ed25519 signature over arbitrary bytes (see [`signed_message`]).
+    pub fn sign_bytes(&self, message: &[u8]) -> [u8; 64] {
+        self.signing.sign(message).to_bytes()
+    }
+
+    /// The key that decrypts transfers addressed to this device.
+    pub fn as_age(&self) -> &dyn age::Identity {
         &self.x25519
+    }
+
+    /// Raw key material, for importing into a platform key store (WebCrypto).
+    pub fn raw_keys(&self) -> RawKeys {
+        let (_, secret) = bech32::decode(self.x25519.to_string().expose_secret())
+            .expect("age secret key is bech32");
+        RawKeys {
+            x25519_secret: secret.try_into().expect("32-byte X25519 secret"),
+            x25519_public: public_from_recipient(&self.x25519.to_public().to_string())
+                .expect("valid recipient"),
+            ed25519_seed: self.signing.to_bytes(),
+            ed25519_public: self.signing.verifying_key().to_bytes(),
+        }
+    }
+}
+
+/// The age identity trait, for callers that do not depend on `age` directly.
+pub use age::Identity as AgeIdentity;
+
+/// The writer returned by [`encrypt_writer`]; call `finish()` when done.
+pub type EncryptWriter<W> = age::stream::StreamWriter<W>;
+
+/// Raw keys of a [`DeviceIdentity`]. Handle with care.
+pub struct RawKeys {
+    pub x25519_secret: [u8; 32],
+    pub x25519_public: [u8; 32],
+    pub ed25519_seed: [u8; 32],
+    pub ed25519_public: [u8; 32],
+}
+
+/// The age recipient string (`age1…`) of a raw X25519 public key.
+pub fn recipient_from_public(public: &[u8; 32]) -> String {
+    age_core::primitives::bech32_encode(bech32::Hrp::parse_unchecked("age"), public)
+}
+
+/// The raw X25519 public key of an age recipient string.
+pub fn public_from_recipient(recipient: &str) -> Option<[u8; 32]> {
+    let (hrp, data) = bech32::decode(recipient).ok()?;
+    (hrp.as_str() == "age").then_some(())?;
+    data.try_into().ok()
+}
+
+impl DevicePublic {
+    /// Builds the public half from raw keys (identities held in WebCrypto).
+    pub fn from_raw(
+        name: &str,
+        x25519_public: &[u8; 32],
+        ed25519_public: &[u8; 32],
+    ) -> Result<Self, CryptoError> {
+        Ok(DevicePublic {
+            name: name.to_string(),
+            recipient: recipient_from_public(x25519_public)
+                .parse()
+                .map_err(|_| CryptoError::BadId("bad X25519 key"))?,
+            verifying: VerifyingKey::from_bytes(ed25519_public)
+                .map_err(|_| CryptoError::BadId("bad signing key"))?,
+        })
+    }
+}
+
+const X25519_TAG: &str = "X25519";
+const X25519_LABEL: &[u8] = b"age-encryption.org/v1/X25519";
+
+/// The ephemeral public keys of the X25519 recipient stanzas of an age file
+/// (only its header needs to be present in `age_bytes`).
+///
+/// A key holder that never reveals its secret (a non-extractable WebCrypto
+/// key) computes one X25519 shared secret per returned key and then decrypts
+/// with [`SharedSecrets`].
+pub fn x25519_stanza_keys(age_bytes: &[u8]) -> Result<Vec<[u8; 32]>, CryptoError> {
+    struct Collect(std::cell::RefCell<Vec<[u8; 32]>>);
+    impl age::Identity for Collect {
+        fn unwrap_stanza(
+            &self,
+            stanza: &age_core::format::Stanza,
+        ) -> Option<Result<age_core::format::FileKey, age::DecryptError>> {
+            if let (X25519_TAG, [arg]) = (stanza.tag.as_str(), &stanza.args[..])
+                && let Ok(epk) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(arg)
+                && let Ok(epk) = <[u8; 32]>::try_from(epk)
+            {
+                self.0.borrow_mut().push(epk);
+            }
+            None
+        }
+    }
+    let collect = Collect(Default::default());
+    let dec = age::Decryptor::new_buffered(age_bytes).map_err(map_decrypt)?;
+    match dec.decrypt(iter::once(&collect as &dyn age::Identity)) {
+        Err(age::DecryptError::NoMatchingKeys) | Ok(_) => Ok(collect.0.into_inner()),
+        Err(e) => Err(map_decrypt(e)),
+    }
+}
+
+/// An age identity made of precomputed X25519 shared secrets: the result of
+/// `X25519(our secret, ephemeral key)` for each stanza, computed elsewhere.
+pub struct SharedSecrets {
+    pub our_public: [u8; 32],
+    /// `(ephemeral public key, shared secret)` pairs.
+    pub secrets: Vec<([u8; 32], [u8; 32])>,
+}
+
+impl age::Identity for SharedSecrets {
+    fn unwrap_stanza(
+        &self,
+        stanza: &age_core::format::Stanza,
+    ) -> Option<Result<age_core::format::FileKey, age::DecryptError>> {
+        use age_core::format::{FILE_KEY_BYTES, FileKey};
+        if stanza.tag != X25519_TAG {
+            return None;
+        }
+        let [arg] = &stanza.args[..] else {
+            return Some(Err(age::DecryptError::InvalidHeader));
+        };
+        let epk: [u8; 32] = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(arg)
+            .ok()?
+            .try_into()
+            .ok()?;
+        let (_, shared) = self.secrets.iter().find(|(e, _)| *e == epk)?;
+        // An all-zero secret means a low-order point; reject like age does.
+        if shared.iter().all(|&b| b == 0) {
+            return Some(Err(age::DecryptError::InvalidHeader));
+        }
+        let mut salt = [0u8; 64];
+        salt[..32].copy_from_slice(&epk);
+        salt[32..].copy_from_slice(&self.our_public);
+        let key = age_core::primitives::hkdf(&salt, X25519_LABEL, shared);
+        // Not ours if it does not decrypt (another recipient's stanza).
+        let plain = age_core::primitives::aead_decrypt(&key, FILE_KEY_BYTES, &stanza.body).ok()?;
+        Some(Ok(FileKey::init_with_mut(|k| k.copy_from_slice(&plain))))
     }
 }
 
@@ -257,17 +393,16 @@ fn map_decrypt(e: age::DecryptError) -> CryptoError {
 /// Streaming age decryption.
 pub fn decrypt_reader<R: BufRead>(
     inner: R,
-    identity: &DeviceIdentity,
+    identity: &dyn age::Identity,
 ) -> Result<age::stream::StreamReader<R>, CryptoError> {
     let dec = age::Decryptor::new_buffered(inner).map_err(map_decrypt)?;
-    dec.decrypt(iter::once(identity.age_identity()))
-        .map_err(map_decrypt)
+    dec.decrypt(iter::once(identity)).map_err(map_decrypt)
 }
 
 /// Decrypts a small object (the meta segment), refusing more than `limit` bytes.
 pub fn decrypt(
     data: &[u8],
-    identity: &DeviceIdentity,
+    identity: &dyn age::Identity,
     limit: usize,
 ) -> Result<Vec<u8>, CryptoError> {
     let mut out = Vec::new();
@@ -310,7 +445,7 @@ pub fn open_meta(
     bytes: &[u8],
     session_id: u32,
     encrypted: bool,
-    me: Option<&DeviceIdentity>,
+    me: Option<&dyn age::Identity>,
 ) -> Result<OpenedMeta, OpenMetaError> {
     let plain = if encrypted {
         let me = me.ok_or(OpenMetaError::NoIdentity)?;
@@ -372,10 +507,94 @@ mod tests {
             DeviceIdentity::generate("c").unwrap(),
         );
         let ct = encrypt(b"secret payload", &[a.public(), b.public()]).unwrap();
-        assert_eq!(decrypt(&ct, &a, 100).unwrap(), b"secret payload");
-        assert_eq!(decrypt(&ct, &b, 100).unwrap(), b"secret payload");
-        assert!(matches!(decrypt(&ct, &c, 100), Err(CryptoError::NotForUs)));
-        assert!(matches!(decrypt(&ct, &a, 5), Err(CryptoError::TooLarge)));
+        assert_eq!(decrypt(&ct, a.as_age(), 100).unwrap(), b"secret payload");
+        assert_eq!(decrypt(&ct, b.as_age(), 100).unwrap(), b"secret payload");
+        assert!(matches!(
+            decrypt(&ct, c.as_age(), 100),
+            Err(CryptoError::NotForUs)
+        ));
+        assert!(matches!(
+            decrypt(&ct, a.as_age(), 5),
+            Err(CryptoError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn raw_keys_and_recipient_strings() {
+        let me = DeviceIdentity::generate("me").unwrap();
+        let raw = me.raw_keys();
+        let public = me.public();
+        assert_eq!(
+            recipient_from_public(&raw.x25519_public),
+            public.recipient.to_string()
+        );
+        assert_eq!(
+            public_from_recipient(&public.recipient.to_string()),
+            Some(raw.x25519_public)
+        );
+        assert_eq!(public_from_recipient("age1nonsense"), None);
+        let rebuilt =
+            DevicePublic::from_raw("me", &raw.x25519_public, &raw.ed25519_public).unwrap();
+        assert_eq!(rebuilt, public);
+        assert_eq!(rebuilt.fingerprint(), public.fingerprint());
+        // The raw secret really is the key: derive the public half from it.
+        let derived =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(raw.x25519_secret));
+        assert_eq!(derived.to_bytes(), raw.x25519_public);
+    }
+
+    /// The WebCrypto flow: the secret never enters this crate; only the
+    /// shared secrets computed with it do.
+    #[test]
+    fn decrypt_with_precomputed_shared_secrets() {
+        let (me, other) = (
+            DeviceIdentity::generate("me").unwrap(),
+            DeviceIdentity::generate("other").unwrap(),
+        );
+        let ct = encrypt(b"for me and other", &[other.public(), me.public()]).unwrap();
+        let epks = x25519_stanza_keys(&ct).unwrap();
+        assert_eq!(epks.len(), 2);
+
+        let raw = me.raw_keys();
+        let secret = x25519_dalek::StaticSecret::from(raw.x25519_secret);
+        let shared = SharedSecrets {
+            our_public: raw.x25519_public,
+            secrets: epks
+                .iter()
+                .map(|epk| {
+                    (
+                        *epk,
+                        secret
+                            .diffie_hellman(&x25519_dalek::PublicKey::from(*epk))
+                            .to_bytes(),
+                    )
+                })
+                .collect(),
+        };
+        assert_eq!(decrypt(&ct, &shared, 100).unwrap(), b"for me and other");
+
+        // Someone else's shared secrets do not open it.
+        let stranger = x25519_dalek::StaticSecret::from([7u8; 32]);
+        let wrong = SharedSecrets {
+            our_public: x25519_dalek::PublicKey::from(&stranger).to_bytes(),
+            secrets: epks
+                .iter()
+                .map(|epk| {
+                    (
+                        *epk,
+                        stranger
+                            .diffie_hellman(&x25519_dalek::PublicKey::from(*epk))
+                            .to_bytes(),
+                    )
+                })
+                .collect(),
+        };
+        assert!(matches!(
+            decrypt(&ct, &wrong, 100),
+            Err(CryptoError::NotForUs)
+        ));
+        // The header alone is enough to list the stanzas.
+        assert_eq!(x25519_stanza_keys(&ct[..ct.len() - 20]).unwrap(), epks);
     }
 
     #[test]

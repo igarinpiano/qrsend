@@ -78,11 +78,15 @@ mod imp {
 mod imp {
     use super::*;
 
-    /// Buffers everything and compresses on `finish` (ruzstd's encoder pulls
-    /// from a reader). Fine for the in-memory WebAssembly use.
+    /// Input is compressed in independent frames of this size, so memory use
+    /// stays bounded however large the payload is. (ruzstd's encoder pulls
+    /// from a reader and works one frame at a time.)
+    const CHUNK: usize = if cfg!(test) { 1000 } else { 4 << 20 };
+
     pub struct Encoder<W: Write> {
         inner: W,
         buf: Vec<u8>,
+        wrote_frame: bool,
     }
 
     impl<W: Write> Encoder<W> {
@@ -90,35 +94,109 @@ mod imp {
             Ok(Encoder {
                 inner,
                 buf: Vec::new(),
+                wrote_frame: false,
             })
         }
 
-        pub fn finish(mut self) -> io::Result<W> {
+        fn emit(&mut self) {
             ruzstd::encoding::compress(
                 &self.buf[..],
                 &mut self.inner,
                 ruzstd::encoding::CompressionLevel::Fastest,
             );
+            self.buf.clear();
+            self.wrote_frame = true;
+        }
+
+        pub fn finish(mut self) -> io::Result<W> {
+            // Always at least one frame, so empty input is still valid zstd.
+            if !self.buf.is_empty() || !self.wrote_frame {
+                self.emit();
+            }
             self.inner.flush()?;
             Ok(self.inner)
         }
     }
 
     impl<W: Write> Write for Encoder<W> {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.buf.extend_from_slice(buf);
-            Ok(buf.len())
+        fn write(&mut self, mut data: &[u8]) -> io::Result<usize> {
+            let n = data.len();
+            while !data.is_empty() {
+                let take = (CHUNK - self.buf.len()).min(data.len());
+                self.buf.extend_from_slice(&data[..take]);
+                data = &data[take..];
+                if self.buf.len() == CHUNK {
+                    self.emit();
+                }
+            }
+            Ok(n)
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
 
+    type Frame<R> = ruzstd::decoding::StreamingDecoder<R, ruzstd::decoding::FrameDecoder>;
+
+    /// Decodes consecutive zstd frames (ruzstd's decoder handles one).
+    struct Frames<R: BufRead>(Option<Frame<R>>);
+
+    fn invalid(e: impl std::fmt::Display) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+    }
+
+    impl<R: BufRead> Read for Frames<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            loop {
+                let Some(frame) = self.0.as_mut() else {
+                    return Ok(0);
+                };
+                let n = frame.read(buf)?;
+                if n > 0 {
+                    return Ok(n);
+                }
+                let mut inner = self.0.take().unwrap().into_inner();
+                if inner.fill_buf()?.is_empty() {
+                    return Ok(0);
+                }
+                self.0 = Some(ruzstd::decoding::StreamingDecoder::new(inner).map_err(invalid)?);
+            }
+        }
+    }
+
     pub fn decoder<'a, R: BufRead + 'a>(inner: R) -> io::Result<Box<dyn Read + 'a>> {
-        let dec = ruzstd::decoding::StreamingDecoder::new(inner)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        Ok(Box::new(dec))
+        Ok(Box::new(Frames(Some(
+            ruzstd::decoding::StreamingDecoder::new(inner).map_err(invalid)?,
+        ))))
     }
 }
 
 pub use imp::{Encoder, decoder};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_across_chunk_boundaries() {
+        for len in [0usize, 1, 999, 1000, 1001, 2500, 10_000] {
+            let data: Vec<u8> = (0..len).map(|i| (i / 7) as u8).collect();
+            let mut enc = Encoder::new(Vec::new(), 3, 0).unwrap();
+            for part in data.chunks(333) {
+                enc.write_all(part).unwrap();
+            }
+            let packed = enc.finish().unwrap();
+            assert_eq!(decompress_bounded(&packed, len).unwrap(), data, "len {len}");
+        }
+    }
+
+    #[test]
+    fn concatenated_frames_decode() {
+        let mut packed = compress(b"hello ", 3).unwrap();
+        packed.extend(compress(b"world", 3).unwrap());
+        assert_eq!(decompress_bounded(&packed, 100).unwrap(), b"hello world");
+    }
+}

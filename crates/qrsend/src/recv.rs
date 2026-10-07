@@ -84,7 +84,12 @@ pub fn open_meta(
     p: &SessionParams,
     me: Option<&DeviceIdentity>,
 ) -> Result<(Manifest, SenderInfo)> {
-    let opened = match crypto::open_meta(bytes, p.session_id, p.flags & FLAG_ENCRYPTED != 0, me) {
+    let opened = match crypto::open_meta(
+        bytes,
+        p.session_id,
+        p.flags & FLAG_ENCRYPTED != 0,
+        me.map(|m| m.as_age()),
+    ) {
         Err(OpenMetaError::NoIdentity) => {
             bail!(
                 "this transfer is encrypted, but this device has no identity yet (run `qrsend id`)"

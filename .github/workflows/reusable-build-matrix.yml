@@ -84,8 +84,8 @@ jobs:
       - name: Install cross
         if: matrix.cross
         # From git: the last tagged release predates several targets
-        # (LoongArch, newer Android NDKs).
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        # (LoongArch, newer Android NDKs). --force replaces an older cached copy.
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked --force
       - name: Build (release, native)
         if: ${{ !matrix.cross && !matrix.universal }}
         run: cargo build --release --locked -p qrsend --target ${{ matrix.target }} ${{ matrix.features }}

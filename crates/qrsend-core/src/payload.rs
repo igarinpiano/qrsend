@@ -50,6 +50,16 @@ pub struct Packer<W: Write> {
     encoding: Encoding,
     entries: Vec<Entry>,
     plain_length: u64,
+    current: Option<Current>,
+}
+
+/// The file being written through the push API.
+struct Current {
+    path: String,
+    mode: Option<u32>,
+    mtime: Option<i64>,
+    hasher: blake3::Hasher,
+    size: u64,
 }
 
 /// Result of packing: everything the manifest needs about the payload.
@@ -75,6 +85,7 @@ impl<W: Write> Packer<W> {
             encoding,
             entries: Vec::new(),
             plain_length: 0,
+            current: None,
         })
     }
 
@@ -99,9 +110,8 @@ impl<W: Write> Packer<W> {
         mode: Option<u32>,
         mtime: Option<i64>,
     ) -> io::Result<u64> {
-        let mut hasher = blake3::Hasher::new();
+        self.begin_file(path, mode, mtime);
         let mut buf = vec![0u8; 256 * 1024];
-        let mut size = 0u64;
         loop {
             let n = match reader.read(&mut buf) {
                 Ok(0) => break,
@@ -109,25 +119,55 @@ impl<W: Write> Packer<W> {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             };
-            hasher.update(&buf[..n]);
-            self.sink.write_all(&buf[..n])?;
-            size += n as u64;
+            self.write_chunk(&buf[..n])?;
         }
-        if expected_size.is_some_and(|e| e != size) {
-            return Err(io::Error::other(format!(
-                "{path}: file size changed while reading"
-            )));
-        }
-        self.plain_length += size;
-        self.entries.push(Entry {
+        self.end_file(expected_size)
+    }
+
+    /// Starts a file whose content arrives through [`Packer::write_chunk`]
+    /// (for callers that are handed data instead of pulling it).
+    pub fn begin_file(&mut self, path: &str, mode: Option<u32>, mtime: Option<i64>) {
+        self.current = Some(Current {
             path: path.to_string(),
-            kind: EntryType::File,
-            size: Some(size),
-            blake3: Some(hasher.finalize().to_hex().to_string()),
             mode,
             mtime,
+            hasher: blake3::Hasher::new(),
+            size: 0,
         });
-        Ok(size)
+    }
+
+    pub fn write_chunk(&mut self, data: &[u8]) -> io::Result<()> {
+        let cur = self
+            .current
+            .as_mut()
+            .ok_or_else(|| io::Error::other("write_chunk outside a file"))?;
+        cur.hasher.update(data);
+        cur.size += data.len() as u64;
+        self.sink.write_all(data)
+    }
+
+    /// Finishes the current file; fails if `expected_size` is given and differs.
+    pub fn end_file(&mut self, expected_size: Option<u64>) -> io::Result<u64> {
+        let cur = self
+            .current
+            .take()
+            .ok_or_else(|| io::Error::other("end_file outside a file"))?;
+        if expected_size.is_some_and(|e| e != cur.size) {
+            return Err(io::Error::other(format!(
+                "{}: file size changed while reading",
+                cur.path
+            )));
+        }
+        self.plain_length += cur.size;
+        self.entries.push(Entry {
+            path: cur.path,
+            kind: EntryType::File,
+            size: Some(cur.size),
+            blake3: Some(cur.hasher.finalize().to_hex().to_string()),
+            mode: cur.mode,
+            mtime: cur.mtime,
+        });
+        Ok(cur.size)
     }
 
     fn close(self) -> io::Result<(W, Encoding, Vec<Entry>, u64)> {

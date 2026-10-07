@@ -13,13 +13,15 @@ categories = ["encoding", "command-line-utilities"]
 
 [dependencies]
 age = "0.12.1"
+age-core = "0.12"
 base64 = "0.23.1"
+bech32 = "0.11"
 blake3 = "1.8.7"
 crc32fast = "1.5.2"
 ed25519-dalek = "3.0.0"
+fast_qr = { version = "0.14.0", default-features = false }
 qrcode = { version = "0.14.1", default-features = false }
 rand = "0.8"
-raptorq = "2.0.1"
 rqrr = { version = "0.11.0", default-features = false }
 ruzstd = { version = "0.9", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -29,6 +31,7 @@ zstd = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [features]
 default = ["zstd-native"]
@@ -38,3 +41,11 @@ zstd-native = ["dep:zstd"]
 zstdmt = ["zstd-native", "zstd/zstdmt"]
 # Pure-Rust zstd (WebAssembly). Compresses at roughly level 1.
 ruzstd = ["dep:ruzstd"]
+
+# raptorq's `std` feature turns on NEON code that needs unstable intrinsics on
+# 32-bit ARM; its portable build is used there instead.
+[target.'cfg(not(target_arch = "arm"))'.dependencies]
+raptorq = "2.0.1"
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+raptorq = { version = "2.0.1", default-features = false }

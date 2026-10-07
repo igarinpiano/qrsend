@@ -68,7 +68,7 @@ fn body_reader(
         return Ok(Box::new(raw));
     }
     let me = me.context("this transfer is encrypted, but this device has no identity")?;
-    Ok(Box::new(crypto::decrypt_reader(raw, me)?))
+    Ok(Box::new(crypto::decrypt_reader(raw, me.as_age())?))
 }
 
 struct FsSink {

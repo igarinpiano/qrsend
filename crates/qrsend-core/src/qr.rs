@@ -94,6 +94,7 @@ impl std::str::FromStr for Density {
 /// Encodes `text` as one alphanumeric segment. Base45 output is always valid
 /// alphanumeric data, and a single segment makes capacity exact (the generic
 /// segment optimiser can pick mixes that overflow a fixed version).
+#[cfg(test)]
 fn encode_alphanumeric(text: &[u8], p: QrParams) -> qrcode::types::QrResult<QrCode> {
     let mut bits = qrcode::bits::Bits::new(Version::Normal(p.version as i16));
     bits.push_alphanumeric_data(text)?;
@@ -233,7 +234,50 @@ impl QrMatrix {
 #[error("QR encoding failed: {0}")]
 pub struct QrError(String);
 
+/// Renders a frame's Base45 text as one alphanumeric segment of exactly
+/// version `p.version`.
+///
+/// The mask is fixed instead of being chosen by scoring all eight candidates:
+/// that scoring dominates the cost of generating a code, any mask decodes the
+/// same, and QRSend payloads are compressed or encrypted (already uniform), so
+/// the "best" mask buys nothing. This makes dense grids several times faster.
 pub fn render(text: &str, p: QrParams) -> Result<QrMatrix, QrError> {
+    use fast_qr::{ECL, Mask, Mode, Version::*};
+    const VERSIONS: [fast_qr::Version; 40] = [
+        V01, V02, V03, V04, V05, V06, V07, V08, V09, V10, V11, V12, V13, V14, V15, V16, V17, V18,
+        V19, V20, V21, V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36,
+        V37, V38, V39, V40,
+    ];
+    if !(1..=40).contains(&p.version) {
+        return Err(QrError("QR version must be 1..=40".into()));
+    }
+    let ecl = match p.ec {
+        Ec::L => ECL::L,
+        Ec::M => ECL::M,
+        Ec::Q => ECL::Q,
+        Ec::H => ECL::H,
+    };
+    let code = fast_qr::QRBuilder::new(text.as_bytes())
+        .mode(Mode::Alphanumeric)
+        .version(VERSIONS[p.version as usize - 1])
+        .ecl(ecl)
+        .mask(Mask::Checkerboard)
+        .build()
+        .map_err(|_| QrError("data too long".into()))?;
+    let width = code.size;
+    if width != p.modules() {
+        return Err(QrError("data too long".into()));
+    }
+    let modules = code.data[..width * width]
+        .iter()
+        .map(|m| m.value())
+        .collect();
+    Ok(QrMatrix { width, modules })
+}
+
+/// The same code through the `qrcode` crate (reference for tests).
+#[cfg(test)]
+fn render_reference(text: &str, p: QrParams) -> Result<QrMatrix, QrError> {
     let code = encode_alphanumeric(text.as_bytes(), p).map_err(|e| QrError(e.to_string()))?;
     let width = code.width();
     let modules = code
@@ -371,6 +415,57 @@ mod tests {
             t.capacity() >= grid_fit(177, 1920, 2) * grid_fit(177, 1080, 2) * v40.symbol_size()
         );
         assert!(best_tiling(40, 40, 2).is_none());
+    }
+
+    #[test]
+    fn every_version_decodes_and_overflow_is_rejected() {
+        for version in [3u8, 10, 15, 25, 32, 40] {
+            for ec in [Ec::L, Ec::M] {
+                let p = QrParams { version, ec };
+                let bytes: Vec<u8> = (0..p.frame_capacity())
+                    .map(|i| (i * 31 + 7) as u8)
+                    .collect();
+                let text = base45::encode(&bytes);
+                let m = render(&text, p).unwrap();
+                assert_eq!(m.width, p.modules());
+                let (side, px) = rasterize(&m, 3, 4);
+                assert_eq!(
+                    detect(Luma {
+                        width: side,
+                        height: side,
+                        pixels: &px
+                    }),
+                    vec![text.clone()],
+                    "v{version}"
+                );
+                // One group more than the capacity must not silently grow the code.
+                assert!(render(&format!("{text}AAAA"), p).is_err());
+                assert!(render_reference(&text, p).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing comparison; run with --ignored --nocapture"]
+    fn render_speed() {
+        let p = Density::Normal.params();
+        let bytes: Vec<u8> = (0..p.frame_capacity())
+            .map(|i| (i * 31 + 7) as u8)
+            .collect();
+        let text = base45::encode(&bytes);
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            render(&text, p).unwrap();
+        }
+        let fast = t.elapsed() / 50;
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            render_reference(&text, p).unwrap();
+        }
+        println!(
+            "fast_qr fixed mask {fast:?} per code · qrcode {:?} per code",
+            t.elapsed() / 50
+        );
     }
 
     #[test]

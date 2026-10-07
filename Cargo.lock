@@ -901,6 +901,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast_qr"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aafa8088286fa3903718197ceb03dac70f8b4763748fbdca1e431a5a7217a09e"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2078,10 +2084,13 @@ name = "qrsend-core"
 version = "0.1.1"
 dependencies = [
  "age",
+ "age-core",
  "base64 0.23.1",
+ "bech32",
  "blake3",
  "crc32fast",
  "ed25519-dalek",
+ "fast_qr",
  "proptest",
  "qrcode",
  "rand 0.8.8",
@@ -2091,6 +2100,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "x25519-dalek",
  "zstd",
 ]
 
