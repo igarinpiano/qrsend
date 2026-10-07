@@ -23,7 +23,9 @@ crates/qrsend-core/  プロトコル本体（I/O は std::io トレイトのみ�
   receiver            受信状態機械（暗号・I/O なし。Event を返す）。直近 8192 フレームの重複を捨てる（カメラは同じコードを何度も見る）。1 セグメントは 1 つのシンボルサイズで集め、別サイズが「より多く運んできた」ら乗り換える（複数経路の同時利用、PROTOCOL §13）
   feedback            受信側 → 送信側のフィードバックコード（QSF1-…）と、送信側からの合図（notice、QSC1-…）。PROTOCOL §11
   sound               音の変復調（1 シンボル = 0.04 秒、五音音階の 2 声を 1 音ずつ、オルゴール風に減衰。ユーザーの要望: 聞いて不快でないこと）。フィードバックを送信側のマイクへ返す経路。PROTOCOL §14
-  link                別の経路を張るためのリンクコード（QSL1-…、分割と組み立ての枠だけ。中身は経路ごと）。PROTOCOL §12
+  link                別の経路を張るためのリンクコード（QSL1-…、分割と組み立ての枠、Assembler、TCP offer の中身）。PROTOCOL §12
+  direct              失われない経路（ネットワーク接続）用の送信器 DirectSender（ソースシンボルを 1 回ずつ。欠けが確定した分だけ修復シンボル）と、バイナリのレコード詰め（pack / unpack / Record）。PROTOCOL §12.1
+  tune                フィードバックの「読めたコード数」から、枚数/秒とコード数/枚を山登りで決める Tuner。PROTOCOL §11.4
   manifest            manifest JSON とメタエンベロープ（"QSM"、署名枠つき）
   payload             ファイル内容の単純連結＋zstd、BLAKE3 検証、展開（UnpackSink）。Packer は pull（add_file）と push（begin_file / write_chunk / end_file）の両方
   compress            zstd の切替（zstd-native / ruzstd）。ruzstd は 4MiB ごとの複数フレーム
@@ -36,14 +38,16 @@ crates/qrsend/       CLI（バイナリ名 qrsend）
   display/            GridSpec（N / COLSxROWS / auto）、window（minifb, feature "window"）/ terminal（crossterm）/ export（PNG、動画: .y4m は自前、他は ffmpeg にパイプ）
   input / decode      画像・Y4M・ffmpeg 経由の動画。decode は「1 個見つける → 格子をたどって隣を切り出し個別にデコード」。動画では前フレームの格子を再利用
   identity / devices  デバイス ID（X25519+Ed25519）と Trusted devices（QRSEND_CONFIG_DIR）
+  net                 CLI 同士の TCP 直結（send --lan）。待ち受け・接続・暗号化したレコード（ChaCha20-Poly1305）。PROTOCOL §12.2
 crates/qrsend-wasm/  Web 用バインディング（wasm-bindgen）。コールバック方式: SendJob（本体を JS の write に書き出す）/ SendSession（JS の read からセグメントを読む）/ Receive（完成セグメントを JS に渡す。extract は read → sink へストリーミング）
 web/                 Svelte 5 + Vite + TS の PWA
   src/lib/engine.worker.ts  エンジン本体（Worker）。wasm とストレージを持ち、送信の梱包・フレーム生成・受信状態・展開を担当。ページとは engine.ts の RPC でやり取り
   src/lib/storage.ts        OPFS の同期アクセスハンドル（無ければメモリ）。受信は recv/<session>/{body,meta,out}、送信は send/<uuid>/body
   src/lib/keys.ts           デバイス ID。WebCrypto の non-extractable 鍵（X25519 / Ed25519）。非対応ブラウザは legacy（wasm 内の鍵）。旧形式（文字列）は初回に自動移行
   src/lib/                  core.ts（wasm 読み込み）/ db.ts（IndexedDB: 鍵・信頼デバイス・セッション一覧）/ scanner.ts + scan.worker.ts（BarcodeDetector → zxing-wasm、カメラと動画ファイル）/ save.ts + zip.ts（ディスクから直接保存、ZIP64 対応の無圧縮 ZIP）/ qrdraw.ts
+  src/lib/guide.ts          受信カメラの持ち方の案内（preview「Camera guidance」）。純粋なロジックで、e2e/guide.spec.ts が Node 上で直接テストする
   src/views/                Home / Send(+Player) / Receive(+Camera, Result) / Devices / Inbox / Preview（Feature preview）
-  e2e/                      Playwright。CLI が書いた Y4M を Chrome の仮想カメラに流す相互運用テスト（暗号化・多セグメント・ZIP を含む）
+  e2e/                      Playwright。CLI が書いた Y4M を Chrome の仮想カメラに流す相互運用テスト（暗号化・多セグメント・ZIP を含む）。bridge.ts は 2 つのページを「互いのカメラ」として生でつなぐ（BroadcastChannel で画像を送り、getUserMedia を canvas.captureStream に差し替える）。相手の反応を見て変わる機能（自動調節、案内）はこれで試す
 npm/                 npm 配布用: assemble.py（機種別パッケージの対応表）と launcher.js
 ```
 
@@ -92,12 +96,21 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 - `recv` は未完了で終わると終了コード 2 と resume code を出す。
 - **作りかけの機能は Feature preview に置く**（ユーザーの方針: 基本は従来の方式。新機能は送信側が `#/preview` で個別にオンにする）。定義は `web/src/lib/prefs.ts` の `PREVIEW_FEATURES`、保存先は localStorage の `qrsend.preview.<id>`。オフのときは画面も送る内容も従来と同じにする。受信側には設定を作らず、送信側からの合図で自動的に従う形にする。
 - 経路が増えても受け皿は 1 つ: フレームは噴水符号なので、どの経路から来たフレームも同じ `recvPush` に入れればよい。送信側は 1 つの生成器（SendSession / FrameStream）から各経路に別々のフレームを配る。新しい経路を足すときはこの形を崩さない。
-- ローカルネットワーク（preview「Local network boost」、PROTOCOL §12・§13、`web/src/lib/lan.ts`）: 送信側が WebRTC の offer をリンクコードとしてストリームに混ぜ、受信側は確認なしで answer を QR で表示し（ユーザーの判断: LAN は許可を待たなくてよい。音は毎回明示的な許可が必要）、送信側のカメラがそれを読んで接続する（STUN なし、ホスト候補のみ）。RTCPeerConnection は Worker に無いのでページ側で持ち、コードは `engine.sendTexts`（4096 バイトのシンボルの別フレーム列。SendSession の `wide`）で取り出して流す。画面は止めず、`sendTextChannelUp(true)` で末尾から 1 セグメントずつに切り替える。
-  - 実測で分かった落とし穴: (1) 受信側が受け取ったメッセージごとに小さな返信を返すとデータチャネルが 15 → 0.6 MB/s に落ちる → 返信は 100 ms ごとに 1 通にまとめる。(2) 接続直後に一気に流し込むとパケットが捨てられて 8 秒止まる → 送ってよい量は 32 コードから倍々に増やす動的な窓（`LanSender`）。(3) QR 用の小さなシンボル（60 B）で 1 MiB のセグメントを符号化すると K=17,000 で前計算に数秒かかる → 修復シンボルの前計算は最初に必要になるまで遅らせた（`SegmentEncoder`）。
-  - e2e の注意: macOS のファイアウォールは Playwright 同梱の Chromium 同士の LAN アドレス通信を通さない（ループバックを許可すると経路が混ざって遅くなる）。ローカルではインストール済みの Google Chrome（`channel: "chrome"`）を使い、CI（Linux）は同梱 Chromium を使う。`capturePlayer` は 10 fps に追いつかずコマを飛ばすので、全コマが必要なテストは先に Slower を押して表示を遅くする。
+- ローカルネットワーク（preview「Local network boost」、PROTOCOL §12・§13、`web/src/lib/lan.ts`）: 送信側が WebRTC の offer をリンクコードとしてストリームに混ぜ、受信側は確認なしで answer を QR で表示し（ユーザーの判断: LAN は許可を待たなくてよい。音は毎回明示的な許可が必要）、送信側のカメラがそれを読んで接続する（STUN なし、ホスト候補のみ）。RTCPeerConnection は Worker に無いのでページ側で持つ。画面は止めず、`sendTextChannelUp(true)` で末尾から 1 セグメントずつに切り替える。
+  - 0.1.3 の方式: 接続上は **バイナリのレコード**（Base45 にしない。受信側が `B1` と名乗らなければ従来のテキスト）で、**噴水符号を使わずソースシンボルを 1 回ずつ**送る（`engine.sendLink` → wasm の `SendSession.nextLink` → core の `DirectSender`）。全部送ったら黙ってフィードバックを待ち、「送った分を全部取り込んだうえで欠けている」と分かったセグメントにだけ修復シンボルを足す（`A<n>` と送信済み数の比較。`applyFeedback(text, linkTaken)`）。受信側はメッセージ（ArrayBuffer）をそのまま Worker に渡し（転送、コピーなし）、`Receive.pushPacked` がまとめて処理する。
+  - 送る速さは **ペース**（レコード/秒）を動的に決める（`LanSender`）。「未確認分の上限」だけで渡すとブラウザが一気に送り、SCTP が倍々に増やした末にパケットを落として 1〜3 秒止まる（同じ Mac 内で毎回発生していた）。上げ幅は 1 回 4 MiB/s まで（無制限だと高速域で同じことが起きる）。
+  - 実測（同じ Mac、Chrome 2 つ、100 MB、展開込み）: 0.1.2 は 19.9 MiB/s（12.7〜23 でばらつく。必要数の 1.44 倍のコードを送っていた）→ 0.1.3 は 28.5 MiB/s で安定（必要数ちょうど、回線上のバイト数は半分以下、定常時のペースは約 70 MiB/s）。iPhone ⇄ Mac での効果は未確認（ユーザーの計測待ち）。
+  - 落とし穴: (1) 受信側が受け取ったメッセージごとに小さな返信を返すとデータチャネルが 15 → 0.6 MB/s に落ちる → 返信は 100 ms ごとに 1 通。(2) 変化が無くても 1 秒に 1 回はフィードバックを送り直す（展開中に黙ると、送信側が 10 秒で「見失った」と判断して全部送り直す）。(3) QR 用の小さなシンボル（60 B）で 1 MiB のセグメントを符号化すると K=17,000 で前計算に数秒かかる → 修復シンボルの前計算は最初に必要になるまで遅らせた（`SegmentEncoder`）。
+  - e2e の注意: macOS のファイアウォールは Playwright 同梱の Chromium 同士の LAN アドレス通信を通さない（ループバックを許可すると経路が混ざって遅くなる）。ローカルではインストール済みの Google Chrome（`channel: "chrome"`）を使い、CI（Linux）は同梱 Chromium を使う。`capturePlayer` は 10 fps に追いつかずコマを飛ばすので、全コマが必要なテストは先に Slower を押して表示を遅くする。`QRSEND_LAN_MB=100 QRSEND_LAN_TRACE=1 npx playwright test channels -g "local network"` で大きさを変えて 0.5 秒ごとの経過を見られる。
+- CLI 同士の TCP 直結（`qrsend send --lan`、PROTOCOL §12.2、`crates/qrsend/src/net.rs`）: 送信側が待ち受け、アドレス・ポート・鍵を載せたリンクコード（kind 3）をストリームに 6 個に 1 個混ぜる。受信側の CLI はそれを読んだら確認なしで接続する（`--no-lan` でしない）。answer が要らないので送信側にカメラは不要。チャネル上のやり取りは WebRTC のデータチャネルと同じ（バイナリのレコード、`A<n>`、フィードバック）で、全体を ChaCha20-Poly1305 で暗号化する（鍵はコードの鍵＋両側の乱数から導出）。受信側の主ループは「コードからのフレーム」と「接続からのフレーム」を `select!` で同じ `Receiver` に入れる。送信側は表示ループを持つ `FrameStream` がチャネル経由で接続の出来事（Up / Down / Feedback）を受け取り、完了のフィードバックで表示を終える。
+  - 実測（同じ Mac、ループバック、非圧縮 200 MB）: 受信完了まで 1.7 秒（約 114 MiB/s）。その後の検証・書き出しに 1.5〜4 秒（既存の処理）。
+  - **macOS のファイアウォールは、署名されていない `qrsend` への LAN アドレス宛ての接続を、TCP としては受け付けたあとで切る**（受け入れ側では setsockopt が EINVAL、接続側では EOF）。手元の確認とテストは `--lan-address 127.0.0.1` で行う。実機では送信側で「受け入れますか」を許可する必要がある。2 台の実機間では未検証。
+  - CLI ⇄ ブラウザの直結は無い（ブラウザは TCP を使えず、CLI に WebRTC が無い）。CLI の Two-way（カメラでフィードバックを読む）と音も未実装。
+- 表示の自動調節（preview「Automatic speed」、PROTOCOL §11.4、core の `tune.rs`）: Two-way のフィードバックの `frames`（読めたコードの数）の増え方で、枚数/秒とコード数/枚（画面に収まる配置の一覧から。正方形とは限らない）を 1 つずつ変えて試し、良くなれば採用・ならなければ戻す。エンジン側（`SendSession.setTuner`、`applyFeedback` の結果の `fps` / `level`）で動かし、ページは `engine.sendTune(配置ごとのコード数, fps, level)` で一覧を渡す。ネットワーク接続中は調節しない。e2e（`auto.spec.ts`）は bridge.ts で 2 ページを生でつなぎ、1 個・10 枚/秒 → 20 秒で 4×2・22 枚/秒（4.9 → 約 54 KiB/s）になるのを確認している。QR の大きさ（バージョン）は変えない（変えるとシンボルサイズが変わり、集めかけのセグメントが無駄になる）。
+- カメラの案内（preview「Camera guidance」、`guide.ts`）: デコーダが返すコードの位置（BarcodeDetector の cornerPoints / ZXing の position）と文字数から「1 ドットがカメラの何ピクセルか」を見積もり、中央 192px 四方のラプラシアンで鮮明さを測る。条件が直近の大半で成り立ったら表示、ほぼ消えたら消す（ちらつき防止。ユーザーは以前「Color の表示がついたり消えたり」を指摘している）。
 - 音でのフィードバック（preview「Feedback by sound」、PROTOCOL §14、`web/src/lib/sound.ts`）: 送信側は notice の `HEARS_SOUND` を立ててマイクを開く（AudioWorklet の `tap.worklet.js` → メインスレッドの wasm `SoundDecoder`）。受信側は利用者が「Answer by sound」を押したら、フィードバックコードのバイト列を WAV にして `<audio>` で鳴らす（同じコードなら同じ WAV を再生し直す）。CSP の `connect-src 'self'` のためページ内から blob: を fetch できないので、e2e は受信側のコンテキストを `bypassCSP` で作って WAV を読み出し、Chrome の `--use-file-for-fake-audio-capture` で送信側のマイクに流す。実際のスピーカーとマイクでは未検証。
 - 版の食い違い（`web/src/lib/update.ts`）: ビルドごとにファイル名（`qrsend_wasm_bg-<hash>.wasm`、Worker の js）が変わり、GitHub Pages は旧版のファイルを残さない。新版がデプロイされた後も開いたままの（または Service Worker が新版に入れ替わった後の）旧ページが、後から自分の版の wasm や Worker を取りに行くと 404 になる（実機で「failed to fetch Wasm: 404」「エンジンの起動に失敗」として発生）。対策: (1) wasm の読み込みは一時的な失敗なら 2 回まで再試行（404 は再試行しない）、失敗を覚えず次回また試す。(2) 読み込み失敗時にサーバーの index.html を取り直し、エントリスクリプト名が違えば新版が出ているので自動で再読み込み（60 秒に 1 回まで）。(3) Service Worker が入れ替わったら、Send / Receive 以外では即再読み込み、Send / Receive では「A new version of QRSend is ready. [Reload]」を出す。
-- 速度の目安（実測、2026-10-07）: CLI のテキスト経路をローカルのパイプで 200 MB → 既定（zstd 19）27 MB/s、`--no-compress` 115 MB/s（エンジン自体はネットワークより速い。既定の圧縮レベルが先に頭打ちになる）。Web の LAN 経路は同じ Mac 内で 25〜26 MiB/s、iPhone ⇄ Mac の Wi-Fi で 5〜6 MB/s（同じ環境で LocalSend は 32 MB/s 近く）。ブラウザは生の TCP を使えず WebRTC データチャネル（SCTP/DTLS、ユーザー空間）になること、フレームを Base45 のテキストで流していること（1.5 倍）、噴水符号・検証・OPFS 書き込みを wasm と JS で行うことが差の候補。どれが効いているかは未特定。
+- 速度の目安（実測、2026-10-07。0.1.3 での変化は上の各項目）: CLI のテキスト経路をローカルのパイプで 200 MB → 既定（zstd 19）27 MB/s、`--no-compress` 115 MB/s（エンジン自体はネットワークより速い。既定の圧縮レベルが先に頭打ちになる）。Web の LAN 経路は同じ Mac 内で 25〜26 MiB/s、iPhone ⇄ Mac の Wi-Fi で 5〜6 MB/s（同じ環境で LocalSend は 32 MB/s 近く）。ブラウザは生の TCP を使えず WebRTC データチャネル（SCTP/DTLS、ユーザー空間）になること、フレームを Base45 のテキストで流していること（1.5 倍）、噴水符号・検証・OPFS 書き込みを wasm と JS で行うことが差の候補。どれが効いているかは未特定。
 - 計測値の表示（preview「Show measurements」）: カメラの読み取り（毎秒の回数、コードがある画像／無い画像それぞれの所要 ms）、受信側の取り込み（1 回あたりの ms と件数、待ち行列）、LAN 送信側が何を待っているか（受信側の確認待ち／ネットワーク待ち／生成）の割合を画面に出す。「なぜ遅いか」は推測で直さず、まずこれで実機の数字を見る（ユーザーの指摘: 原因を特定してから実装する）。`localStorage["qrsend.debug.zxing"]="1"` で内蔵検出器を使わず ZXing にできる（iPhone 相当の経路を Mac で測る用）。
   - 実測（この Mac、1920×1080）: 内蔵検出器はコードあり 37〜48 ms／なし 25 ms、ZXing はあり 21〜25 ms／なし 28 ms。「コードが映っていないと読み取りが重くなる」は成り立たなかった。実機で「QR を読めなくすると LAN が 5〜6 → 3〜4 MB/s に落ちた」原因は未特定。
 - カラーコード（preview、PROTOCOL §2.3）: `drawColorGrid` が 1 枠に 3 コードを RGB で重ねる。受信は `scan.worker.ts` が 12 フレームに 1 回 RGB を分けて読み、3 成分の内容が違えばカラーとして読み続ける（送信側からの合図は無い）。

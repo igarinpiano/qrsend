@@ -120,6 +120,26 @@ nc -l 9000 | qrsend recv --text - -o ~/Downloads                     # receiver
 qrsend send notes/ --plain --export-text /dev/ttyUSB0                # serial
 ```
 
+### Over the local network, started by the codes
+
+With `--lan`, the stream also carries a small code that tells a receiving
+`qrsend` where the sender listens. The receiver connects by itself and the
+transfer travels through the connection as well: hundreds of megabytes per
+second on one machine, whatever the network gives between two. The screen only
+has to be read long enough for that one code; it keeps going, and is all there
+is if the connection never comes up.
+
+```bash
+qrsend send big.iso --plain --lan          # sender: shows codes, listens
+qrsend recv --camera -o ~/Downloads        # receiver: reads the offer, connects
+```
+
+No address to type and nothing to pair: the code carries a key, everything on
+the connection is encrypted with it, and only someone who saw the sender's
+screen can connect. The sender stops by itself once the receiver reports that
+everything arrived. (`recv --no-lan` keeps to the codes. On macOS the firewall
+may ask whether `qrsend` may accept incoming connections.)
+
 ## Web app
 
 The same protocol runs in the browser (Rust core compiled to WebAssembly):
@@ -136,6 +156,13 @@ loaded (PWA).
 - **Feature preview** (footer link): new ways of sending that are still being
   worked on. Each is off until the sender turns it on; otherwise everything
   works as before.
+  - *Automatic speed*: with two-way transfer, the sender finds the fastest
+    setting by itself. It tries more pictures per second or more codes per
+    picture, sees in the receiver's feedback whether more codes are read per
+    second, keeps what helps and takes back what does not — and keeps
+    adjusting as conditions change.
+  - *Camera guidance*: the receiver says how to hold the camera when
+    something is off — closer, further back, hold still, or fewer codes.
   - *Feedback by sound*: the receiver answers with short runs of soft notes
     from its speaker, heard by the sender's microphone — two-way transfer
     without a camera that sees the receiver's screen. The receiver is asked
@@ -144,7 +171,8 @@ loaded (PWA).
     also connect directly over the local network (no server, and nothing
     outside the network is contacted). Both ways are
     then used at once — megabytes per second instead of kilobytes — and the
-    screen carries on alone if the connection drops.
+    screen carries on alone if the connection drops. The sender finds the
+    pace the connection can take as it goes.
   - *Color codes*: three codes in one, as the red, green and blue parts of
     the picture — up to three times the data per frame. Receivers recognize
     them on their own.
@@ -186,10 +214,11 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] Streaming storage (OPFS) and non-extractable keys in the browser
 - [x] Dense grids and video export / import
 - [x] A back channel from receiver to sender: acknowledgments (web app, feature preview)
-- [ ] Auto-tuning speed and density from that feedback; two-way mode in the CLI
+- [x] Auto-tuning speed and codes per picture from that feedback (web app, feature preview)
 - [x] More transports side by side: text over any byte channel (CLI), color codes, screen capture, local network (web app, feature preview)
 - [x] Sound as a back channel (web app, feature preview)
-- [ ] Auto-tuning the screen from feedback; these transports in the CLI
+- [x] A direct network connection between two CLIs, started by a code (`send --lan`)
+- [ ] Two-way mode and sound in the CLI; a network connection between the CLI and a browser; auto-tuning the code size
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
 
