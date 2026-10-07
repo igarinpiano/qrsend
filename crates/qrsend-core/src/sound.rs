@@ -58,7 +58,7 @@ fn symbols(payload: &[u8]) -> Vec<[usize; GROUPS]> {
     }
     PREAMBLE
         .into_iter()
-        .chain(nibbles.chunks(GROUPS).map(|c| [c[0], c[1], c[2]]))
+        .chain(nibbles.as_chunks::<GROUPS>().0.iter().copied())
         .collect()
 }
 
@@ -245,11 +245,9 @@ impl Decoder {
                     let index = 2 + r.tones.len() / GROUPS;
                     r.tones.extend(self.read(r.next, index % BANKS).tones);
                     r.next += self.symbol;
-                    let bytes: Vec<u8> = r
-                        .tones
-                        .chunks_exact(2)
-                        .map(|n| (n[0] << 4 | n[1]) as u8)
-                        .collect();
+                    let (pairs, _) = r.tones.as_chunks::<2>();
+                    let bytes: Vec<u8> =
+                        pairs.iter().map(|&[hi, lo]| (hi << 4 | lo) as u8).collect();
                     match bytes.first().map(|&len| len as usize + 3) {
                         Some(total) if bytes.len() >= total => {
                             let (body, check) = bytes[..total].split_at(total - 2);
