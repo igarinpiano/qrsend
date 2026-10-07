@@ -39,9 +39,10 @@
     started = true;
     fileProgress = { name: file.name, at: 0, duration: 0, ended: false };
     try {
-      await scanner.scanFile(file, (at, duration) => {
+      const ended = await scanner.scanFile(file, (at, duration) => {
         if (fileProgress) fileProgress = { ...fileProgress, at, duration };
       });
+      if (!ended) return; // the camera or another file took over
       if (fileProgress) fileProgress = { ...fileProgress, ended: true };
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

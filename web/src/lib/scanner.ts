@@ -22,6 +22,8 @@ export class Scanner {
   private fileUrl?: string;
   private busy = false;
   private running = false;
+  /** Counts stop() calls, so slow async steps notice they were superseded. */
+  private turn = 0;
   private decoded?: () => void;
   stats: ScanStats = { frames: 0, codes: 0, engine: "…", width: 0, height: 0 };
 
@@ -48,24 +50,40 @@ export class Scanner {
 
   async start(deviceId?: string): Promise<void> {
     this.stop();
+    // Opening a camera takes a while. If something else took over meanwhile
+    // (stop(), another start(), a video file), this call must not touch the
+    // video element any more.
+    const turn = this.turn;
     const video: MediaTrackConstraints = deviceId
       ? { deviceId: { exact: deviceId } }
       : { facingMode: { ideal: "environment" } };
-    this.stream = await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: { ...video, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
     });
-    const track = this.stream.getVideoTracks()[0];
+    if (turn !== this.turn) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    this.stream = stream;
+    const track = stream.getVideoTracks()[0];
     try {
       // Continuous autofocus where supported.
       await track.applyConstraints({ advanced: [{ focusMode: "continuous" } as MediaTrackConstraintSet] });
     } catch {
       /* not supported */
     }
-    this.video.srcObject = this.stream;
+    if (turn !== this.turn) return;
+    this.video.srcObject = stream;
     this.video.muted = true;
     this.video.playsInline = true;
-    await this.video.play();
+    try {
+      await this.video.play();
+    } catch (e) {
+      if (turn !== this.turn) return; // interrupted by whatever took over
+      throw e;
+    }
+    if (turn !== this.turn) return;
     this.running = true;
     this.loop();
   }
@@ -92,10 +110,12 @@ export class Scanner {
 
   /**
    * Scans a video file frame by frame (no frame is skipped, however slow the
-   * decoding is). Resolves when the end is reached or `stop()` is called.
+   * decoding is). Resolves with true at the end of the file, or with false
+   * when something else took over (`stop()`, the camera, another file).
    */
-  async scanFile(file: File, onProgress?: (seconds: number, duration: number) => void): Promise<void> {
+  async scanFile(file: File, onProgress?: (seconds: number, duration: number) => void): Promise<boolean> {
     this.stop();
+    const turn = this.turn;
     const v = this.video;
     this.fileUrl = URL.createObjectURL(file);
     v.srcObject = null;
@@ -107,22 +127,25 @@ export class Scanner {
       v.onerror = () => reject(new Error("This video cannot be played in this browser."));
     });
     const step = 1 / (await this.frameRate());
+    if (turn !== this.turn) return false;
     this.running = true;
     // Sample the middle of each frame interval.
-    for (let t = step / 2; this.running && t < v.duration; t += step) {
+    for (let t = step / 2; turn === this.turn && t < v.duration; t += step) {
       await new Promise<void>((resolve) => {
         v.onseeked = () => resolve();
         v.currentTime = t;
       });
-      if (!this.running) break;
+      if (turn !== this.turn) return false;
       await new Promise<void>((resolve) => {
         this.decoded = resolve;
         this.send(v);
       });
       onProgress?.(t, v.duration);
     }
+    if (turn !== this.turn) return false;
     this.decoded = undefined;
     this.running = false;
+    return true;
   }
 
   /** Frames per second of the loaded file, as far as the browser tells. */
@@ -138,6 +161,7 @@ export class Scanner {
   }
 
   stop(): void {
+    this.turn++;
     this.running = false;
     this.decoded?.();
     this.decoded = undefined;
