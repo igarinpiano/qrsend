@@ -82,6 +82,39 @@
   let eye: HTMLVideoElement;
   let scanner: Scanner | undefined;
   let report = $state<ReceiverReport | undefined>();
+  // Automatic speed (a preview feature): the engine picks pictures per second
+  // and the layout from what the receiver reports reading. The layouts on
+  // offer are those that fit this screen, from one code to as many as stay
+  // legible; the level is an index into them.
+  const autoFeature = featureOn("autoTune") && featureOn("twoWay");
+  let layouts: [number, number][] = [];
+  let level = $state(0);
+  let readShare = $state<number | undefined>();
+
+  function offerLayouts() {
+    if (!autoFeature || !canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const [w, h] = [canvas.clientWidth * dpr, canvas.clientHeight * dpr];
+    const found: [number, number][] = [];
+    for (let px = Math.floor(Math.min(w, h) / info.modules); px >= MIN_MODULE_PX; px--) {
+      const [c, r] = fitGrid(info.modules, info.quiet, w, h, px);
+      const last = found[found.length - 1];
+      if (!last || c * r > last[0] * last[1]) found.push([c, r]);
+    }
+    if (found.length === 0) found.push([1, 1]);
+    // Start from what was asked for (`grid` 0: as many as fit).
+    const wanted = grid > 0 ? grid * grid : Infinity;
+    const count = layouts.length ? layouts[level][0] * layouts[level][1] : wanted;
+    layouts = found;
+    level = Math.max(0, found.filter(([c, r]) => c * r <= count).length - 1);
+    tune();
+  }
+
+  function tune() {
+    if (!autoFeature || layouts.length === 0) return;
+    engine.sendTune(layouts.map(([c, r]) => c * r * layers), fps, level).catch(() => {});
+  }
+
   let heardAt = 0;
   let quiet = $state(false);
   let silentFor = $state(0);
@@ -102,6 +135,11 @@
       .then((r) => {
         if (!r) return;
         report = r;
+        if (r.fps != null && r.level != null) {
+          fps = Math.round(r.fps * 10) / 10;
+          level = Math.min(r.level, layouts.length - 1);
+        }
+        readShare = r.readShare ?? undefined;
         heardAt = performance.now();
         arriving = arrival.update(heardAt, r.remainingBytes);
         quiet = false;
@@ -177,6 +215,7 @@
   }
 
   function layout(): [number, number] {
+    if (layouts.length) return layouts[level];
     if (grid > 0) return [grid, grid];
     const dpr = window.devicePixelRatio || 1;
     return fitGrid(info.modules, info.quiet, canvas.clientWidth * dpr, canvas.clientHeight * dpr, MIN_MODULE_PX);
@@ -233,7 +272,11 @@
     if (twoWayFeature) listen(true);
     if (lanFeature) startLink();
     const watchdog = setInterval(watch, 500);
-    const onResize = () => draw();
+    offerLayouts();
+    const onResize = () => {
+      offerLayouts();
+      draw();
+    };
     window.addEventListener("resize", onResize);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === " ") paused = !paused;
@@ -259,9 +302,11 @@
 
   function faster() {
     fps = Math.min(30, Math.round(fps * 1.25 * 10) / 10);
+    tune();
   }
   function slower() {
     fps = Math.max(1, Math.round((fps / 1.25) * 10) / 10);
+    tune();
   }
   function stop() {
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -308,7 +353,9 @@
           {#if quiet}
             <span data-testid="receiver-quiet">· not heard for {Math.round(silentFor / 1000)}s, sending on</span>
           {/if}
-          · screen {cols}×{rows}{layers === 3 ? " ×3 colors" : ""} ~{bytes(rate)}/s
+          · screen {cols}×{rows}{layers === 3 ? " ×3 colors" : ""} ~{bytes(rate)}/s{autoFeature && readShare != null && !linkUp
+            ? `, ${Math.round(readShare * 100)}% read`
+            : ""}
         {:else}
           Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows}{layers === 3 ? " ×3 colors" : ""} ·
           ~{bytes(rate)}/s
@@ -344,7 +391,9 @@
         </button>
       {/if}
       <button onclick={slower} aria-label="Slower">−</button>
-      <span class="fps">{fps} fps</span>
+      <span class="fps" data-testid="fps" title={autoFeature ? "Chosen from the receiver's feedback" : undefined}>
+        {fps} fps{autoFeature && report && !linkUp ? " · auto" : ""}
+      </span>
       <button onclick={faster} aria-label="Faster">+</button>
       <button onclick={() => (paused = !paused)}>{paused ? "Resume" : "Pause"}</button>
       <button class="primary" onclick={stop}>Done</button>

@@ -26,6 +26,18 @@ export const PREVIEW_FEATURES = [
     ],
   },
   {
+    id: "autoTune",
+    title: "Automatic speed",
+    side: "sending",
+    summary:
+      "With two-way transfer on, the sender finds the fastest setting by itself: it tries more pictures per second or more codes per picture, watches in the receiver's feedback whether more codes are read per second, keeps the change if so and takes it back if not. It keeps adjusting as conditions change (distance, light, a steadier hand). The − and + buttons still work; the search carries on from what you set.",
+    steps: [
+      "Turn on Two-way transfer as well, and start sending as usual.",
+      "Hold the devices so that the feedback code stays in view of this device's camera. Without feedback nothing is changed.",
+      "Expect a change every three to four seconds. A try that makes things worse is taken back by itself.",
+    ],
+  },
+  {
     id: "sound",
     title: "Feedback by sound",
     side: "sending",

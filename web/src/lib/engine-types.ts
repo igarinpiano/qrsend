@@ -59,6 +59,11 @@ export interface ReceiverReport {
   totalBytes: number;
   /** Distinct codes the receiver has read. */
   frames: number;
+  /** With `sendTune`: pictures per second and layout to switch to (when they change). */
+  fps?: number | null;
+  level?: number | null;
+  /** With `sendTune`: the share of the shown codes the receiver read when last measured. */
+  readShare?: number | null;
 }
 
 export interface RecvInfo {
@@ -163,6 +168,12 @@ export interface EngineApi {
    * through the network connection, the number of records the receiver had taken in from it by then.
    */
   sendFeedback(text: string, linkTaken?: number): Promise<ReceiverReport | null>;
+  /**
+   * Lets the engine choose speed and layout from the receiver's feedback. `levels`: codes per picture of every
+   * layout the screen offers, fewest first (empty: off); `fps` and `level`: the setting in use. `sendFeedback` then
+   * reports the setting to switch to.
+   */
+  sendTune(levels: number[], fps: number, level: number): Promise<void>;
   /**
    * No feedback is being read. `forget` false: for a moment (keep leaving out what the receiver has, stop waiting
    * for its answers); true: for long (assume nothing, send everything again).

@@ -36,6 +36,7 @@ use qrsend_core::sanitize::SafePath;
 use qrsend_core::schedule::ScheduleConfig;
 use qrsend_core::sender::{SegmentSource, Sender, SessionLayout};
 use qrsend_core::sound;
+use qrsend_core::tune;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -597,6 +598,8 @@ pub struct SendSession {
     direct: Option<DirectSender<JsSource>>,
     /// Records handed out for the connection since it came up.
     link_records: u64,
+    /// Adjusts speed and density to what the receiver reports reading.
+    tuner: Option<tune::Tuner>,
     source: JsSource,
     params: QrParams,
     frames: u64,
@@ -674,6 +677,7 @@ impl SendSession {
             sender: Sender::new(layout, source.clone(), config, None),
             direct: None,
             link_records: 0,
+            tuner: None,
             source,
             params,
             frames: 0,
@@ -815,6 +819,21 @@ impl SendSession {
         self.sender.pass() as f64
     }
 
+    /// Lets the session choose how the codes are shown, from the receiver's
+    /// feedback: `levels` are the codes per picture of every layout the
+    /// screen offers (fewest first), `fps` and `level` the setting to start
+    /// from. `applyFeedback` then reports the setting to use. An empty
+    /// `levels` turns this off.
+    #[wasm_bindgen(js_name = setTuner)]
+    pub fn set_tuner(&mut self, levels: Vec<u32>, fps: f64, level: usize, now: f64) {
+        let setting = tune::Setting { fps, level };
+        match &mut self.tuner {
+            _ if levels.is_empty() => self.tuner = None,
+            Some(tuner) if tuner.levels() == levels => tuner.set(now, setting),
+            _ => self.tuner = Some(tune::Tuner::new(levels, setting)),
+        }
+    }
+
     /// Tells the receiver (through notices mixed into the stream) whether
     /// this sender can read feedback codes.
     #[wasm_bindgen(js_name = askForFeedback)]
@@ -833,8 +852,15 @@ impl SendSession {
     ///
     /// `link_taken`: for feedback that came through the network connection,
     /// the number of records the receiver had taken in from it by then.
+    /// `now`: the time in seconds (from any fixed start). With `setTuner`,
+    /// the result also has `fps` and `level` when the setting should change.
     #[wasm_bindgen(js_name = applyFeedback)]
-    pub fn apply_feedback(&mut self, text: &str, link_taken: Option<f64>) -> JsResult<JsValue> {
+    pub fn apply_feedback(
+        &mut self,
+        text: &str,
+        link_taken: Option<f64>,
+        now: f64,
+    ) -> JsResult<JsValue> {
         let Ok(feedback) = Feedback::decode(text) else {
             return Ok(JsValue::NULL);
         };
@@ -859,11 +885,22 @@ impl SendSession {
         } else {
             (f.remaining_symbols * size).min(total)
         };
+        // The count of codes read says how well the screen gets through,
+        // unless a connection is bringing codes of its own.
+        let setting = match &mut self.tuner {
+            Some(tuner) if self.direct.is_none() && !f.complete => {
+                tuner.observe(now, self.frames, f.frames)
+            }
+            _ => None,
+        };
         to_js(&ReceiverReport {
             complete: f.complete,
             remaining_bytes: remaining as f64,
             total_bytes: total as f64,
             frames: f.frames as f64,
+            fps: setting.map(|s| s.fps),
+            level: setting.map(|s| s.level as u32),
+            read_share: self.tuner.as_ref().map(|t| t.ratio()),
         })
     }
 
@@ -1038,6 +1075,9 @@ struct ReceiverReport {
     remaining_bytes: f64,
     total_bytes: f64,
     frames: f64,
+    fps: Option<f64>,
+    level: Option<u32>,
+    read_share: Option<f64>,
 }
 
 // ---------------------------------------------------------------- receiving

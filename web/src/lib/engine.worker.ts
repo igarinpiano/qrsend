@@ -187,7 +187,7 @@ function sendLinkOffer(payload: Uint8Array | null, id: number): void {
 
 function sendFeedback(text: string, linkTaken?: number): ReceiverReport | null {
   if (!sending) return null;
-  return sending.session.applyFeedback(text, linkTaken) as ReceiverReport | null;
+  return sending.session.applyFeedback(text, linkTaken, performance.now() / 1000) as ReceiverReport | null;
 }
 
 // ---------------------------------------------------------------- receiving
@@ -546,6 +546,8 @@ const api: EngineApi = {
   sendAskForFeedback: async (on, bySound) => sending?.session.askForFeedback(on, bySound),
   sendFeedback: async (text, linkTaken) => sendFeedback(text, linkTaken),
   sendReceiverSilent: async (forget) => sending?.session.receiverSilent(forget),
+  sendTune: async (levels, fps, level) =>
+    sending?.session.setTuner(new Uint32Array(levels), fps, level, performance.now() / 1000),
   recvStart,
   recvPush,
   recvStop,
