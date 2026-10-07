@@ -1,27 +1,48 @@
 #!/usr/bin/env node
 // qrsend – thin launcher for npm distribution.
 // Finds and execs the real binary from the platform-specific binary package
-// (qrsend-bin-<platform>-<arch>) installed alongside via optionalDependencies.
-// (the same well-established approach used by esbuild / swc / Biome / turbo)
+// installed alongside via optionalDependencies (the same well-established
+// approach used by esbuild / swc / Biome / turbo).
 "use strict";
 const { spawnSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
-// linux x64/arm64 ship separate glibc and musl (Alpine, etc.) builds. Since
-// os/cpu alone can't tell them apart, both are listed in package.json's
-// optionalDependencies (the musl build carries "libc": ["musl"]), and npm
-// versions that support this (9+) use the libc field to install only the
-// right one. Older npm versions may ignore the libc field and install both,
-// so we also detect this at runtime via isMusl() and prefer the musl build
-// on musl hosts.
+// The first eight platform packages are unscoped (qrsend-bin-*); platforms
+// added later live in the @qrsend scope.
+const s = (platform) => `@qrsend/cli-bin-${platform}`;
+
+// pkg: the default (glibc on Linux) build. muslPkg: the static musl build,
+// preferred on musl hosts (Alpine, etc.). On 32-bit ARM, v6Pkg / v6MuslPkg are
+// the ARMv6 builds (Raspberry Pi 1 / Zero); os/cpu alone cannot tell ARMv6
+// from ARMv7, or glibc from musl, so several packages may be installed and
+// the right one is picked here at run time.
 const PLATFORMS = {
   "darwin arm64": { pkg: "qrsend-bin-darwin-arm64" },
   "darwin x64": { pkg: "qrsend-bin-darwin-x64" },
   "linux arm64": { pkg: "qrsend-bin-linux-arm64", muslPkg: "qrsend-bin-linux-arm64-musl" },
   "linux x64": { pkg: "qrsend-bin-linux-x64", muslPkg: "qrsend-bin-linux-x64-musl" },
+  "linux ia32": { pkg: s("linux-ia32"), muslPkg: s("linux-ia32-musl") },
+  "linux arm": {
+    pkg: s("linux-arm"),
+    muslPkg: s("linux-arm-musl"),
+    v6Pkg: s("linux-armv6"),
+    v6MuslPkg: s("linux-armv6-musl"),
+  },
+  "linux riscv64": { pkg: s("linux-riscv64") },
+  "linux ppc64": { pkg: s("linux-ppc64") },
+  "linux s390x": { pkg: s("linux-s390x") },
+  "linux loong64": { pkg: s("linux-loong64") },
+  "android arm64": { pkg: s("android-arm64") },
+  "android arm": { pkg: s("android-arm") },
+  "android x64": { pkg: s("android-x64") },
+  "android ia32": { pkg: s("android-ia32") },
+  "freebsd x64": { pkg: s("freebsd-x64") },
+  "netbsd x64": { pkg: s("netbsd-x64") },
+  "sunos x64": { pkg: s("sunos-x64") },
   "win32 x64": { pkg: "qrsend-bin-win32-x64" },
   "win32 arm64": { pkg: "qrsend-bin-win32-arm64" },
+  "win32 ia32": { pkg: s("win32-ia32") },
 };
 
 // Standard detection method used by esbuild and others: Node's process.report
@@ -41,32 +62,52 @@ function isMusl() {
   return !glibcVersionRuntime;
 }
 
+// Node records the ARM version it was built for; ARMv6 hosts cannot run the
+// ARMv7 build.
+function isArmV6() {
+  return process.arch === "arm" && String(process.config.variables.arm_version) === "6";
+}
+
 function resolveFromPkg(pkg, exe) {
   try {
     return require.resolve(`${pkg}/bin/${exe}`);
   } catch (e) {
     // Fallback from node_modules/qrsend-cli/bin/ to node_modules/<pkg>/bin/
-    const local = path.join(__dirname, "..", "..", pkg, "bin", exe);
+    const local = path.join(__dirname, "..", "..", ...pkg.split("/"), "bin", exe);
     if (fs.existsSync(local)) return local;
     return null;
   }
 }
 
+// Packages to try, best first.
+function candidatesFor(entry, onMusl, armV6) {
+  const glibc = armV6 ? [entry.v6Pkg] : [entry.pkg, entry.v6Pkg];
+  const musl = armV6 ? [entry.v6MuslPkg] : [entry.muslPkg, entry.v6MuslPkg];
+  return (onMusl ? [...musl, ...glibc] : glibc).filter(Boolean);
+}
+
 // Returns { path, pkg, muslFallback } for the binary to run, or { error }.
-// muslFallback is true when the host is musl but only the glibc build was
+// muslFallback is true when the host is musl but only a glibc build was
 // found (e.g. npm < 9 installed it, or the musl package was omitted). That
 // glibc binary usually can't start on musl (no glibc dynamic loader), and the
 // spawn then fails with a bare ENOENT, so the caller explains it instead.
-function findBinary({ platform = process.platform, arch = process.arch, musl = isMusl, resolve = resolveFromPkg } = {}) {
+function findBinary({
+  platform = process.platform,
+  arch = process.arch,
+  musl = isMusl,
+  armV6 = isArmV6,
+  resolve = resolveFromPkg,
+} = {}) {
   const key = `${platform} ${arch}`;
   const entry = PLATFORMS[key];
   if (!entry) return { error: `qrsend: unsupported platform (${key})` };
   const exe = platform === "win32" ? "qrsend.exe" : "qrsend";
   const onMusl = Boolean(entry.muslPkg) && musl();
-  const candidates = onMusl ? [entry.muslPkg, entry.pkg] : [entry.pkg];
+  const candidates = candidatesFor(entry, onMusl, arch === "arm" && armV6());
+  const muslPkgs = [entry.muslPkg, entry.v6MuslPkg].filter(Boolean);
   for (const pkg of candidates) {
     const resolved = resolve(pkg, exe);
-    if (resolved) return { path: resolved, pkg, muslFallback: onMusl && pkg !== entry.muslPkg };
+    if (resolved) return { path: resolved, pkg, muslFallback: onMusl && !muslPkgs.includes(pkg) };
   }
   return {
     error:

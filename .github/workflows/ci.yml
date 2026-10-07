@@ -27,11 +27,15 @@ jobs:
         run: node --test npm/launcher.test.js
       - name: npm packaging smoke test
         run: |
-          mkdir -p bins/x86_64-unknown-linux-gnu
-          printf '#!/bin/sh\necho stub "$@"\n' > bins/x86_64-unknown-linux-gnu/qrsend
-          chmod +x bins/x86_64-unknown-linux-gnu/qrsend
+          for t in x86_64-unknown-linux-gnu arm-unknown-linux-gnueabihf; do
+            mkdir -p "bins/$t"
+            printf '#!/bin/sh\necho stub "$@"\n' > "bins/$t/qrsend"
+          done
           python3 npm/assemble.py --version 0.0.0 --binaries bins --out npm-out
-          for d in npm-out/*/; do (cd "$d" && npm pack --dry-run > /dev/null); done
+          find npm-out -name package.json | while read -r f; do
+            (cd "$(dirname "$f")" && npm pack --dry-run > /dev/null)
+          done
+          test -f npm-out/@qrsend/cli-bin-linux-armv6/package.json
       - name: Shell scripts
         run: bash -n scripts/first-publish.sh
 

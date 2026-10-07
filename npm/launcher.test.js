@@ -28,7 +28,7 @@ test("musl host with only the glibc build is flagged as a fallback", () => {
 
 test("missing packages and unsupported platforms are reported", () => {
   assert.match(findBinary(linux(false, installed())).error, /could not find binary package/);
-  assert.match(findBinary({ platform: "sunos", arch: "x64" }).error, /unsupported platform/);
+  assert.match(findBinary({ platform: "aix", arch: "ppc64" }).error, /unsupported platform/);
 });
 
 test("ENOENT after a musl fallback explains the glibc/musl mismatch", () => {
@@ -41,5 +41,34 @@ test("ENOENT after a musl fallback explains the glibc/musl mismatch", () => {
   assert.strictEqual(
     launchErrorMessage({ pkg: "qrsend-bin-linux-x64", muslFallback: false }, err, "x64"),
     "qrsend: failed to launch: spawnSync /nm/x ENOENT"
+  );
+});
+
+test("platforms added later resolve to scoped packages", () => {
+  const f = findBinary({ platform: "win32", arch: "ia32", resolve: installed("@qrsend/cli-bin-win32-ia32") });
+  assert.strictEqual(f.pkg, "@qrsend/cli-bin-win32-ia32");
+  assert.match(f.path, /qrsend\.exe$/);
+  const bsd = findBinary({ platform: "freebsd", arch: "x64", resolve: installed("@qrsend/cli-bin-freebsd-x64") });
+  assert.strictEqual(bsd.pkg, "@qrsend/cli-bin-freebsd-x64");
+});
+
+test("32-bit ARM picks ARMv7 or ARMv6, glibc or musl", () => {
+  const all = installed(
+    "@qrsend/cli-bin-linux-arm",
+    "@qrsend/cli-bin-linux-arm-musl",
+    "@qrsend/cli-bin-linux-armv6",
+    "@qrsend/cli-bin-linux-armv6-musl",
+  );
+  const arm = (musl, armV6, resolve = all) =>
+    findBinary({ platform: "linux", arch: "arm", musl: () => musl, armV6: () => armV6, resolve }).pkg;
+  assert.strictEqual(arm(false, false), "@qrsend/cli-bin-linux-arm");
+  assert.strictEqual(arm(true, false), "@qrsend/cli-bin-linux-arm-musl");
+  assert.strictEqual(arm(false, true), "@qrsend/cli-bin-linux-armv6");
+  assert.strictEqual(arm(true, true), "@qrsend/cli-bin-linux-armv6-musl");
+  // An ARMv7 host can fall back to the ARMv6 build; never the other way round.
+  assert.strictEqual(arm(false, false, installed("@qrsend/cli-bin-linux-armv6")), "@qrsend/cli-bin-linux-armv6");
+  assert.match(
+    findBinary({ platform: "linux", arch: "arm", musl: () => false, armV6: () => true, resolve: installed("@qrsend/cli-bin-linux-arm") }).error,
+    /could not find/,
   );
 });

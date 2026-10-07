@@ -78,8 +78,9 @@ if [ "$DO_NPM" = 1 ]; then
   # README and LICENSE shipped in the package come from the tag.
   python3 "$ROOT/npm/assemble.py" --version "$VERSION" --binaries "$WORK/binaries" --out "$WORK/npm" --docs "$SRC"
   # Platform packages first so the main package's optionalDependencies resolve.
-  for d in "$WORK/npm"/qrsend-bin-* "$WORK/npm/qrsend-cli"; do
-    echo "== npm publish $(basename "$d")"
+  for d in "$WORK/npm"/qrsend-bin-* "$WORK/npm"/@qrsend/* "$WORK/npm/qrsend-cli"; do
+    [ -d "$d" ] || continue
+    echo "== npm publish $(node -p "require('$d/package.json').name")"
     (cd "$d" && npm publish --access public $DRY)
   done
 fi
@@ -87,4 +88,4 @@ fi
 echo
 echo "Done. Now add Trusted Publishing (see the header of .github/workflows/publish-all.yml):"
 echo "  crates.io: qrsend-core, qrsend   — workflow publish-all.yml, environment crates-io"
-echo "  npmjs.com: qrsend-cli and every qrsend-bin-* package — workflow publish-all.yml, environment npm"
+echo "  npmjs.com: qrsend-cli and every qrsend-bin-* / @qrsend/cli-bin-* package — workflow publish-all.yml, environment npm"

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Publishes the npm packages of <version> that are not on the registry yet —
 # for resuming a first publish that stopped half-way (e.g. a qrsend-bin-win32-*
-# package rejected by npm's spam detection until support whitelists it).
+# package rejected by npm's spam detection until support whitelists it), and
+# for the first publish of platform packages added in a later release
+# (@qrsend/cli-bin-*), which have no trusted publisher yet.
 #
 # - Packages already on the registry at <version> are left alone.
 # - --skip NAME leaves a package out (repeatable).
@@ -67,7 +69,7 @@ declare -a REPORT
 missing=0
 publish_dir() {
   local dir="$1" name
-  name="$(basename "$dir")"
+  name="$(node -p "require('$dir/package.json').name")"
   if published "$name"; then
     REPORT+=("already published  $name@$VERSION")
   elif skipped "$name"; then
@@ -85,7 +87,8 @@ publish_dir() {
   return 0
 }
 
-for dir in "$WORK/npm"/qrsend-bin-*; do
+for dir in "$WORK/npm"/qrsend-bin-* "$WORK/npm"/@qrsend/*; do
+  [ -d "$dir" ] || continue
   publish_dir "$dir" || missing=$((missing + 1))
 done
 

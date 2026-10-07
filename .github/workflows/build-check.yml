@@ -1,0 +1,37 @@
+# Builds every release target without publishing anything — for checking the
+# build matrix after changing targets or dependencies.
+name: build-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag/commit to build (empty = the branch selected above)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build-matrix.yml
+    with:
+      ref: ${{ inputs.ref }}
+
+  summary:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: binaries
+      - name: Built targets and npm packages
+        run: |
+          ls binaries | sed 's/^/built: /'
+          python3 npm/assemble.py --version 0.0.0 --binaries binaries --out npm-out
+          find npm-out -name package.json | sort

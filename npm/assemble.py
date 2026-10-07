@@ -15,7 +15,16 @@ import stat
 
 # target -> (package, os, cpu, libc or None, executable)
 # os/cpu are Node's process.platform / process.arch. libc separates the glibc
-# and musl builds for linux x64/arm64 (npm 9+); launcher.js also detects musl.
+# and musl builds of one architecture (npm 9+); launcher.js also detects musl
+# and, for 32-bit ARM, ARMv6 vs ARMv7 (npm cannot tell those apart).
+#
+# The first eight packages keep their original unscoped names. Every package
+# added later lives in the @qrsend scope: npm's spam filter rejects new
+# unscoped "*-win32-*" names, and scoped names avoid that class of problem.
+def scoped(platform):
+    return f"@qrsend/cli-bin-{platform}"
+
+
 TARGETS = {
     "aarch64-apple-darwin": ("qrsend-bin-darwin-arm64", ["darwin"], ["arm64"], None, "qrsend"),
     "x86_64-apple-darwin": ("qrsend-bin-darwin-x64", ["darwin"], ["x64"], None, "qrsend"),
@@ -25,6 +34,25 @@ TARGETS = {
     "x86_64-unknown-linux-musl": ("qrsend-bin-linux-x64-musl", ["linux"], ["x64"], ["musl"], "qrsend"),
     "x86_64-pc-windows-msvc": ("qrsend-bin-win32-x64", ["win32"], ["x64"], None, "qrsend.exe"),
     "aarch64-pc-windows-msvc": ("qrsend-bin-win32-arm64", ["win32"], ["arm64"], None, "qrsend.exe"),
+    # ── added in 0.1.1 (scoped) ──
+    "i686-pc-windows-msvc": (scoped("win32-ia32"), ["win32"], ["ia32"], None, "qrsend.exe"),
+    "i686-unknown-linux-gnu": (scoped("linux-ia32"), ["linux"], ["ia32"], None, "qrsend"),
+    "i686-unknown-linux-musl": (scoped("linux-ia32-musl"), ["linux"], ["ia32"], ["musl"], "qrsend"),
+    "armv7-unknown-linux-gnueabihf": (scoped("linux-arm"), ["linux"], ["arm"], None, "qrsend"),
+    "armv7-unknown-linux-musleabihf": (scoped("linux-arm-musl"), ["linux"], ["arm"], ["musl"], "qrsend"),
+    "arm-unknown-linux-gnueabihf": (scoped("linux-armv6"), ["linux"], ["arm"], None, "qrsend"),
+    "arm-unknown-linux-musleabihf": (scoped("linux-armv6-musl"), ["linux"], ["arm"], ["musl"], "qrsend"),
+    "riscv64gc-unknown-linux-gnu": (scoped("linux-riscv64"), ["linux"], ["riscv64"], None, "qrsend"),
+    "powerpc64le-unknown-linux-gnu": (scoped("linux-ppc64"), ["linux"], ["ppc64"], None, "qrsend"),
+    "s390x-unknown-linux-gnu": (scoped("linux-s390x"), ["linux"], ["s390x"], None, "qrsend"),
+    "loongarch64-unknown-linux-gnu": (scoped("linux-loong64"), ["linux"], ["loong64"], None, "qrsend"),
+    "aarch64-linux-android": (scoped("android-arm64"), ["android"], ["arm64"], None, "qrsend"),
+    "armv7-linux-androideabi": (scoped("android-arm"), ["android"], ["arm"], None, "qrsend"),
+    "x86_64-linux-android": (scoped("android-x64"), ["android"], ["x64"], None, "qrsend"),
+    "i686-linux-android": (scoped("android-ia32"), ["android"], ["ia32"], None, "qrsend"),
+    "x86_64-unknown-freebsd": (scoped("freebsd-x64"), ["freebsd"], ["x64"], None, "qrsend"),
+    "x86_64-unknown-netbsd": (scoped("netbsd-x64"), ["netbsd"], ["x64"], None, "qrsend"),
+    "x86_64-unknown-illumos": (scoped("sunos-x64"), ["sunos"], ["x64"], None, "qrsend"),
 }
 
 MAIN = "qrsend-cli"  # the command it installs is still `qrsend`
@@ -56,7 +84,7 @@ def main():
         if not os.path.isfile(src):
             print(f"skip {target} (no binary)")
             continue
-        pdir = os.path.join(args.out, pkg)
+        pdir = os.path.join(args.out, *pkg.split("/"))
         os.makedirs(os.path.join(pdir, "bin"), exist_ok=True)
         dst = os.path.join(pdir, "bin", exe)
         shutil.copy2(src, dst)

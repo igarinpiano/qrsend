@@ -1,15 +1,20 @@
 # Builds the qrsend CLI release binaries for every target and uploads them as
-# artifacts (bin-<target>). Shared by publish-all.yml; add or change targets
-# here only.
+# artifacts (bin-<target>). Shared by publish-all.yml and build-check.yml; add
+# or change targets here only.
 #
 # - Native runners build macOS and Windows directly.
-# - Linux uses cross (cross-rs): zstd-sys compiles C, and cross images bring
-#   both the cross C toolchain and an old glibc. Native ubuntu-latest builds
-#   would require a new glibc (see "Check glibc floor").
-# - musl builds are fully static, where dlopen of X11/Wayland cannot work, so
-#   they are built without the window feature (terminal display only).
+# - Linux, Android and the BSDs use cross (cross-rs): zstd-sys compiles C, and
+#   cross images bring the C toolchain for each target plus an old glibc.
+#   Native ubuntu-latest builds would require a new glibc ("Check glibc floor").
+# - `features: --no-default-features` drops the window display (minifb). It is
+#   used where dlopen of X11/Wayland cannot work (static musl) or makes no
+#   sense (Android, BSDs, small boards); those builds show codes in the
+#   terminal or export them.
+# - `optional: true` targets may fail without failing the release: they are
+#   best-effort platforms, and a missing binary just means no package for it.
 #
-# npm packages are made for the targets listed in npm/assemble.py (all of them).
+# npm packages are made for the targets listed in npm/assemble.py; the rest
+# (Windows GNU, the macOS universal binary) ship on GitHub Releases only.
 name: build-matrix
 
 on:
@@ -29,15 +34,40 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: aarch64-apple-darwin, os: macos-latest, cross: false, features: "" }
-          - { target: x86_64-apple-darwin, os: macos-26-intel, cross: false, features: "" }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest, cross: false, features: "" }
-          - { target: aarch64-pc-windows-msvc, os: windows-11-arm, cross: false, features: "" }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, cross: true, features: "" }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true, features: "" }
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: "--no-default-features" }
-          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: "--no-default-features" }
+          # ── required ─────────────────────────────────────────────
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-26-intel }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, cross: true, glibc: "2.28" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true, glibc: "2.28" }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: --no-default-features }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: --no-default-features }
+          # ── optional: more Windows / macOS flavours ──────────────
+          - { target: i686-pc-windows-msvc, os: windows-latest, optional: true }
+          - { target: x86_64-pc-windows-gnu, os: windows-latest, optional: true }
+          - { target: universal-apple-darwin, os: macos-latest, universal: true, optional: true }
+          # ── optional: more Linux ─────────────────────────────────
+          - { target: i686-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true }
+          - { target: i686-unknown-linux-musl, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: armv7-unknown-linux-gnueabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: armv7-unknown-linux-musleabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: arm-unknown-linux-gnueabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: arm-unknown-linux-musleabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: riscv64gc-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: powerpc64le-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: s390x-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: loongarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          # ── optional: Android (Termux) and BSDs ──────────────────
+          - { target: aarch64-linux-android, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: armv7-linux-androideabi, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: x86_64-linux-android, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: i686-linux-android, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: x86_64-unknown-freebsd, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: x86_64-unknown-netbsd, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: x86_64-unknown-illumos, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional || false }}
     defaults:
       run:
         shell: bash
@@ -47,30 +77,41 @@ jobs:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.universal && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - uses: taiki-e/install-action@v2
+      - name: Install cross
         if: matrix.cross
-        with:
-          tool: cross
+        # From git: the last tagged release predates several targets
+        # (LoongArch, newer Android NDKs).
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
       - name: Build (release, native)
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.cross && !matrix.universal }}
         run: cargo build --release --locked -p qrsend --target ${{ matrix.target }} ${{ matrix.features }}
       - name: Build (release, cross)
         if: matrix.cross
         run: cross build --release --locked -p qrsend --target ${{ matrix.target }} ${{ matrix.features }}
+      - name: Build (release, macOS universal)
+        if: matrix.universal
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p qrsend --target "$t"
+          done
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create -output target/universal-apple-darwin/release/qrsend \
+            target/aarch64-apple-darwin/release/qrsend target/x86_64-apple-darwin/release/qrsend
+          lipo -info target/universal-apple-darwin/release/qrsend
       - name: Check glibc floor
-        # Supported down to RHEL 8 / Debian 10 (glibc 2.28).
+        # Required glibc builds must run on RHEL 8 / Debian 10 (glibc 2.28).
         if: contains(matrix.target, '-linux-gnu')
         env:
-          MAX_GLIBC: "2.28"
+          MAX_GLIBC: ${{ matrix.glibc }}
         run: |
           bin="target/${{ matrix.target }}/release/qrsend"
           need="$(readelf -V --wide "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -V | tail -1)"
           echo "max GLIBC required by ${{ matrix.target }}: ${need:-none}"
-          if [ -n "$need" ] && [ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+          if [ -n "$MAX_GLIBC" ] && [ -n "$need" ] && [ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
             echo "::error::${{ matrix.target }} requires GLIBC_$need (> $MAX_GLIBC)"
             exit 1
           fi

@@ -15,16 +15,23 @@
 #   1. Run this workflow with only "GitHub Releases" selected (with `ref` set
 #      to the tag when the release/tag already exists).
 #   2. Locally run `scripts/first-publish.sh <version>`: it publishes the
-#      crates (qrsend-core, then qrsend) and the npm packages (qrsend-bin-*,
-#      then qrsend-cli) built from that GitHub Release.
+#      crates (qrsend-core, then qrsend) and the npm packages (the platform
+#      packages qrsend-bin-* and @qrsend/cli-bin-*, then qrsend-cli) built
+#      from that GitHub Release.
 #   3. crates.io → each crate → Settings → Trusted Publishing:
 #        owner igarinpiano / repo qrsend / workflow publish-all.yml /
 #        environment crates-io
-#      npmjs.com → each package (qrsend-cli and every qrsend-bin-*) → Settings →
+#      npmjs.com → each package (qrsend-cli, every qrsend-bin-* and every
+#      @qrsend/cli-bin-*) → Settings →
 #      Trusted publishing → GitHub Actions:
 #        owner igarinpiano / repo qrsend / workflow publish-all.yml /
 #        environment npm
 # After that, every release is just this workflow with everything selected.
+#
+# ADDING A PLATFORM LATER: its npm package does not exist yet, so the npm
+# stage publishes everything else and then fails naming it. Publish it once
+# with `scripts/npm-publish-remaining.sh <version>` and add its trusted
+# publisher; the next release includes it automatically.
 name: publish-all
 
 on:
@@ -214,16 +221,27 @@ jobs:
           # cannot override; unset it so npm falls back to the OIDC exchange.
           unset NODE_AUTH_TOKEN
           unset NPM_CONFIG_USERCONFIG
+          # A package that cannot be published (typically a new one that has
+          # no trusted publisher yet — see the header) must not block the
+          # others: keep going, publish the main package, then fail the job.
+          failed=""
           publish() {
             name="$(node -p "require('./$1/package.json').name")"
             if npm view "$name@$VERSION" version > /dev/null 2>&1; then
               echo "$name@$VERSION is already published; skipping"
-            else
-              (cd "$1" && npm publish --access public --provenance)
+            elif ! (cd "$1" && npm publish --access public --provenance); then
+              echo "::error::could not publish $name@$VERSION"
+              failed="$failed $name"
             fi
           }
-          for d in npm-out/qrsend-bin-*; do publish "$d"; done
+          for d in npm-out/qrsend-bin-* npm-out/@qrsend/*; do
+            [ -d "$d" ] && publish "$d"
+          done
           publish npm-out/qrsend-cli
+          if [ -n "$failed" ]; then
+            echo "::error::not published:$failed — publish them once by hand (scripts/npm-publish-remaining.sh $VERSION) and add their trusted publishers"
+            exit 1
+          fi
 
   crates-io:
     needs: [check-version, github-release, npm]
