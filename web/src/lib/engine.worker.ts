@@ -245,6 +245,7 @@ function state(s: RecvSession): RecvState {
     error: s.error,
     result: s.result,
     persistent,
+    feedbackBySound: s.r.feedbackBySound,
     // "Complete" only once everything is verified and unpacked.
     feedback: s.r.feedback(!!s.result) ?? undefined,
   };
@@ -532,7 +533,7 @@ const api: EngineApi = {
   },
   sendTextChannelUp: async (up) => sending?.session.setTextChannelUp(up),
   sendLinkOffer: async (payload, id) => sendLinkOffer(payload, id),
-  sendAskForFeedback: async (on) => sending?.session.askForFeedback(on),
+  sendAskForFeedback: async (on, bySound) => sending?.session.askForFeedback(on, bySound),
   sendFeedback: async (text) => sendFeedback(text),
   sendReceiverSilent: async (forget) => sending?.session.receiverSilent(forget),
   recvStart,

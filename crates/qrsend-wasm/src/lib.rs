@@ -34,6 +34,7 @@ use qrsend_core::resume::ResumeCode;
 use qrsend_core::sanitize::SafePath;
 use qrsend_core::schedule::ScheduleConfig;
 use qrsend_core::sender::{SegmentSource, Sender, SessionLayout};
+use qrsend_core::sound;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -599,6 +600,8 @@ pub struct SendSession {
     frames: u64,
     /// Whether the stream tells the receiver that feedback codes are read.
     asking: bool,
+    /// Whether the stream also says that feedback may come as sound.
+    hearing: bool,
     /// Link codes (an offer to connect another way) to mix into the stream.
     link: Vec<String>,
     /// Codes shown since something besides data had to be said.
@@ -669,6 +672,7 @@ impl SendSession {
             params,
             frames: 0,
             asking: false,
+            hearing: false,
             link: Vec::new(),
             since_extras: 0,
             extra_turn: 0,
@@ -757,11 +761,12 @@ impl SendSession {
     /// Tells the receiver (through notices mixed into the stream) whether
     /// this sender can read feedback codes.
     #[wasm_bindgen(js_name = askForFeedback)]
-    pub fn ask_for_feedback(&mut self, on: bool) {
-        if on && !self.asking {
+    pub fn ask_for_feedback(&mut self, on: bool, by_sound: bool) {
+        if on && (!self.asking || by_sound != self.hearing) {
             self.since_extras = 0;
         }
         self.asking = on;
+        self.hearing = on && by_sound;
     }
 
     /// Takes a feedback code shown by the receiver (`QSF1-…`) into account:
@@ -868,11 +873,56 @@ impl SendSession {
                 SenderNotice {
                     session_id: self.sender.layout().session_id,
                     wants_feedback: true,
+                    hears_sound: self.hearing,
                 }
                 .encode(),
             );
         }
         Some(self.link[turn - self.asking as usize].clone())
+    }
+}
+
+/// A feedback code as the bytes to send through a channel that carries bytes
+/// (sound); null when the text is not a feedback code.
+#[wasm_bindgen(js_name = feedbackBytes)]
+pub fn feedback_bytes(code: &str) -> Option<Vec<u8>> {
+    Feedback::decode(code).ok().map(|f| f.to_bytes())
+}
+
+/// The feedback code those bytes stand for; null when they are damaged.
+#[wasm_bindgen(js_name = feedbackCode)]
+pub fn feedback_code(bytes: &[u8]) -> Option<String> {
+    Feedback::from_bytes(bytes).ok().map(|f| f.encode())
+}
+
+/// A short message as sound: samples in -1..1 at `sample_rate` (see
+/// `qrsend_core::sound`). At most 255 bytes.
+#[wasm_bindgen(js_name = soundEncode)]
+pub fn sound_encode(payload: &[u8], sample_rate: f32) -> JsResult<Vec<f32>> {
+    if payload.len() > sound::MAX_PAYLOAD {
+        return Err(js_err("too long for a sound message"));
+    }
+    Ok(sound::encode(payload, sample_rate))
+}
+
+/// Listens to microphone samples for sound messages.
+#[wasm_bindgen]
+pub struct SoundDecoder(sound::Decoder);
+
+#[wasm_bindgen]
+impl SoundDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(sample_rate: f32) -> SoundDecoder {
+        SoundDecoder(sound::Decoder::new(sample_rate))
+    }
+
+    /// Adds samples; returns the messages (Uint8Array each) they complete.
+    pub fn push(&mut self, samples: &[f32]) -> Array {
+        self.0
+            .push(samples)
+            .iter()
+            .map(|m| JsValue::from(Uint8Array::from(&m[..])))
+            .collect()
     }
 }
 
@@ -976,6 +1026,8 @@ pub struct Receive {
     completed: Vec<(u32, Vec<u8>)>,
     /// Session whose sender asked for feedback codes.
     feedback_for: Option<u32>,
+    /// That sender also listens for feedback as sound.
+    feedback_by_sound: bool,
 }
 
 #[wasm_bindgen]
@@ -995,6 +1047,7 @@ impl Receive {
             signer: None,
             completed: Vec::new(),
             feedback_for: None,
+            feedback_by_sound: false,
         })
     }
 
@@ -1097,6 +1150,7 @@ impl Receive {
         if text.starts_with(feedback::NOTICE_PREFIX) {
             if let Ok(notice) = SenderNotice::decode(text) {
                 self.feedback_for = notice.wants_feedback.then_some(notice.session_id);
+                self.feedback_by_sound = notice.wants_feedback && notice.hears_sound;
             }
             return to_js(&out);
         }
@@ -1275,6 +1329,16 @@ impl Receive {
             return None;
         }
         Some(self.rx.feedback(complete)?.encode())
+    }
+
+    /// Whether the sender of this transfer listens for feedback as sound.
+    #[wasm_bindgen(getter, js_name = feedbackBySound)]
+    pub fn feedback_by_sound(&self) -> bool {
+        self.feedback_by_sound
+            && self
+                .rx
+                .params()
+                .is_some_and(|p| self.feedback_for == Some(p.session_id))
     }
 
     /// Resume code for the segments still missing.

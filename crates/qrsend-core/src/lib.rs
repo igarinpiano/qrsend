@@ -19,6 +19,7 @@ pub mod resume;
 pub mod sanitize;
 pub mod schedule;
 pub mod sender;
+pub mod sound;
 
 #[cfg(test)]
 mod tests;

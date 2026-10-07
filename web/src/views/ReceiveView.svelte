@@ -7,6 +7,7 @@
   import { bytes, duration, RateMeter } from "../lib/format";
   import { LINK_PREFIX, LanReceiver, LinkAssembler, canConnect, isOffer, type LinkMessage } from "../lib/lan";
   import { toDataUrl } from "../lib/qrdraw";
+  import { feedbackWav } from "../lib/sound";
   import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
   import Result from "./Result.svelte";
@@ -32,6 +33,56 @@
     coreReady = true;
     if (st) showFeedback(st, true);
   });
+
+  // A sender that listens with a microphone can be answered by sound: the
+  // feedback code as a second of chirps from this device's speaker. Nothing
+  // sounds unless the person receiving allows it.
+  const SOUND_EVERY_MS = 2500;
+  let soundChoice = $state<"ask" | "yes" | "no">("ask");
+  let speaker = $state<HTMLAudioElement | undefined>();
+  let soundUrl = $state("");
+  let soundCode = $state("");
+  let soundAt = 0;
+  let sounding = false;
+
+  /** Plays the latest feedback code, unless one is playing or was played a moment ago. */
+  async function sound(force = false) {
+    const code = st?.feedback;
+    if (soundChoice !== "yes" || !speaker || !code || sounding) return;
+    const now = performance.now();
+    if (!force && (code === soundCode || now - soundAt < SOUND_EVERY_MS)) return;
+    sounding = true;
+    soundAt = now;
+    if (code !== soundCode) {
+      const wav = await feedbackWav(code);
+      if (!wav || !speaker) {
+        sounding = false;
+        return;
+      }
+      if (soundUrl) URL.revokeObjectURL(soundUrl);
+      soundUrl = URL.createObjectURL(wav);
+      speaker.src = soundUrl;
+      soundCode = code;
+    } else {
+      speaker.currentTime = 0;
+    }
+    speaker.onended = speaker.onerror = () => {
+      sounding = false;
+      // The last word must get through: say "everything arrived" a few times.
+      if (st?.result && completeSaid < 3) {
+        completeSaid++;
+        setTimeout(() => sound(true), 400);
+      }
+    };
+    speaker.play().catch(() => (sounding = false));
+  }
+  let completeSaid = 0;
+
+  function allowSound() {
+    soundChoice = "yes";
+    // Started by this tap, so the browser lets the page play from now on.
+    sound(true);
+  }
 
   function showFeedback(next: RecvState, force = false) {
     if (!coreReady || !next.feedback) return;
@@ -136,6 +187,7 @@
     if (next.result && next.feedback) lingering = false;
     st = next;
     showFeedback(next);
+    if (next.feedbackBySound) sound(!!next.result && completeSaid === 0);
     // The sender should hear at once that everything has arrived.
     if (next.result) reply();
     // What matters while waiting: how much is left and how fast it goes.
@@ -205,6 +257,23 @@
 {#if watching}
   <Camera {ontexts} {active} allowFile={!result} />
 {/if}
+
+{#if st?.feedbackBySound && soundChoice === "ask"}
+  <div class="card stack" data-testid="sound-offer">
+    <p>
+      <strong>The sender listens for feedback by sound.</strong> This device would answer with short chirps from its
+      speaker, so the sender sends only what is missing and stops when everything has arrived.
+    </p>
+    <div class="row">
+      <button class="primary" onclick={allowSound}>Answer by sound</button>
+      <button onclick={() => (soundChoice = "no")}>Stay silent</button>
+    </div>
+  </div>
+{/if}
+{#if soundChoice === "yes"}
+  <p class="small muted"><span class="badge ok">Sound</span> Answering the sender with chirps. Keep the devices close.</p>
+{/if}
+<audio bind:this={speaker} data-testid="feedback-sound" data-code={soundCode}></audio>
 
 {#if offer && !result && linkChoice === "ask"}
   <div class="card stack" data-testid="link-offer">

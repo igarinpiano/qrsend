@@ -98,6 +98,8 @@ export interface RecvState {
   result?: RecvResult;
   /** False when received data is only held in memory (no OPFS). */
   persistent: boolean;
+  /** The sender also listens for feedback as sound. */
+  feedbackBySound: boolean;
   /** Feedback code for the sender (`QSF1-…`), when the sender asked for feedback. */
   feedback?: string;
 }
@@ -138,8 +140,11 @@ export interface EngineApi {
   sendTextChannelUp(up: boolean): Promise<void>;
   /** An offer to connect another way, repeated in the stream until replaced (`null`: none). */
   sendLinkOffer(payload: Uint8Array | null, id: number): Promise<void>;
-  /** Whether the stream tells the receiver that this sender reads feedback codes. */
-  sendAskForFeedback(on: boolean): Promise<void>;
+  /**
+   * Whether the stream tells the receiver that this sender reads feedback codes, and whether it also listens for
+   * them as sound.
+   */
+  sendAskForFeedback(on: boolean, bySound: boolean): Promise<void>;
   /** A code read by the sender's camera; null unless it is feedback for this transfer. */
   sendFeedback(text: string): Promise<ReceiverReport | null>;
   /**

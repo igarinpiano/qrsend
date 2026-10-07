@@ -26,6 +26,18 @@ export const PREVIEW_FEATURES = [
     ],
   },
   {
+    id: "sound",
+    title: "Feedback by sound",
+    side: "sending",
+    summary:
+      "Like two-way transfer, but the receiver answers with short chirps from its speaker, which this device hears through its microphone. No camera has to see the receiver's screen, so it works in the usual position: a phone filming a computer screen. The receiver is asked before it makes any sound. A feedback code takes about a second.",
+    steps: [
+      "Start sending as usual; the browser asks for the microphone.",
+      "The receiver is asked whether it may answer by sound. Keep the devices close and the room reasonably quiet.",
+      "If nothing is heard, sending simply continues the usual way.",
+    ],
+  },
+  {
     id: "lan",
     title: "Local network boost",
     side: "sending",

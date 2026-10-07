@@ -66,3 +66,75 @@ test("two-way: the sender stops once the receiver's feedback says everything arr
     await senderBrowser.close();
   }
 });
+
+/** A WAV file of silence (16-bit mono), for a microphone that hears nothing yet. */
+function silence(file: string, seconds = 1, rate = 48000) {
+  const header = Buffer.alloc(44);
+  const bytes = seconds * rate * 2;
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + bytes, 4);
+  header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(rate, 24);
+  header.writeUInt32LE(rate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(bytes, 40);
+  fs.writeFileSync(file, Buffer.concat([header, Buffer.alloc(bytes)]));
+}
+
+test("feedback by sound: the receiver's chirps reach the sender's microphone", async ({ playwright, baseURL }) => {
+  const message = "Heard, not seen 🔊";
+  fs.mkdirSync(WORK, { recursive: true });
+  const codesVideo = path.join(WORK, "sound-codes.y4m");
+  const heard = path.join(WORK, "sound-heard.wav");
+  silence(heard);
+
+  // The sender has a microphone and no camera worth mentioning.
+  const microphone = ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", `--use-file-for-fake-audio-capture=${heard}`];
+  const senderBrowser = await playwright.chromium.launch({ args: microphone });
+  let receiverBrowser: Awaited<ReturnType<typeof playwright.chromium.launch>> | undefined;
+  try {
+    const sender = await (await senderBrowser.newContext({ baseURL, permissions: ["microphone"] })).newPage();
+    await enablePreview(sender, /Feedback by sound/);
+    await sender.goto("./#/send");
+    await sender.getByRole("tab", { name: "Text" }).click();
+    await sender.getByPlaceholder("Paste or type anything…").fill(message);
+    await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    await sender.getByLabel("Density").selectOption("low");
+    await sender.getByRole("button", { name: "Start sending" }).click();
+    await expect(sender.getByRole("button", { name: /Two-way 🎤/ })).toBeVisible();
+    for (let i = 0; i < 4; i++) await sender.getByRole("button", { name: "Slower" }).click();
+    const frames = await capturePlayer(sender, 24);
+    writeY4m(codesVideo, frames);
+    // Nothing to hear yet: release the microphone.
+    await sender.getByRole("button", { name: /Two-way/ }).click();
+
+    // The receiver is asked before it makes a sound, then answers with the feedback code as chirps.
+    receiverBrowser = await playwright.chromium.launch({ args: camera(codesVideo) });
+    // (The page's content security policy keeps scripts from reading the sound back; the test may.)
+    const receiver = await (await receiverBrowser.newContext({ baseURL, permissions: ["camera"], bypassCSP: true })).newPage();
+    await receiver.goto("./#/receive");
+    await expect(receiver.getByTestId("received-text")).toHaveText(message, { timeout: 60_000 });
+    await expect(receiver.getByTestId("feedback-sound")).toHaveAttribute("data-code", "");
+    await receiver.getByRole("button", { name: "Answer by sound" }).click();
+    await expect(receiver.getByTestId("feedback-sound")).toHaveAttribute("data-code", /^QSF1-/);
+    const wav = await receiver.getByTestId("feedback-sound").evaluate(async (audio: HTMLAudioElement) => {
+      const bytes = new Uint8Array(await (await fetch(audio.src)).arrayBuffer());
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      return btoa(bin);
+    });
+    fs.writeFileSync(heard, Buffer.from(wav, "base64"));
+
+    // The sender's microphone hears it: nothing is missing, so it stops.
+    await sender.getByRole("button", { name: /Two-way/ }).click();
+    await expect(sender.getByText("The other device has everything.")).toBeVisible({ timeout: 30_000 });
+  } finally {
+    await receiverBrowser?.close();
+    await senderBrowser.close();
+  }
+});

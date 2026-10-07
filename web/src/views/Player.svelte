@@ -7,6 +7,7 @@
   import { LINK_PREFIX, LanSender, canConnect, type LinkState } from "../lib/lan";
   import { featureOn } from "../lib/prefs";
   import { Scanner } from "../lib/scanner";
+  import { Ear, canListen } from "../lib/sound";
 
   /** `grid` is codes per side, or 0 to fill the screen. */
   let { info, fps: initialFps, grid, onclose }: { info: SendStarted; fps: number; grid: number; onclose: () => void } =
@@ -63,7 +64,15 @@
     lan.start().catch(() => (link = "closed"));
   }
 
-  const twoWayFeature = featureOn("twoWay") || lanFeature;
+  // Feedback reaches this device through its camera (the receiver's screen),
+  // through its microphone (the receiver's speaker: "Feedback by sound"), or
+  // both; each is a preview feature of its own.
+  const cameraFeature = featureOn("twoWay") || lanFeature;
+  const soundFeature = featureOn("sound") && canListen;
+  const twoWayFeature = cameraFeature || soundFeature;
+  let ear: Ear | undefined;
+  let watching = $state(false);
+  let hearing = $state(false);
   let twoWay = $state(false);
   let eye: HTMLVideoElement;
   let scanner: Scanner | undefined;
@@ -98,28 +107,48 @@
   async function listen(on: boolean) {
     twoWay = on;
     listenError = "";
-    // With a direct connection the receiver answers there, camera or not.
-    engine.sendAskForFeedback(on || linkUp).catch(() => {});
     if (!on) {
       scanner?.stop();
+      ear?.stop();
+      watching = hearing = false;
+      // With a direct connection the receiver answers there, camera or not.
+      engine.sendAskForFeedback(linkUp, false).catch(() => {});
       if (!linkUp) forget();
       return;
     }
-    try {
-      scanner ??= new Scanner(eye, onTexts);
-      await scanner.start(undefined, "user");
-    } catch (e) {
-      console.warn("two-way camera:", e);
-      listenError = e instanceof DOMException && e.name === "NotAllowedError" ? "camera access denied" : "no camera";
-      twoWay = false;
-      engine.sendAskForFeedback(false).catch(() => {});
+    const problems: string[] = [];
+    const reason = (e: unknown, what: string) =>
+      problems.push(e instanceof DOMException && e.name === "NotAllowedError" ? `${what} access denied` : `no ${what}`);
+    if (cameraFeature) {
+      try {
+        scanner ??= new Scanner(eye, onTexts);
+        await scanner.start(undefined, "user");
+        watching = true;
+      } catch (e) {
+        console.warn("two-way camera:", e);
+        reason(e, "camera");
+      }
     }
+    if (soundFeature) {
+      try {
+        ear ??= new Ear(hear);
+        await ear.start();
+        hearing = true;
+      } catch (e) {
+        console.warn("two-way microphone:", e);
+        reason(e, "microphone");
+      }
+    }
+    listenError = problems.join(", ");
+    if (!watching && !hearing) twoWay = false;
+    engine.sendAskForFeedback(twoWay || linkUp, hearing).catch(() => {});
   }
 
   // Nothing more to learn once the receiver has everything.
   $effect(() => {
     if (!finished) return;
     scanner?.stop();
+    ear?.stop();
     clearTimeout(linkTimer);
     lan?.stop();
   });
@@ -213,6 +242,7 @@
       clearInterval(watchdog);
       clearTimeout(linkTimer);
       lan?.stop();
+      ear?.stop();
       scanner?.dispose();
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
@@ -282,10 +312,10 @@
     </div>
     <div class="row">
       <!-- svelte-ignore a11y_media_has_caption -->
-      <video class="eye" class:on={twoWay} bind:this={eye} playsinline muted></video>
+      <video class="eye" class:on={watching} bind:this={eye} playsinline muted></video>
       {#if twoWayFeature}
-        <button class:active={twoWay} aria-pressed={twoWay} onclick={() => listen(!twoWay)} title="Watch the receiver's screen for feedback codes">
-          Two-way{listenError ? ` (${listenError})` : twoWay && !report ? " …" : ""}{link === "offering" ? " · offering LAN" : ""}
+        <button class:active={twoWay} aria-pressed={twoWay} onclick={() => listen(!twoWay)} title="Take feedback from the receiver (its screen through this camera, its speaker through this microphone)">
+          Two-way{hearing ? " 🎤" : ""}{listenError ? ` (${listenError})` : twoWay && !report ? " …" : ""}{link === "offering" ? " · offering LAN" : ""}
         </button>
       {/if}
       <button onclick={slower} aria-label="Slower">−</button>

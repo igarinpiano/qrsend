@@ -136,6 +136,9 @@ loaded (PWA).
 - **Feature preview** (footer link): new ways of sending that are still being
   worked on. Each is off until the sender turns it on; otherwise everything
   works as before.
+  - *Feedback by sound*: the receiver answers with short chirps from its
+    speaker, heard by the sender's microphone — two-way transfer without a
+    camera that sees the receiver's screen. The receiver is asked first.
   - *Local network boost*: once each device has seen the other's screen, they
     also connect directly over the local network (no server, nothing outside
     the network is contacted, and the receiver is asked first). Both ways are
@@ -184,7 +187,8 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] A back channel from receiver to sender: acknowledgments (web app, feature preview)
 - [ ] Auto-tuning speed and density from that feedback; two-way mode in the CLI
 - [x] More transports side by side: text over any byte channel (CLI), color codes, screen capture, local network (web app, feature preview)
-- [ ] Sound as a back channel; these transports in the CLI
+- [x] Sound as a back channel (web app, feature preview)
+- [ ] Auto-tuning the screen from feedback; these transports in the CLI
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
 

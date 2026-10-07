@@ -13,24 +13,36 @@ pub const PREFIX: &str = "QSF1-";
 pub const NOTICE_PREFIX: &str = "QSC1-";
 
 const NOTICE_WANTS_FEEDBACK: u8 = 0b0000_0001;
+const NOTICE_HEARS_SOUND: u8 = 0b0000_0010;
 
-/// What a sender tells the receiver besides the data: so far only whether it
-/// can read feedback codes. Receivers that do not know notices ignore them
-/// (they are not frames).
+/// What a sender tells the receiver besides the data: whether it takes
+/// feedback, and in which ways. Receivers that do not know notices ignore
+/// them (they are not frames).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SenderNotice {
     pub session_id: u32,
+    /// The sender reads feedback codes (off the receiver's screen, or however
+    /// else they reach it).
     pub wants_feedback: bool,
+    /// The sender listens with a microphone: feedback may come as sound (see
+    /// `crate::sound`).
+    pub hears_sound: bool,
 }
 
 impl SenderNotice {
     pub fn encode(&self) -> String {
         let mut data = self.session_id.to_le_bytes().to_vec();
-        data.push(if self.wants_feedback {
-            NOTICE_WANTS_FEEDBACK
-        } else {
-            0
-        });
+        data.push(
+            if self.wants_feedback {
+                NOTICE_WANTS_FEEDBACK
+            } else {
+                0
+            } | if self.hears_sound {
+                NOTICE_HEARS_SOUND
+            } else {
+                0
+            },
+        );
         let check = crc32fast::hash(&data) as u16;
         data.extend_from_slice(&check.to_le_bytes());
         format!("{NOTICE_PREFIX}{}", base45::encode(&data))
@@ -53,6 +65,7 @@ impl SenderNotice {
         Ok(SenderNotice {
             session_id: u32::from_le_bytes(payload[..4].try_into().unwrap()),
             wants_feedback: payload[4] & NOTICE_WANTS_FEEDBACK != 0,
+            hears_sound: payload[4] & NOTICE_HEARS_SOUND != 0,
         })
     }
 }
@@ -149,6 +162,20 @@ impl Feedback {
     }
 
     pub fn encode(&self) -> String {
+        format!("{PREFIX}{}", base45::encode(&self.to_bytes()))
+    }
+
+    pub fn decode(text: &str) -> Result<Self, FeedbackError> {
+        let body = text
+            .trim()
+            .strip_prefix(PREFIX)
+            .ok_or(FeedbackError::BadPrefix)?;
+        Self::from_bytes(&base45::decode(body).map_err(|_| FeedbackError::Malformed)?)
+    }
+
+    /// The message itself, for channels that carry bytes rather than text
+    /// (sound): what `encode` writes after the prefix, before Base45.
+    pub fn to_bytes(&self) -> Vec<u8> {
         let listed = &self.missing[..self.missing.len().min(MAX_RANGES)];
         let truncated = self.truncated || listed.len() < self.missing.len();
         let mut data = self.session_id.to_le_bytes().to_vec();
@@ -169,15 +196,10 @@ impl Feedback {
         put_leb(&mut data, self.symbol_size as u64);
         let check = crc32fast::hash(&data) as u16;
         data.extend_from_slice(&check.to_le_bytes());
-        format!("{PREFIX}{}", base45::encode(&data))
+        data
     }
 
-    pub fn decode(text: &str) -> Result<Self, FeedbackError> {
-        let body = text
-            .trim()
-            .strip_prefix(PREFIX)
-            .ok_or(FeedbackError::BadPrefix)?;
-        let data = base45::decode(body).map_err(|_| FeedbackError::Malformed)?;
+    pub fn from_bytes(data: &[u8]) -> Result<Self, FeedbackError> {
         if data.len() < 7 {
             return Err(FeedbackError::Malformed);
         }
@@ -253,10 +275,11 @@ mod tests {
 
     #[test]
     fn notice_roundtrip() {
-        for wants_feedback in [true, false] {
+        for (wants_feedback, hears_sound) in [(true, false), (false, false), (true, true)] {
             let n = SenderNotice {
                 session_id: 0x0102_0304,
                 wants_feedback,
+                hears_sound,
             };
             let text = n.encode();
             assert_eq!(SenderNotice::decode(&text).unwrap(), n);
