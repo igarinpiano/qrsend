@@ -344,9 +344,9 @@ pub fn run(args: RecvArgs) -> Result<()> {
 
     let mut session: Option<Session> = None;
     let mut scanned = 0u64;
-    let mut decoded = 0u64;
     let mut last_save = Instant::now();
-    let started = Instant::now();
+    let mut meter = util::RateMeter::new(Duration::from_secs(5));
+    let mut last_log = Instant::now();
 
     'outer: for texts in trx.iter() {
         scanned += 1;
@@ -354,7 +354,6 @@ pub fn run(args: RecvArgs) -> Result<()> {
             let Ok(frame) = Frame::from_qr_text(&text) else {
                 continue;
             };
-            decoded += 1;
             for event in rx.push(frame) {
                 match event {
                     Event::Locked(p) => {
@@ -387,12 +386,9 @@ pub fn run(args: RecvArgs) -> Result<()> {
                             );
                         }
                         pb.set_style(
-                            ProgressStyle::with_template(
-                                "{bar:32.cyan/blue} {pos}/{len} segments · {msg}",
-                            )
-                            .unwrap(),
+                            ProgressStyle::with_template("{bar:28.cyan/blue} {msg}").unwrap(),
                         );
-                        pb.set_length(rx.segment_total() as u64);
+                        pb.set_length(1000);
                         session = Some(s);
                     }
                     Event::ForeignSession(id) => {
@@ -427,15 +423,35 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 }
             }
         }
-        if session.is_some() {
-            let (frames, useful, _) = rx.stats();
-            let secs = started.elapsed().as_secs_f64().max(0.001);
-            pb.set_position(rx.completed_count() as u64);
-            pb.set_message(format!(
-                "{decoded} codes in {scanned} images · {:.1} useful/s",
-                useful as f64 / secs
-            ));
-            let _ = frames;
+        if session.is_some()
+            && let Some(p) = rx.progress()
+        {
+            // What matters while waiting: how much is left and how fast it goes.
+            let rate = meter.update(Instant::now(), p.remaining_bytes);
+            let done = p.total_bytes - p.remaining_bytes;
+            pb.set_position(done * 1000 / p.total_bytes.max(1));
+            let eta = if rate > 0.0 {
+                format!(
+                    " · {} left",
+                    util::human_duration(p.remaining_bytes as f64 / rate)
+                )
+            } else {
+                String::new()
+            };
+            let line = format!(
+                "{}% · {} of {} · {} codes to go · {}/s{eta}",
+                done * 100 / p.total_bytes.max(1),
+                util::human_bytes(done),
+                util::human_bytes(p.total_bytes),
+                p.remaining_symbols,
+                util::human_bytes(rate as u64),
+            );
+            // Without a terminal there is no bar; log a line now and then.
+            if pb.is_hidden() && last_log.elapsed() >= Duration::from_secs(2) {
+                eprintln!("{line}");
+                last_log = Instant::now();
+            }
+            pb.set_message(line);
         }
         if rx.is_complete() || stop.load(Ordering::Relaxed) {
             break 'outer;

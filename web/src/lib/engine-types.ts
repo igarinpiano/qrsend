@@ -56,6 +56,11 @@ export interface RecvInfo {
   entries: { path: string; dir: boolean; size: number }[];
   frames: number;
   useful: number;
+  /** Bytes on the wire in total and still missing; null before the first code. */
+  total_bytes: number | null;
+  remaining_bytes: number | null;
+  /** About how many more codes it takes to finish. */
+  remaining_codes: number | null;
 }
 
 /** A received entry inside the session's output file. */

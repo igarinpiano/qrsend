@@ -144,15 +144,20 @@ impl FrameStream {
     }
 
     /// `codes` is the number of codes shown per tick.
+    ///
+    /// The sender cannot know how much the receiver still needs, so it reports
+    /// its own schedule: what is left of the current pass (one pass is enough
+    /// for a receiver that misses up to the redundancy), and the nominal speed.
     pub fn status(&self, fps: f64, codes: usize) -> String {
-        let per_pass = self.frames_per_pass();
-        let into_pass = self.frames % per_pass.max(1);
-        let rate = self.symbol_size() as f64 * fps * codes as f64;
+        let per_pass = self.frames_per_pass().max(1);
+        let left = per_pass - self.frames % per_pass;
+        let per_second = fps * codes as f64;
+        let rate = self.symbol_size() as f64 * per_second;
         format!(
-            "pass {} · {:.0}% · {} codes · {:.1} fps × {} · ~{}/s · {}",
+            "pass {} · {} codes left ({}) · {:.1} fps × {} · ~{}/s · running {}",
             self.pass() + 1,
-            into_pass as f64 * 100.0 / per_pass.max(1) as f64,
-            self.frames,
+            left,
+            util::human_duration(left as f64 / per_second),
             fps,
             codes,
             util::human_bytes(rate as u64),

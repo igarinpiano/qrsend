@@ -67,6 +67,8 @@ test("CLI → web: receives a folder through the camera", async ({ playwright, b
 test("CLI → web: many segments are stored, verified and saved byte for byte", async ({ playwright, baseURL }) => {
   await withCamera({ playwright, baseURL }, segmentsVideo, async (page) => {
     await page.goto("./#/receive");
+    // While it runs: how much is left, not how much was read.
+    await expect(page.getByTestId("remaining")).toHaveText(/\d+% · .+ of .+ · \d+ codes to go/, { timeout: 60_000 });
     await expect(page.getByTestId("received-file")).toHaveText(["multi/big.bin", "multi/sub/note.txt"], { timeout: 90_000 });
 
     // One file, straight from the output file on disk.

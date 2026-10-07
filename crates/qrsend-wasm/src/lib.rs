@@ -715,6 +715,11 @@ struct Info {
     entries: Vec<EntryInfo>,
     frames: f64,
     useful: f64,
+    /// Bytes on the wire in total and still missing, and about how many more
+    /// codes that takes. Null until the first code has been read.
+    total_bytes: Option<f64>,
+    remaining_bytes: Option<f64>,
+    remaining_codes: Option<f64>,
 }
 
 /// One incoming transfer. Segment data is not kept here: completed segments
@@ -965,6 +970,7 @@ impl Receive {
             }
         };
         let (frames, useful, _) = self.rx.stats();
+        let progress = self.rx.progress();
         to_js(&Info {
             session: p.map(|p| session_hex(p.session_id)),
             encrypted: p.is_some_and(|p| p.flags & FLAG_ENCRYPTED != 0),
@@ -995,6 +1001,9 @@ impl Receive {
                 .unwrap_or_default(),
             frames: frames as f64,
             useful: useful as f64,
+            total_bytes: progress.map(|p| p.total_bytes as f64),
+            remaining_bytes: progress.map(|p| p.remaining_bytes as f64),
+            remaining_codes: progress.map(|p| p.remaining_symbols as f64),
         })
     }
 

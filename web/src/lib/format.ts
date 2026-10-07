@@ -16,3 +16,18 @@ export function duration(seconds: number): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
   return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
 }
+
+/** Transfer speed over a recent window, from samples of what is still missing. */
+export class RateMeter {
+  private samples: [number, number][] = [];
+  constructor(private windowMs = 5000) {}
+
+  /** Records `remaining` (bytes) at `now` (ms) and returns bytes per second. */
+  update(now: number, remaining: number): number {
+    this.samples.push([now, remaining]);
+    while (this.samples.length > 2 && now - this.samples[0][0] > this.windowMs) this.samples.shift();
+    const [t0, r0] = this.samples[0];
+    const dt = (now - t0) / 1000;
+    return dt > 0 ? Math.max(r0 - remaining, 0) / dt : 0;
+  }
+}

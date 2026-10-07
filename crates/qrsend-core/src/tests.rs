@@ -97,6 +97,8 @@ fn full_pipeline_with_loss() {
     let mut sender = Sender::new(layout, source, ScheduleConfig::default(), None);
 
     let mut rx = Receiver::new();
+    assert_eq!(rx.progress(), None);
+    let mut last_remaining = u64::MAX;
     let mut got_body = vec![0u8; body.len()];
     let mut got_meta = None;
     let mut sent = 0u64;
@@ -106,6 +108,11 @@ fn full_pipeline_with_loss() {
         assert!(sent < 10_000, "transfer did not converge");
         if sent.is_multiple_of(4) || sent.is_multiple_of(7) {
             continue; // ~36% frame loss
+        }
+        if let Some(p) = rx.progress() {
+            // The remaining work only ever shrinks.
+            assert!(p.remaining_bytes <= last_remaining && p.remaining_bytes <= p.total_bytes);
+            last_remaining = p.remaining_bytes;
         }
         let text = frame.to_qr_text();
         for ev in rx.push(Frame::from_qr_text(&text).unwrap()) {
@@ -123,6 +130,9 @@ fn full_pipeline_with_loss() {
             }
         }
     }
+    let done = rx.progress().unwrap();
+    assert_eq!((done.remaining_bytes, done.remaining_symbols), (0, 0));
+    assert_eq!(done.total_bytes, (body.len() + meta.len()) as u64);
     assert_eq!(got_body, body);
     let decoded = MetaEnvelope::decode(&got_meta.unwrap())
         .unwrap()

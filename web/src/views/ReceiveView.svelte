@@ -3,7 +3,7 @@
   import { persist } from "../lib/db";
   import { engine } from "../lib/engine";
   import type { RecvState } from "../lib/engine-types";
-  import { bytes } from "../lib/format";
+  import { bytes, duration, RateMeter } from "../lib/format";
   import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
   import Result from "./Result.svelte";
@@ -15,8 +15,7 @@
   let rate = $state(0);
   let queued: string[] = [];
   let pushing = false;
-  let started = performance.now();
-  let locked = false;
+  const meter = new RateMeter();
 
   const info = $derived(st?.info ?? undefined);
   const result = $derived(st?.result);
@@ -25,11 +24,8 @@
 
   function apply(next: RecvState) {
     st = next;
-    if (next.info?.session && !locked) {
-      locked = true;
-      started = performance.now();
-    }
-    if (next.info) rate = next.info.useful / Math.max((performance.now() - started) / 1000, 0.001);
+    // What matters while waiting: how much is left and how fast it goes.
+    if (next.info?.remaining_bytes != null) rate = meter.update(performance.now(), next.info.remaining_bytes);
   }
 
   onMount(() => {
@@ -67,7 +63,9 @@
     flush();
   }
 
-  const pct = $derived(info && info.total ? (info.done / info.total) * 100 : 0);
+  const total = $derived(info?.total_bytes ?? 0);
+  const left = $derived(info?.remaining_bytes ?? 0);
+  const pct = $derived(total ? ((total - left) / total) * 100 : 0);
 </script>
 
 <h2>Receive</h2>
@@ -109,10 +107,13 @@
     {/if}
     <div class="progress" aria-label="Progress"><div style:width="{pct}%"></div></div>
     <div class="row spread small muted">
-      <span>{info.done} / {info.total} segments</span>
+      <span data-testid="remaining">
+        {#if total}
+          {pct.toFixed(0)}% · {bytes(total - left)} of {bytes(total)} · {info.remaining_codes} codes to go
+        {/if}
+      </span>
       <span>
-        {#if info.wire_length}{bytes(info.wire_length)}{/if}
-        {#if rate > 0} · {rate.toFixed(1)} useful codes/s{/if}
+        {#if rate > 0}{bytes(Math.round(rate))}/s · {duration(left / rate)} left{/if}
       </span>
     </div>
     {#if st?.resumeCode}

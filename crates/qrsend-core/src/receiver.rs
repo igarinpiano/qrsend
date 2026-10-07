@@ -55,6 +55,24 @@ pub struct Receiver {
     frames: u64,
     useful: u64,
     evicted: u64,
+    /// Symbol size of the most recent frame (0 before the first one).
+    symbol_size: usize,
+}
+
+/// How far a transfer has come, in terms a person watching it cares about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// Bytes on the wire (meta + body). An estimate until every segment has
+    /// been seen at least once: unseen segments count with their nominal size.
+    pub total_bytes: u64,
+    /// Bytes still to be received, counting partly received segments
+    /// proportionally.
+    pub remaining_bytes: u64,
+    /// Codes still needed at the current symbol size (a lower bound: codes
+    /// that repeat what is already known do not count).
+    pub remaining_symbols: u64,
+    /// Payload bytes per code at the moment.
+    pub symbol_size: usize,
 }
 
 impl Default for Receiver {
@@ -77,6 +95,7 @@ impl Receiver {
             frames: 0,
             useful: 0,
             evicted: 0,
+            symbol_size: 0,
         }
     }
 
@@ -145,6 +164,42 @@ impl Receiver {
         (self.frames, self.useful, self.evicted)
     }
 
+    /// Remaining work, once a session is locked and a frame has been seen.
+    pub fn progress(&self) -> Option<Progress> {
+        let p = self.params?;
+        let t = self.symbol_size;
+        if t == 0 {
+            return None;
+        }
+        let nominal = 1u64 << p.seg_shift;
+        // Meta is small; before its first frame assume it fits one symbol.
+        let len = |i: u32| match self.seg_lens.get(&i) {
+            Some(&l) => l as u64,
+            None if i == META_INDEX => t as u64,
+            None => nominal,
+        };
+        let mut out = Progress {
+            symbol_size: t,
+            ..Progress::default()
+        };
+        for i in 0..=p.seg_count {
+            let l = len(i);
+            out.total_bytes += l;
+            if self.is_done(i) {
+                continue;
+            }
+            let k = l.div_ceil(t as u64).max(1);
+            // A decoder needs at least one more symbol until it completes.
+            let have = match self.decoders.get(&i) {
+                Some((d, _)) if d.symbol_size() == t => (d.received() as u64).min(k - 1),
+                _ => 0,
+            };
+            out.remaining_symbols += k - have;
+            out.remaining_bytes += l - l * have / k;
+        }
+        Some(out)
+    }
+
     /// Partially received segments: (index, symbols received, K).
     pub fn partial(&self) -> Vec<(u32, u32, u32)> {
         let mut v: Vec<_> = self
@@ -183,6 +238,7 @@ impl Receiver {
         }
         self.tick += 1;
         let symbol_size = frame.symbol.len();
+        self.symbol_size = symbol_size;
         // The symbol size may change between sender runs (e.g. another QR
         // density after a resume); a decoder only combines equal-size symbols.
         if self

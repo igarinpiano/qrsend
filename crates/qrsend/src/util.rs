@@ -41,6 +41,36 @@ pub fn parse_session(s: &str) -> Result<u32> {
         .with_context(|| format!("invalid session id {s:?} (expected 8 hex digits)"))
 }
 
+/// Transfer speed over the last few seconds, from "bytes remaining" samples.
+pub struct RateMeter {
+    window: std::time::Duration,
+    samples: std::collections::VecDeque<(std::time::Instant, u64)>,
+}
+
+impl RateMeter {
+    pub fn new(window: std::time::Duration) -> Self {
+        RateMeter {
+            window,
+            samples: Default::default(),
+        }
+    }
+
+    /// Records the bytes still remaining now; returns bytes per second.
+    pub fn update(&mut self, now: std::time::Instant, remaining: u64) -> f64 {
+        self.samples.push_back((now, remaining));
+        while self.samples.len() > 2 && now.duration_since(self.samples[0].0) > self.window {
+            self.samples.pop_front();
+        }
+        let (t0, r0) = self.samples[0];
+        let secs = now.duration_since(t0).as_secs_f64();
+        if secs < 0.2 {
+            0.0
+        } else {
+            r0.saturating_sub(remaining) as f64 / secs
+        }
+    }
+}
+
 /// Compact "0-5,7,9-12" rendering of sorted indices.
 pub fn ranges(indices: &[u32]) -> String {
     let mut out = Vec::new();
@@ -83,6 +113,22 @@ mod tests {
         assert_eq!(ranges(&v), "0-2,5,7-8,100");
         assert_eq!(parse_ranges(&ranges(&v)).unwrap(), v);
         assert_eq!(parse_ranges("").unwrap(), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn rate_meter_uses_a_recent_window() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut m = RateMeter::new(Duration::from_secs(5));
+        assert_eq!(m.update(t0, 10_000), 0.0);
+        assert_eq!(m.update(t0 + Duration::from_secs(1), 9_000), 1000.0);
+        assert_eq!(m.update(t0 + Duration::from_secs(2), 8_000), 1000.0);
+        // A long stall, then fast again: only the recent window counts.
+        assert_eq!(m.update(t0 + Duration::from_secs(60), 8_000), 0.0);
+        let r = m.update(t0 + Duration::from_secs(61), 6_000);
+        assert!((r - 2000.0).abs() < 1.0, "{r}");
+        // Remaining going up (a rejected segment) never yields a negative rate.
+        assert_eq!(m.update(t0 + Duration::from_secs(62), 9_000), 0.0);
     }
 
     #[test]
