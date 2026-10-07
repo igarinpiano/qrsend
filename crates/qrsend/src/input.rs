@@ -116,12 +116,12 @@ impl Input {
                 if is_y4m {
                     let f = File::open(&path)
                         .with_context(|| format!("cannot open {}", path.display()))?;
-                    read_y4m(BufReader::with_capacity(1 << 20, f), &tx)
+                    read_y4m(BufReader::with_capacity(1 << 20, f), &tx, true)
                 } else {
                     let input = vec!["-i".to_string(), path.to_string_lossy().into_owned()];
                     let mut child = spawn_ffmpeg(input, &path.display().to_string())?;
                     let stdout = child.stdout.take().unwrap();
-                    let result = read_y4m(BufReader::with_capacity(1 << 20, stdout), &tx);
+                    let result = read_y4m(BufReader::with_capacity(1 << 20, stdout), &tx, true);
                     let _ = child.kill();
                     let status = child.wait()?;
                     if result.is_ok() && !status.success() && !tx.is_empty() {
@@ -134,7 +134,7 @@ impl Input {
                 let mut child =
                     spawn_ffmpeg(camera_input(&device)?, &format!("camera {device:?}"))?;
                 let stdout = child.stdout.take().unwrap();
-                let result = read_y4m(BufReader::with_capacity(1 << 20, stdout), &tx);
+                let result = read_y4m(BufReader::with_capacity(1 << 20, stdout), &tx, false);
                 let _ = child.kill();
                 let _ = child.wait();
                 result.with_context(|| format!("camera {device:?} stopped"))
@@ -165,7 +165,7 @@ fn header_value<'a>(fields: &'a [&'a str], tag: char) -> Option<&'a str> {
 }
 
 /// Minimal YUV4MPEG2 reader; only the luma plane is kept.
-fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>) -> Result<()> {
+fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>, dedupe: bool) -> Result<()> {
     let mut line = String::new();
     r.read_line(&mut line)?;
     let fields: Vec<&str> = line.split_whitespace().collect();
@@ -183,6 +183,7 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>) -> Result<()> {
         c => bail!("unsupported Y4M colour space C{c}"),
     };
     let mut skip = vec![0u8; chroma];
+    let mut last = None;
     loop {
         let mut frame_line = Vec::new();
         if r.read_until(b'\n', &mut frame_line)? == 0 {
@@ -194,6 +195,15 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>) -> Result<()> {
         let mut pixels = vec![0u8; w * h];
         r.read_exact(&mut pixels)?;
         r.read_exact(&mut skip)?;
+        // Recordings repeat frames while the sender holds a code; decoding
+        // an identical picture again cannot yield anything new.
+        if dedupe {
+            let hash = blake3::hash(&pixels);
+            if last == Some(hash) {
+                continue;
+            }
+            last = Some(hash);
+        }
         if tx
             .send(LumaFrame {
                 width: w,

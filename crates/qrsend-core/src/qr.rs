@@ -143,6 +143,79 @@ impl QrParams {
     }
 }
 
+/// Gap between neighbouring codes and around the grid, in modules. Adjacent
+/// codes share it, so every code still has the 4-module quiet zone.
+pub const QUIET: usize = 4;
+
+/// Picks a QR size for a transfer: small transfers get small, easy-to-scan
+/// codes instead of mostly-padding large ones; everything else gets `Normal`.
+pub fn auto_params(meta_len: u32, body_len: u64) -> QrParams {
+    const SMALL: [QrParams; 3] = [
+        QrParams {
+            version: 10,
+            ec: Ec::M,
+        },
+        QrParams {
+            version: 15,
+            ec: Ec::M,
+        },
+        QrParams {
+            version: 20,
+            ec: Ec::M,
+        },
+    ];
+    for p in SMALL {
+        let t = p.symbol_size() as u64;
+        if (meta_len as u64).div_ceil(t) + body_len.div_ceil(t) <= 4 {
+            return p;
+        }
+    }
+    Density::Normal.params()
+}
+
+/// Modules spanned by `n` codes of `modules` width laid side by side.
+pub fn grid_extent(modules: usize, n: usize) -> usize {
+    n * (modules + QUIET) + QUIET
+}
+
+/// How many codes fit along `px` pixels at `scale` pixels per module.
+pub fn grid_fit(modules: usize, px: usize, scale: usize) -> usize {
+    (px / scale.max(1)).saturating_sub(QUIET) / (modules + QUIET)
+}
+
+/// A grid of codes filling a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tiling {
+    pub params: QrParams,
+    pub cols: usize,
+    pub rows: usize,
+}
+
+impl Tiling {
+    /// Payload bytes carried by one frame.
+    pub fn capacity(&self) -> usize {
+        self.cols * self.rows * self.params.symbol_size()
+    }
+}
+
+/// The QR version (ECC L) and grid that carry the most data in a
+/// `width × height` pixel frame at `scale` pixels per module.
+pub fn best_tiling(width: usize, height: usize, scale: usize) -> Option<Tiling> {
+    (1..=40u8)
+        .filter_map(|version| {
+            let params = QrParams { version, ec: Ec::L };
+            if params.symbol_size() < frame::MIN_SYMBOL_SIZE {
+                return None;
+            }
+            let (cols, rows) = (
+                grid_fit(params.modules(), width, scale),
+                grid_fit(params.modules(), height, scale),
+            );
+            (cols > 0 && rows > 0).then_some(Tiling { params, cols, rows })
+        })
+        .max_by_key(|t| (t.capacity(), std::cmp::Reverse(t.params.version)))
+}
+
 /// A rendered QR symbol: `width × width` modules, `true` = dark.
 #[derive(Debug, Clone)]
 pub struct QrMatrix {
@@ -191,15 +264,39 @@ pub struct Luma<'a> {
     pub pixels: &'a [u8],
 }
 
-/// Detects and decodes every QR code in the image; returns their text.
-pub fn detect(img: Luma<'_>) -> Vec<String> {
+/// A QR code located in an image.
+#[derive(Debug, Clone)]
+pub struct Found {
+    /// Corners in pixels: top-left, top-right, bottom-right, bottom-left.
+    pub corners: [(f64, f64); 4],
+    /// Modules per side.
+    pub modules: usize,
+    /// The decoded text, when decoding succeeded.
+    pub text: Option<String>,
+}
+
+/// Locates every QR code in the image, decoded or not.
+pub fn detect_grids(img: Luma<'_>) -> Vec<Found> {
+    use rqrr::BitGrid;
     let (w, px) = (img.width, img.pixels);
     let mut prepared =
         rqrr::PreparedImage::prepare_from_greyscale(w, img.height, |x, y| px[y * w + x]);
     prepared
         .detect_grids()
         .into_iter()
-        .filter_map(|g| g.decode().ok().map(|(_, text)| text))
+        .map(|g| Found {
+            corners: g.bounds.map(|p| (p.x as f64, p.y as f64)),
+            modules: g.grid.size(),
+            text: g.decode().ok().map(|(_, text)| text),
+        })
+        .collect()
+}
+
+/// Detects and decodes every QR code in the image; returns their text.
+pub fn detect(img: Luma<'_>) -> Vec<String> {
+    detect_grids(img)
+        .into_iter()
+        .filter_map(|f| f.text)
         .collect()
 }
 
@@ -251,6 +348,29 @@ mod tests {
                 render(&base45::encode(&bytes), p).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn auto_density_shrinks_small_transfers() {
+        assert_eq!(auto_params(150, 20).version, 10);
+        assert_eq!(auto_params(600, 300).version, 15);
+        assert_eq!(auto_params(600, 5_000_000), Density::Normal.params());
+    }
+
+    #[test]
+    fn tiling_fills_the_frame() {
+        let t = best_tiling(1920, 1080, 2).unwrap();
+        let m = t.params.modules();
+        assert!(grid_extent(m, t.cols) * 2 <= 1920 && grid_extent(m, t.rows) * 2 <= 1080);
+        // Better than one row of the largest code.
+        let v40 = QrParams {
+            version: 40,
+            ec: Ec::L,
+        };
+        assert!(
+            t.capacity() >= grid_fit(177, 1920, 2) * grid_fit(177, 1080, 2) * v40.symbol_size()
+        );
+        assert!(best_tiling(40, 40, 2).is_none());
     }
 
     #[test]

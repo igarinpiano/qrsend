@@ -52,6 +52,14 @@ enum Cmd {
     Cache(CacheCmd),
     /// Print shell completions
     Completions { shell: clap_complete::Shell },
+    /// Report what each QR detector finds in images (diagnostics)
+    #[command(hide = true)]
+    DebugDetect {
+        images: Vec<std::path::PathBuf>,
+        /// Also time each detector on its own (slow on dense frames)
+        #[arg(long)]
+        each: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -98,6 +106,40 @@ fn run() -> Result<()> {
                 s.remove()?;
             }
             println!("Removed {n} cached session(s).");
+            Ok(())
+        }
+        Cmd::DebugDetect { images, each } => {
+            for path in images {
+                let img = image::open(&path)?.into_luma8();
+                let f = input::LumaFrame {
+                    width: img.width() as usize,
+                    height: img.height() as usize,
+                    pixels: img.into_raw(),
+                };
+                let valid = |v: &[String]| {
+                    v.iter()
+                        .filter(|t| qrsend_core::frame::Frame::from_qr_text(t).is_ok())
+                        .count()
+                };
+                let t = std::time::Instant::now();
+                let merged = decode::detect(&f);
+                let tm = t.elapsed();
+                print!("{}: {} frames in {tm:.0?}", path.display(), valid(&merged));
+                if each {
+                    let t = std::time::Instant::now();
+                    let a = decode::detect_rxing(&f);
+                    let ta = t.elapsed();
+                    let t = std::time::Instant::now();
+                    let b = decode::detect_rqrr(&f);
+                    print!(
+                        " · rxing alone {} ({ta:.0?}) · rqrr alone {} ({:.0?})",
+                        valid(&a),
+                        valid(&b),
+                        t.elapsed()
+                    );
+                }
+                println!();
+            }
             Ok(())
         }
         Cmd::Completions { shell } => {

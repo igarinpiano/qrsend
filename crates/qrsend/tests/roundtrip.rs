@@ -233,3 +233,93 @@ fn encrypted_transfer_between_paired_devices() {
     env.ok_as("eve", &["devices", "add", "--image", "id.png", "--yes"]);
     assert!(env.ok_as("eve", &["devices", "list"]).contains("bob"));
 }
+
+#[test]
+fn dense_video_roundtrip() {
+    let env = Env::new("dense");
+    fs::write(env.path("data.bin"), noise(400_000)).unwrap();
+    // Many small codes per frame, automatic grid and code size.
+    let out = env.run(&[
+        "send",
+        "--plain",
+        "data.bin",
+        "--dense",
+        "--size",
+        "1280x720",
+        "--export-video",
+        "dense.y4m",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("1280×720 px"), "{stderr}");
+    env.ok(&["recv", "--video", "dense.y4m", "-o", "out"]);
+    assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(400_000));
+}
+
+#[test]
+fn large_fixed_grid_and_auto_density() {
+    let env = Env::new("grid");
+    // A tiny transfer picks small codes on its own.
+    let out = env.run(&[
+        "send",
+        "--plain",
+        "--text",
+        "hi",
+        "--export-frames",
+        "small",
+    ]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("QR v10-M"));
+    assert_eq!(env.ok(&["recv", "--images", "small"]).trim_end(), "hi");
+
+    fs::write(env.path("data.bin"), noise(150_000)).unwrap();
+    env.ok(&[
+        "send",
+        "--plain",
+        "data.bin",
+        "--grid",
+        "6x4",
+        "--density",
+        "low",
+        "--scale",
+        "2",
+        "--export-frames",
+        "f",
+    ]);
+    env.ok(&["recv", "--images", "f", "-o", "out"]);
+    assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(150_000));
+}
+
+fn has_ffmpeg() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+#[test]
+fn compressed_video_roundtrip_through_ffmpeg() {
+    if !has_ffmpeg() {
+        eprintln!("ffmpeg not installed; skipping");
+        return;
+    }
+    let env = Env::new("mp4");
+    fs::write(env.path("data.bin"), noise(200_000)).unwrap();
+    env.ok(&[
+        "send",
+        "--plain",
+        "data.bin",
+        "--dense",
+        "--size",
+        "1280x720",
+        "--passes",
+        "1.5",
+        "--export-video",
+        "dense.mp4",
+    ]);
+    env.ok(&["recv", "--video", "dense.mp4", "-o", "out"]);
+    assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(200_000));
+}

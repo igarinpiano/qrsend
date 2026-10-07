@@ -3,17 +3,18 @@
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use qrsend_core::frame::MIN_SYMBOL_SIZE;
 use qrsend_core::manifest::session_hex;
 use qrsend_core::payload::PackOptions;
-use qrsend_core::qr::{Density, Ec, QrParams};
+use qrsend_core::qr::{self, Density, Ec, QrParams};
 use qrsend_core::resume::ResumeCode;
 use qrsend_core::schedule::ScheduleConfig;
 use qrsend_core::sender::Sender;
 
-use crate::display::{self, FrameStream};
+use crate::display::export::Canvas;
+use crate::display::{self, FrameStream, GridSpec};
 use crate::spool::{Content, Spool, SpoolOptions};
 use crate::{collect, identity, util};
 
@@ -40,32 +41,51 @@ pub struct SendArgs {
     #[arg(long, value_enum, default_value_t = default_display())]
     pub display: DisplayKind,
     /// Write PNG frames to this directory instead of displaying them
-    #[arg(long, value_name = "DIR", conflicts_with = "export_y4m")]
+    #[arg(long, value_name = "DIR", conflicts_with = "export_video")]
     pub export_frames: Option<PathBuf>,
-    /// Write a Y4M video instead of displaying (playable, and usable as a fake camera)
-    #[arg(long, value_name = "FILE")]
-    pub export_y4m: Option<PathBuf>,
-    /// Number of frames to export (default: one full pass)
+    /// Write a video instead of displaying: .y4m (uncompressed, no extra tools)
+    /// or .mp4/.mkv/.mov/.webm through ffmpeg. Play it anywhere and record or
+    /// capture the screen; read it back with `qrsend recv --video`
+    #[arg(long, value_name = "FILE", alias = "export-y4m")]
+    pub export_video: Option<PathBuf>,
+    /// Maximum throughput for exports: fill the frame with as many codes as
+    /// fit (same as --grid auto --size 1920x1080 --scale 2, and 30 fps for video)
+    #[arg(long)]
+    pub dense: bool,
+    /// Frame size in pixels when exporting, e.g. 1920x1080 or 3840x2160
+    #[arg(long, value_name = "WxH", value_parser = parse_size)]
+    pub size: Option<(usize, usize)>,
+    /// Number of frames to export (default: --passes full passes)
     #[arg(long, value_name = "N")]
     pub frames: Option<u64>,
-    /// Pixels per QR module when exporting
-    #[arg(long, default_value_t = 4, value_name = "PX")]
-    pub scale: usize,
-    /// QR density preset
-    #[arg(long, value_parser = parse_density, default_value = "normal")]
-    pub density: Density,
+    /// Passes to export; later passes carry fresh repair codes, which helps
+    /// when the playback is recorded with losses
+    #[arg(long, default_value_t = 1.0, value_name = "N")]
+    pub passes: f64,
+    /// Pixels per QR module when exporting, and the smallest module size an
+    /// automatic grid uses in a window (default: 4, or 2 with --dense)
+    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u16).range(1..=64))]
+    pub scale: Option<u16>,
+    /// Video quality for ffmpeg (CRF: 0 is lossless, higher is smaller)
+    #[arg(long, default_value_t = 12, value_name = "CRF", value_parser = clap::value_parser!(u8).range(0..=51))]
+    pub video_crf: u8,
+    /// QR density: auto (small codes for small transfers; the best fit for
+    /// dense exports), low, normal, high or max
+    #[arg(long, value_parser = parse_density, default_value = "auto")]
+    pub density: DensityArg,
     /// Explicit QR version (1-40), overrides --density
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=40))]
     pub qr_version: Option<u8>,
     /// Explicit error correction level (L, M, Q, H), overrides --density
     #[arg(long, value_parser = parse_ec)]
     pub ecc: Option<Ec>,
-    /// Codes shown per second
-    #[arg(long, default_value_t = 10.0)]
-    pub fps: f64,
-    /// Show N×N codes at once (window and export only)
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
-    pub grid: u8,
+    /// Frames per second (default: 10; 30 for --dense video)
+    #[arg(long)]
+    pub fps: Option<f64>,
+    /// Codes shown at once: N (N×N), COLSxROWS, or auto to fill the window or
+    /// frame (window and export only)
+    #[arg(long, default_value = "1", value_name = "GRID")]
+    pub grid: GridSpec,
     /// Extra repair symbols per pass (fraction of each segment)
     #[arg(long, default_value_t = 0.10)]
     pub redundancy: f64,
@@ -103,8 +123,30 @@ fn default_display() -> DisplayKind {
     }
 }
 
-fn parse_density(s: &str) -> Result<Density, String> {
+/// `--density`: a preset, or automatic selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DensityArg {
+    Auto,
+    Preset(Density),
+}
+
+fn parse_density(s: &str) -> Result<DensityArg, String> {
+    if s == "auto" {
+        return Ok(DensityArg::Auto);
+    }
     s.parse()
+        .map(DensityArg::Preset)
+        .map_err(|_| format!("unknown density {s:?} (use auto, low, normal, high or max)"))
+}
+
+fn parse_size(s: &str) -> Result<(usize, usize), String> {
+    let bad = || format!("invalid size {s:?} (use WIDTHxHEIGHT, e.g. 1920x1080)");
+    let (w, h) = s.split_once(['x', 'X', '×']).ok_or_else(bad)?;
+    let (w, h): (usize, usize) = (w.parse().map_err(|_| bad())?, h.parse().map_err(|_| bad())?);
+    if !(64..=16384).contains(&w) || !(64..=16384).contains(&h) {
+        return Err(bad());
+    }
+    Ok((w, h))
 }
 
 fn parse_ec(s: &str) -> Result<Ec, String> {
@@ -112,22 +154,32 @@ fn parse_ec(s: &str) -> Result<Ec, String> {
 }
 
 pub fn run(args: SendArgs) -> Result<()> {
-    let preset = args.density.params();
-    let params = QrParams {
-        version: args.qr_version.unwrap_or(preset.version),
-        ec: args.ecc.unwrap_or(preset.ec),
+    let fps = args
+        .fps
+        .unwrap_or(if args.dense && args.export_video.is_some() {
+            30.0
+        } else {
+            10.0
+        });
+    if !(0.0..=10.0).contains(&args.redundancy) || fps <= 0.0 || args.passes <= 0.0 {
+        bail!("--redundancy must be within 0..10, and --fps and --passes positive");
+    }
+    let exporting = args.export_frames.is_some() || args.export_video.is_some();
+    if args.dense && !exporting {
+        bail!("--dense applies to --export-video / --export-frames (in a window, use --grid auto)");
+    }
+    let grid = if args.dense && args.grid == GridSpec::ONE {
+        GridSpec::Auto
+    } else {
+        args.grid
     };
-    let symbol_size = params.symbol_size();
-    if symbol_size < MIN_SYMBOL_SIZE {
-        bail!(
-            "QR version {} with ECC {:?} is too small for QRSend frames",
-            params.version,
-            params.ec
-        );
-    }
-    if !(0.0..=10.0).contains(&args.redundancy) || args.fps <= 0.0 {
-        bail!("--redundancy must be within 0..10 and --fps positive");
-    }
+    let size = args
+        .size
+        .or((args.dense || (exporting && grid == GridSpec::Auto)).then_some((1920, 1080)));
+    let scale = args
+        .scale
+        .map(usize::from)
+        .unwrap_or(if args.dense { 2 } else { 4 });
 
     let (spool, only) = if let Some(code) = &args.resume {
         let rc = ResumeCode::decode(code)?;
@@ -206,6 +258,39 @@ pub fn run(args: SendArgs) -> Result<()> {
         (Spool::create(content, &opts)?, None)
     };
 
+    // Explicit choices win; otherwise pick the code size from the transfer
+    // (small transfers) or from the frame (dense exports).
+    let params = match (args.qr_version, args.ecc, args.density) {
+        (None, None, DensityArg::Auto) => match size {
+            Some((w, h)) if grid == GridSpec::Auto => {
+                qr::best_tiling(w, h, scale)
+                    .with_context(|| {
+                        format!("no QR code fits in {w}×{h} at {scale} px per module")
+                    })?
+                    .params
+            }
+            _ => qr::auto_params(spool.info.meta_len, spool.info.body_len),
+        },
+        (version, ec, density) => {
+            let preset = match density {
+                DensityArg::Preset(d) => d.params(),
+                DensityArg::Auto => Density::Normal.params(),
+            };
+            QrParams {
+                version: version.unwrap_or(preset.version),
+                ec: ec.unwrap_or(preset.ec),
+            }
+        }
+    };
+    let symbol_size = params.symbol_size();
+    if symbol_size < MIN_SYMBOL_SIZE {
+        bail!(
+            "QR version {} with ECC {:?} is too small for QRSend frames",
+            params.version,
+            params.ec
+        );
+    }
+
     let layout = spool.layout(symbol_size)?;
     let config = ScheduleConfig {
         redundancy: args.redundancy,
@@ -213,27 +298,38 @@ pub fn run(args: SendArgs) -> Result<()> {
     };
     let sender = Sender::new(layout, spool.source()?, config, only.as_deref());
     let mut stream = FrameStream::new(sender, params);
-    let grid = args.grid as usize;
     let per_pass = stream.frames_per_pass();
-    let seconds = per_pass as f64 / (args.fps * (grid * grid) as f64);
+    let canvas = if exporting {
+        Some(Canvas::new(params.modules(), grid, size, scale)?)
+    } else {
+        None
+    };
+    let per_tick = match (&canvas, grid) {
+        (Some(c), _) => c.codes(),
+        (None, GridSpec::Fixed { cols, rows }) => cols * rows,
+        (None, GridSpec::Auto) => 1,
+    };
     eprintln!(
         "Session {} · {}",
         session_hex(spool.info.session_id),
         spool.info.summary
     );
+    let rate = symbol_size as f64 * fps * per_tick as f64;
     eprintln!(
-        "{} on the wire · QR v{}-{:?} · {} B per code · {} codes per pass (≈{} at {} fps{})",
+        "{} on the wire · QR v{}-{:?} · {} B per code · {} codes per pass{}",
         util::human_bytes(spool.info.body_len + spool.info.meta_len as u64),
         params.version,
         params.ec,
         symbol_size,
         per_pass,
-        util::human_duration(seconds),
-        args.fps,
-        if grid > 1 {
-            format!(" × {}", grid * grid)
-        } else {
+        if grid == GridSpec::Auto && canvas.is_none() {
             String::new()
+        } else {
+            format!(
+                " (≈{} at {fps} fps × {per_tick} = {}/s)",
+                util::human_duration(per_pass as f64 / (fps * per_tick as f64)),
+                util::human_bytes(rate as u64)
+            )
         },
     );
     if spool.info.recipients.is_empty() {
@@ -245,20 +341,29 @@ pub fn run(args: SendArgs) -> Result<()> {
         eprintln!("Resending {} segment(s) from the resume code.", only.len());
     }
 
-    let count = args
-        .frames
-        .unwrap_or(per_pass.div_ceil((grid * grid) as u64));
-    if let Some(dir) = &args.export_frames {
-        display::export::png_frames(&mut stream, dir, count, grid, args.scale)?;
-        eprintln!("Wrote {count} frame(s) to {}", dir.display());
-    } else if let Some(path) = &args.export_y4m {
-        display::export::y4m(&mut stream, path, count, grid, args.scale, args.fps)?;
-        eprintln!("Wrote {count} frame(s) to {}", path.display());
+    if let Some(canvas) = canvas {
+        let count = args.frames.unwrap_or(
+            ((per_pass as f64 * args.passes) / canvas.codes() as f64)
+                .ceil()
+                .max(1.0) as u64,
+        );
+        let what = format!(
+            "{count} frame(s), {}×{} px, {}×{} codes",
+            canvas.width, canvas.height, canvas.cols, canvas.rows
+        );
+        if let Some(dir) = &args.export_frames {
+            display::export::png_frames(&mut stream, dir, count, canvas)?;
+            eprintln!("Wrote {what} to {}", dir.display());
+        } else if let Some(path) = &args.export_video {
+            display::export::video(&mut stream, path, count, canvas, fps, args.video_crf)?;
+            eprintln!("Wrote {what} at {fps} fps to {}", path.display());
+            eprintln!("Read it back (or a recording of it) with: qrsend recv --video <file>");
+        }
     } else {
         match args.display {
-            DisplayKind::Terminal => display::terminal::run(&mut stream, args.fps)?,
+            DisplayKind::Terminal => display::terminal::run(&mut stream, fps)?,
             #[cfg(feature = "window")]
-            DisplayKind::Window => display::window::run(&mut stream, args.fps, grid)?,
+            DisplayKind::Window => display::window::run(&mut stream, fps, grid, scale)?,
             #[cfg(not(feature = "window"))]
             DisplayKind::Window => {
                 bail!("this build has no window support; use --display terminal")

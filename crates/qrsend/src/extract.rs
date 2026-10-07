@@ -120,6 +120,16 @@ impl UnpackSink for StdoutSink {
     }
 }
 
+/// `dir/name`, or `dir/name (n)` when that already exists.
+pub fn free_path(dir: &Path, name: &str) -> PathBuf {
+    let plain = dir.join(name);
+    if fs::symlink_metadata(&plain).is_err() {
+        plain
+    } else {
+        free_name(dir, name)
+    }
+}
+
 fn free_name(dir: &Path, name: &str) -> PathBuf {
     (1..)
         .map(|n| dir.join(numbered_name(name, n)))

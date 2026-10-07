@@ -28,6 +28,9 @@ pub enum InboxCmd {
         /// Write a single file (or text) to standard output
         #[arg(long)]
         stdout: bool,
+        /// Copy received text to the clipboard
+        #[arg(long, conflicts_with = "stdout")]
+        copy: bool,
         /// Remove the session from the inbox afterwards
         #[arg(long)]
         remove: bool,
@@ -95,6 +98,7 @@ pub fn run(cmd: InboxCmd) -> Result<()> {
             out,
             on_conflict,
             stdout,
+            copy,
             remove,
         } => {
             let s = Session::open(Store::open(util::parse_session(&id)?)?)?;
@@ -106,12 +110,15 @@ pub fn run(cmd: InboxCmd) -> Result<()> {
                 out,
                 conflict: on_conflict,
                 stdout,
-                copy: false,
+                copy,
             };
             report(
                 extract::finalize(&s.store, &manifest, s.me.as_ref(), &opts)?,
                 stdout,
             );
+            if copy {
+                eprintln!("Copied to the clipboard.");
+            }
             if remove {
                 s.store.remove()?;
             }

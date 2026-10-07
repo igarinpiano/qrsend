@@ -311,14 +311,15 @@ pub fn run(args: RecvArgs) -> Result<()> {
     let (ftx, frx) = bounded::<LumaFrame>(threads * 2);
     let (ttx, trx) = unbounded::<Vec<String>>();
     let producer = thread::spawn(move || input.produce(ftx));
+    let lattice = Arc::new(std::sync::Mutex::new(decode::Lattice::default()));
     for _ in 0..threads {
-        let (frx, ttx, stop) = (frx.clone(), ttx.clone(), stop.clone());
+        let (frx, ttx, stop, lattice) = (frx.clone(), ttx.clone(), stop.clone(), lattice.clone());
         thread::spawn(move || {
             while let Ok(f) = frx.recv() {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let texts = decode::detect(&f);
+                let texts = decode::detect_cached(&f, &lattice);
                 if ttx.send(texts).is_err() {
                     break;
                 }
@@ -465,10 +466,15 @@ pub fn run(args: RecvArgs) -> Result<()> {
     };
     match extract::finalize(&s.store, &manifest, s.me.as_ref(), &opts) {
         Ok(outcome) => {
-            let text_to_stdout = args.stdout;
-            report(outcome, text_to_stdout);
+            let text = match &outcome {
+                Outcome::Text(t) => Some(t.clone()),
+                _ => None,
+            };
+            report(outcome, args.stdout);
             if args.copy {
                 eprintln!("Copied to the clipboard.");
+            } else if let Some(text) = text.filter(|_| !args.stdout) {
+                offer_text_actions(&text, &args.out, id)?;
             }
             if args.keep {
                 eprintln!("Kept in the inbox as {}.", session_hex(id));
@@ -481,6 +487,38 @@ pub fn run(args: RecvArgs) -> Result<()> {
             eprintln!("Received everything, but saving failed. The data is kept in the inbox:");
             eprintln!("  qrsend inbox export {} -o <dir>", session_hex(id));
             Err(e)
+        }
+    }
+}
+
+/// After a text arrives in an interactive terminal, lets the user copy it or
+/// save it without having asked for that up front.
+fn offer_text_actions(text: &str, out: &std::path::Path, session_id: u32) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Ok(());
+    }
+    loop {
+        eprint!("[c] copy to clipboard  [s] save as file  [Enter] done: ");
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        if std::io::stdin().lock().read_line(&mut answer)? == 0 {
+            return Ok(());
+        }
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "c" => match extract::copy_to_clipboard(text) {
+                Ok(()) => eprintln!("Copied to the clipboard."),
+                Err(e) => eprintln!("Could not copy: {e}"),
+            },
+            "s" => {
+                std::fs::create_dir_all(out)?;
+                let path =
+                    extract::free_path(out, &format!("qrsend-{}.txt", session_hex(session_id)));
+                std::fs::write(&path, text)?;
+                eprintln!("Saved {}", path.display());
+            }
+            "" => return Ok(()),
+            _ => {}
         }
     }
 }
