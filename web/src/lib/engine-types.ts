@@ -38,6 +38,18 @@ export interface FrameBatch {
   count: number;
   frames: number;
   pass: number;
+  /** Codes in one pass over what the receiver still needs. */
+  framesPerPass: number;
+}
+
+/** What the receiver told the sender through a feedback code. */
+export interface ReceiverReport {
+  /** The receiver has everything: stop sending. */
+  complete: boolean;
+  remainingCodes: number;
+  totalCodes: number;
+  /** Distinct codes the receiver has read. */
+  frames: number;
 }
 
 export interface RecvInfo {
@@ -85,6 +97,8 @@ export interface RecvState {
   result?: RecvResult;
   /** False when received data is only held in memory (no OPFS). */
   persistent: boolean;
+  /** Feedback code for the sender (`QSF1-…`), when the sender asked for feedback. */
+  feedback?: string;
 }
 
 export interface SessionRecord {
@@ -114,6 +128,15 @@ export interface EngineApi {
   sendStart(req: SendRequest): Promise<SendStarted>;
   sendFrames(count: number): Promise<FrameBatch>;
   sendStop(): Promise<void>;
+  /** Whether the stream tells the receiver that this sender reads feedback codes. */
+  sendAskForFeedback(on: boolean): Promise<void>;
+  /** A code read by the sender's camera; null unless it is feedback for this transfer. */
+  sendFeedback(text: string): Promise<ReceiverReport | null>;
+  /**
+   * No feedback is being read. `forget` false: for a moment (keep leaving out what the receiver has, stop waiting
+   * for its answers); true: for long (assume nothing, send everything again).
+   */
+  sendReceiverSilent(forget: boolean): Promise<void>;
   recvStart(session?: string): Promise<RecvState>;
   recvPush(texts: string[]): Promise<RecvState>;
   recvStop(): Promise<void>;

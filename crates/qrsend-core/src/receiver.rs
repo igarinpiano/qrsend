@@ -1,8 +1,9 @@
 //! Frame collection state machine (transport layer only; no crypto, no I/O).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::fec::SegmentDecoder;
+use crate::feedback::{self, Feedback};
 use crate::frame::{Frame, META_INDEX};
 
 /// Parameters every frame of a session must agree on.
@@ -57,7 +58,16 @@ pub struct Receiver {
     evicted: u64,
     /// Symbol size of the most recent frame (0 before the first one).
     symbol_size: usize,
+    /// The frames read most recently, to tell new ones from repeats (a camera
+    /// usually sees every displayed code more than once).
+    recent: HashSet<(u32, u32)>,
+    recent_order: VecDeque<(u32, u32)>,
+    distinct: u64,
+    feedback_seq: u32,
 }
+
+/// How many recent frames are remembered to recognise repeats.
+const RECENT_FRAMES: usize = 8192;
 
 /// How far a transfer has come, in terms a person watching it cares about.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -99,6 +109,10 @@ impl Receiver {
             useful: 0,
             evicted: 0,
             symbol_size: 0,
+            recent: HashSet::new(),
+            recent_order: VecDeque::new(),
+            distinct: 0,
+            feedback_seq: 0,
         }
     }
 
@@ -135,7 +149,15 @@ impl Receiver {
         if let Some(d) = self.done.get_mut(index as usize) {
             *d = false;
         }
+        self.drop_decoder(index);
+    }
+
+    /// Discards what was collected for a segment. Its frames are no longer
+    /// repeats: the same ones are needed again.
+    fn drop_decoder(&mut self, index: u32) {
         self.decoders.remove(&index);
+        self.recent.retain(|&(i, _)| i != index);
+        self.recent_order.retain(|&(i, _)| i != index);
     }
 
     /// Locks onto a session without a frame (restoring saved state).
@@ -204,6 +226,23 @@ impl Receiver {
         Some(out)
     }
 
+    /// What to tell the sender (None before a session is locked). `complete`
+    /// is the caller's verdict: every segment received, verified and stored.
+    pub fn feedback(&mut self, complete: bool) -> Option<Feedback> {
+        let p = self.params?;
+        self.feedback_seq = self.feedback_seq.wrapping_add(1);
+        let missing = feedback::ranges(&self.missing());
+        Some(Feedback {
+            session_id: p.session_id,
+            seq: self.feedback_seq,
+            complete,
+            truncated: missing.len() > feedback::MAX_RANGES,
+            frames: self.distinct,
+            remaining_symbols: self.progress().map_or(0, |p| p.remaining_symbols),
+            missing,
+        })
+    }
+
     /// Partially received segments: (index, symbols received, K).
     pub fn partial(&self) -> Vec<(u32, u32, u32)> {
         let mut v: Vec<_> = self
@@ -237,12 +276,7 @@ impl Receiver {
             events.push(Event::Inconsistent);
             return events;
         }
-        if self.is_done(h.seg_index) {
-            return events;
-        }
-        self.tick += 1;
         let symbol_size = frame.symbol.len();
-        self.symbol_size = symbol_size;
         // The symbol size may change between sender runs (e.g. another QR
         // density after a resume); a decoder only combines equal-size symbols.
         if self
@@ -250,8 +284,25 @@ impl Receiver {
             .get(&h.seg_index)
             .is_some_and(|(d, _)| d.symbol_size() != symbol_size)
         {
-            self.decoders.remove(&h.seg_index);
+            self.drop_decoder(h.seg_index);
         }
+        // A repeat of a frame read a moment ago carries nothing new.
+        let key = (h.seg_index, h.esi);
+        if !self.recent.insert(key) {
+            return events;
+        }
+        self.recent_order.push_back(key);
+        if self.recent_order.len() > RECENT_FRAMES
+            && let Some(old) = self.recent_order.pop_front()
+        {
+            self.recent.remove(&old);
+        }
+        self.distinct += 1;
+        if self.is_done(h.seg_index) {
+            return events;
+        }
+        self.tick += 1;
+        self.symbol_size = symbol_size;
         if !self.decoders.contains_key(&h.seg_index) && self.decoders.len() >= self.max_decoders {
             self.evict();
         }
@@ -282,7 +333,7 @@ impl Receiver {
             .min_by_key(|(_, (_, t))| *t)
             .map(|(i, _)| *i);
         if let Some(i) = victim {
-            self.decoders.remove(&i);
+            self.drop_decoder(i);
             self.evicted += 1;
         }
     }

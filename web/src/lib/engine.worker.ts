@@ -13,6 +13,7 @@ import type {
   EngineEvent,
   FrameBatch,
   OutEntry,
+  ReceiverReport,
   RecvInfo,
   RecvResult,
   RecvState,
@@ -167,7 +168,13 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
 function sendFrames(count: number): FrameBatch {
   if (!sending) throw new Error("no transfer is being sent");
   const data = sending.session.nextBatch(count);
-  return { data, count, frames: sending.session.frames, pass: sending.session.pass };
+  const { frames, pass, framesPerPass } = sending.session;
+  return { data, count, frames, pass, framesPerPass };
+}
+
+function sendFeedback(text: string): ReceiverReport | null {
+  if (!sending) return null;
+  return sending.session.applyFeedback(text) as ReceiverReport | null;
 }
 
 // ---------------------------------------------------------------- receiving
@@ -226,6 +233,8 @@ function state(s: RecvSession): RecvState {
     error: s.error,
     result: s.result,
     persistent,
+    // "Complete" only once everything is verified and unpacked.
+    feedback: s.r.feedback(!!s.result) ?? undefined,
   };
 }
 
@@ -500,6 +509,9 @@ const api: EngineApi = {
   sendStart,
   sendFrames: async (count) => sendFrames(count),
   sendStop,
+  sendAskForFeedback: async (on) => sending?.session.askForFeedback(on),
+  sendFeedback: async (text) => sendFeedback(text),
+  sendReceiverSilent: async (forget) => sending?.session.receiverSilent(forget),
   recvStart,
   recvPush,
   recvStop,

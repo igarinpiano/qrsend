@@ -36,6 +36,7 @@
     encrypted for the receiving device and signed by the sender.
   </p>
   <p class="muted">Works offline once loaded. Also available as a command-line tool: <code>qrsend</code>.</p>
+  <p class="muted">Curious about what is next? Turn on new features in the <a href="#/preview">Feature preview</a>.</p>
 </div>
 
 <style>

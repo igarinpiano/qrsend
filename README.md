@@ -28,7 +28,7 @@ cargo install qrsend       # from source
 ```
 
 The npm package is named `qrsend-cli`; the command it installs is `qrsend`.
-On Windows, use the release archive or Cargo for now — the Windows npm
+On 64-bit Windows, use the release archive or Cargo for now — those npm
 binaries are not published yet.
 
 Or download an archive from [Releases](https://github.com/igarinpiano/qrsend/releases)
@@ -120,6 +120,16 @@ loaded (PWA).
 - The device's private keys are WebCrypto keys that cannot be exported — not
   even by the page itself.
 - Up to 8×8 codes at once, or as many as fit the screen.
+- **Feature preview** (footer link): new ways of sending that are still being
+  worked on. Each is off until the sender turns it on; otherwise everything
+  works as before.
+  - *Two-way transfer*: when the sender has a camera that sees the receiver's
+    screen (two phones or laptops facing each other), the receiver shows a
+    small feedback code with what is still missing. The sender sends only
+    that — lost codes are made up for at once instead of a whole pass later —
+    and stops by itself when everything has arrived. The receiver needs no
+    setting, and if the feedback drops out, sending simply carries on the
+    usual way.
 
 ```bash
 cd web && npm ci && npm run wasm && npm run dev
@@ -147,7 +157,8 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] Web app (PWA) with camera receive, pairing and inbox
 - [x] Streaming storage (OPFS) and non-extractable keys in the browser
 - [x] Dense grids and video export / import
-- [ ] A back channel from receiver to sender (auto-tuning, acknowledgements)
+- [x] A back channel from receiver to sender: acknowledgements (web app, feature preview)
+- [ ] Auto-tuning speed and density from that feedback; two-way mode in the CLI
 - [ ] More transports side by side (colour codes, local network, sound)
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).

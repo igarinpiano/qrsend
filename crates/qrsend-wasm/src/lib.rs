@@ -18,6 +18,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use qrsend_core::crypto::{self, DeviceIdentity, DevicePublic, OpenMetaError, SharedSecrets};
 use qrsend_core::fec;
+use qrsend_core::feedback::{self, Feedback, SenderNotice};
 use qrsend_core::frame::{FLAG_ENCRYPTED, Frame, META_INDEX};
 use qrsend_core::manifest::{
     Body, Entry, EntryType, Kind, MANIFEST_VERSION, Manifest, MetaEnvelope, MetaSignature,
@@ -588,6 +589,18 @@ pub struct SendSession {
     sender: Sender<JsSource>,
     params: QrParams,
     frames: u64,
+    /// Codes shown since feedback was asked for (None: not asked).
+    asking: Option<u64>,
+}
+
+/// How often a notice replaces a data code while feedback is asked for: often
+/// at first so the receiver learns of it at once, rarely once it answers.
+fn notice_interval(asked_for: u64, answered: bool) -> u64 {
+    match (answered, asked_for) {
+        (true, _) => 64,
+        (false, ..240) => 8,
+        (false, _) => 32,
+    }
 }
 
 #[wasm_bindgen]
@@ -632,6 +645,7 @@ impl SendSession {
             sender: Sender::new(layout, JsSource(read), config, None),
             params,
             frames: 0,
+            asking: None,
         })
     }
 
@@ -641,8 +655,11 @@ impl SendSession {
         let w = self.params.modules();
         let mut out = Vec::with_capacity(n * w * w);
         for _ in 0..n {
-            let frame = self.sender.next_frame().map_err(js_err)?;
-            let m = qr::render(&frame.to_qr_text(), self.params).map_err(js_err)?;
+            let text = match self.notice() {
+                Some(notice) => notice.encode(),
+                None => self.sender.next_frame().map_err(js_err)?.to_qr_text(),
+            };
+            let m = qr::render(&text, self.params).map_err(js_err)?;
             out.extend(m.modules.into_iter().map(u8::from));
         }
         self.frames += n as u64;
@@ -675,6 +692,72 @@ impl SendSession {
     pub fn pass(&self) -> f64 {
         self.sender.pass() as f64
     }
+
+    /// Tells the receiver (through notices mixed into the stream) whether
+    /// this sender can read feedback codes.
+    #[wasm_bindgen(js_name = askForFeedback)]
+    pub fn ask_for_feedback(&mut self, on: bool) {
+        match (on, self.asking) {
+            (true, None) => self.asking = Some(0),
+            (false, Some(_)) => self.asking = None,
+            _ => {}
+        }
+    }
+
+    /// Takes a feedback code shown by the receiver (`QSF1-…`) into account:
+    /// only what it still lacks is sent from now on. Returns
+    /// `{ complete, remainingCodes, totalCodes, frames }`, or null when the
+    /// text is not feedback for this transfer.
+    #[wasm_bindgen(js_name = applyFeedback)]
+    pub fn apply_feedback(&mut self, text: &str) -> JsResult<JsValue> {
+        let Ok(feedback) = Feedback::decode(text) else {
+            return Ok(JsValue::NULL);
+        };
+        if !self.sender.apply_feedback(feedback) {
+            return Ok(JsValue::NULL);
+        }
+        let f = self.sender.feedback().expect("just applied");
+        to_js(&ReceiverReport {
+            complete: f.complete,
+            remaining_codes: f.remaining_symbols as f64,
+            total_codes: self.sender.total_symbols() as f64,
+            frames: f.frames as f64,
+        })
+    }
+
+    /// The receiver's feedback is out of view. `forget` false: for a moment
+    /// (keep leaving out what it has, but do not wait for answers). `forget`
+    /// true: for long (assume nothing, send everything again).
+    #[wasm_bindgen(js_name = receiverSilent)]
+    pub fn receiver_silent(&mut self, forget: bool) {
+        if forget {
+            self.sender.forget_receiver();
+        } else {
+            self.sender.receiver_quiet();
+        }
+    }
+}
+
+impl SendSession {
+    /// The notice to show instead of the next data code, if one is due.
+    fn notice(&mut self) -> Option<SenderNotice> {
+        let shown = self.asking.as_mut()?;
+        let due = shown.is_multiple_of(notice_interval(*shown, self.sender.feedback().is_some()));
+        *shown += 1;
+        due.then(|| SenderNotice {
+            session_id: self.sender.layout().session_id,
+            wants_feedback: true,
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReceiverReport {
+    complete: bool,
+    remaining_codes: f64,
+    total_codes: f64,
+    frames: f64,
 }
 
 // ---------------------------------------------------------------- receiving
@@ -733,6 +816,8 @@ pub struct Receive {
     manifest: Option<Manifest>,
     signer: Option<[u8; 32]>,
     completed: Vec<(u32, Vec<u8>)>,
+    /// Session whose sender asked for feedback codes.
+    feedback_for: Option<u32>,
 }
 
 #[wasm_bindgen]
@@ -751,6 +836,7 @@ impl Receive {
             manifest: None,
             signer: None,
             completed: Vec::new(),
+            feedback_for: None,
         })
     }
 
@@ -850,6 +936,12 @@ impl Receive {
     /// when the manifest is already known.
     pub fn push(&mut self, text: &str) -> JsResult<JsValue> {
         let mut out = PushResult::default();
+        if text.starts_with(feedback::NOTICE_PREFIX) {
+            if let Ok(notice) = SenderNotice::decode(text) {
+                self.feedback_for = notice.wants_feedback.then_some(notice.session_id);
+            }
+            return to_js(&out);
+        }
         let Ok(frame) = Frame::from_qr_text(text) else {
             return to_js(&out);
         };
@@ -1014,6 +1106,17 @@ impl Receive {
     #[wasm_bindgen(js_name = isComplete)]
     pub fn is_complete(&self) -> bool {
         self.rx.is_complete() && self.manifest.is_some()
+    }
+
+    /// A feedback code (`QSF1-…`) telling the sender what is still missing;
+    /// null unless the sender of this transfer asked for feedback.
+    /// `complete` is the caller's verdict that everything is received,
+    /// verified and stored.
+    pub fn feedback(&mut self, complete: bool) -> Option<String> {
+        if self.feedback_for? != self.rx.params()?.session_id {
+            return None;
+        }
+        Some(self.rx.feedback(complete)?.encode())
     }
 
     /// Resume code for the segments still missing.

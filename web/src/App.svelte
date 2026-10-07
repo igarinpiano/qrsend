@@ -4,6 +4,7 @@
   import ReceiveView from "./views/ReceiveView.svelte";
   import DevicesView from "./views/DevicesView.svelte";
   import InboxView from "./views/InboxView.svelte";
+  import PreviewView from "./views/PreviewView.svelte";
 
   function parse() {
     const [path, query = ""] = location.hash.replace(/^#/, "").split("?");
@@ -48,6 +49,8 @@
       <DevicesView />
     {:else if route.path === "/inbox"}
       <InboxView />
+    {:else if route.path === "/preview"}
+      <PreviewView />
     {:else}
       <Home />
     {/if}
@@ -57,7 +60,7 @@
 <footer class="small muted">
   <p>
     <a href="https://github.com/igarinpiano/qrsend">QRSend</a> is open source (Apache-2.0). Nothing you send or receive
-    leaves your devices.
+    leaves your devices. <a href="#/preview">Feature preview</a>
   </p>
   <p>QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.</p>
 </footer>

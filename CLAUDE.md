@@ -19,8 +19,9 @@ QR コードのストリームでテキスト・ファイル・フォルダを�
 crates/qrsend-core/  プロトコル本体（I/O は std::io トレイトのみ。WASM と共有する）
   base45 / frame      フレーム形式（ヘッダ 22B + シンボル + CRC32、Base45 で QR 英数字モード）
   fec                 RaptorQ（raptorq crate）。1 セグメント = 1 ソースブロック、ESI は RFC 6330 準拠
-  schedule / sender   参考送信スケジュール（窓インターリーブ、Meta は毎パス＋差し込み）
-  receiver            受信状態機械（暗号・I/O なし。Event を返す）
+  schedule / sender   参考送信スケジュール（窓インターリーブ、Meta は毎パス＋差し込み）。フィードバックがあれば受信済みを送らず、窓が受信されるまで次へ進まない（Sender::apply_feedback / forget_receiver）
+  receiver            受信状態機械（暗号・I/O なし。Event を返す）。直近 8192 フレームの重複を捨てる（カメラは同じコードを何度も見る）
+  feedback            受信側 → 送信側のフィードバックコード（QSF1-…）と、送信側からの合図（notice、QSC1-…）。PROTOCOL §11
   manifest            manifest JSON とメタエンベロープ（"QSM"、署名枠つき）
   payload             ファイル内容の単純連結＋zstd、BLAKE3 検証、展開（UnpackSink）。Packer は pull（add_file）と push（begin_file / write_chunk / end_file）の両方
   compress            zstd の切替（zstd-native / ruzstd）。ruzstd は 4MiB ごとの複数フレーム
@@ -39,7 +40,7 @@ web/                 Svelte 5 + Vite + TS の PWA
   src/lib/storage.ts        OPFS の同期アクセスハンドル（無ければメモリ）。受信は recv/<session>/{body,meta,out}、送信は send/<uuid>/body
   src/lib/keys.ts           デバイス ID。WebCrypto の non-extractable 鍵（X25519 / Ed25519）。非対応ブラウザは legacy（wasm 内の鍵）。旧形式（文字列）は初回に自動移行
   src/lib/                  core.ts（wasm 読み込み）/ db.ts（IndexedDB: 鍵・信頼デバイス・セッション一覧）/ scanner.ts + scan.worker.ts（BarcodeDetector → zxing-wasm、カメラと動画ファイル）/ save.ts + zip.ts（ディスクから直接保存、ZIP64 対応の無圧縮 ZIP）/ qrdraw.ts
-  src/views/                Home / Send(+Player) / Receive(+Camera, Result) / Devices / Inbox
+  src/views/                Home / Send(+Player) / Receive(+Camera, Result) / Devices / Inbox / Preview（Feature preview）
   e2e/                      Playwright。CLI が書いた Y4M を Chrome の仮想カメラに流す相互運用テスト（暗号化・多セグメント・ZIP を含む）
 npm/                 npm 配布用: assemble.py（機種別パッケージの対応表）と launcher.js
 ```
@@ -86,6 +87,8 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 - QR は `qr::render` が常に単一の英数字セグメントで符号化する（汎用の最適化器だと固定バージョンで容量オーバーする実例があった）。容量は `QrParams::symbol_size()` で決まる。
 - 受信側は frame の CRC → セッション整合 → RaptorQ → セグメント BLAKE3（manifest 到着後）→ 全体 BLAKE3 → ファイル BLAKE3 の順に検証する。manifest 到着前のセグメントは `unverified` として保存し、後で検証する。
 - `recv` は未完了で終わると終了コード 2 と resume code を出す。
+- **作りかけの機能は Feature preview に置く**（ユーザーの方針: 基本は従来の方式。新機能は送信側が `#/preview` で個別にオンにする）。定義は `web/src/lib/prefs.ts` の `PREVIEW_FEATURES`、保存先は localStorage の `qrsend.preview.<id>`。オフのときは画面も送る内容も従来と同じにする。受信側には設定を作らず、送信側からの合図で自動的に従う形にする。
+- Two-way transfer（逆方向チャネル、0.1.2〜、Web のみ、preview）: 送信側がオンだと SendSession がデータの合間に notice（QSC1）を混ぜる。受信側はそれを見たセッションに限りフィードバック QR を表示し（0.3 秒以上の間隔で描き直す）、送信プレーヤーが自分のカメラ（前面優先）で読んで `engine.sendFeedback` に渡す。途切れたら 2 秒で `sendReceiverSilent(false)`（窓の完成待ちをやめる）、10 秒で `sendReceiverSilent(true)`（全送信に戻る）。`COMPLETE` は展開まで終わってから立てる。フィードバックは認証なしの助言で、到達の証明には使わない。順方向は逆方向に依存させない（PROTOCOL §11.3）。e2e（`two-way.spec.ts`）は 2 つのブラウザの仮想カメラを Y4M でつないで往復させる。
 
 ## リリース
 

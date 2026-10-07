@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::io;
 
 use crate::fec::{SegmentEncoder, source_symbol_count};
+use crate::feedback::Feedback;
 use crate::frame::{Frame, FrameHeader, META_INDEX};
 use crate::schedule::{ScheduleConfig, Scheduler};
 
@@ -60,6 +61,8 @@ pub struct Sender<S> {
     scheduler: Scheduler,
     cache: VecDeque<(u32, SegmentEncoder)>,
     cache_size: usize,
+    /// The latest feedback from the receiver, while it is answering.
+    feedback: Option<Feedback>,
 }
 
 impl<S: SegmentSource> Sender<S> {
@@ -82,7 +85,49 @@ impl<S: SegmentSource> Sender<S> {
             scheduler: Scheduler::new(config, meta_k, segments),
             cache: VecDeque::new(),
             cache_size,
+            feedback: None,
         }
+    }
+
+    /// Takes what the receiver reports into account: from now on only what it
+    /// still lacks is sent. Returns false for feedback about another session.
+    pub fn apply_feedback(&mut self, feedback: Feedback) -> bool {
+        if feedback.session_id != self.layout.session_id {
+            return false;
+        }
+        if self.feedback.as_ref() != Some(&feedback) {
+            self.scheduler.set_needed(|i| feedback.needs(i));
+            self.feedback = Some(feedback);
+        }
+        self.scheduler.wait_for_receiver(true);
+        true
+    }
+
+    /// The receiver has not been heard from for a moment (its code is out of
+    /// view): keep leaving out what it has, but stop waiting for its answers.
+    pub fn receiver_quiet(&mut self) {
+        self.scheduler.wait_for_receiver(false);
+    }
+
+    /// The receiver has not been heard from for a long time: assume nothing
+    /// about what it has.
+    pub fn forget_receiver(&mut self) {
+        if self.feedback.take().is_some() {
+            self.scheduler.forget_receiver();
+        }
+    }
+
+    /// The latest feedback, unless the receiver was forgotten.
+    pub fn feedback(&self) -> Option<&Feedback> {
+        self.feedback.as_ref()
+    }
+
+    /// Source symbols of the whole session (meta included), i.e. the codes a
+    /// receiver needs when none is lost.
+    pub fn total_symbols(&self) -> u64 {
+        (0..=self.layout.seg_count())
+            .map(|i| self.layout.k(i) as u64)
+            .sum()
     }
 
     pub fn layout(&self) -> &SessionLayout {

@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { ready, renderText } from "../lib/core";
   import { persist } from "../lib/db";
   import { engine } from "../lib/engine";
   import type { RecvState } from "../lib/engine-types";
   import { bytes, duration, RateMeter } from "../lib/format";
+  import { toDataUrl } from "../lib/qrdraw";
   import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
   import Result from "./Result.svelte";
@@ -17,6 +19,29 @@
   let pushing = false;
   const meter = new RateMeter();
 
+  // When the sender asks for it (two-way transfer), this screen shows it what
+  // is still missing, so it sends only that and stops by itself. The code is
+  // redrawn a few times per second at most, so a camera gets a steady look.
+  const FEEDBACK_HOLD_MS = 300;
+  let feedback = $state("");
+  let feedbackUrl = $state("");
+  let feedbackAt = 0;
+  let coreReady = false;
+  ready().then(() => {
+    coreReady = true;
+    if (st) showFeedback(st, true);
+  });
+
+  function showFeedback(next: RecvState, force = false) {
+    if (!coreReady || !next.feedback) return;
+    const now = performance.now();
+    if (!force && !next.result && now - feedbackAt < FEEDBACK_HOLD_MS) return;
+    feedbackAt = now;
+    feedback = next.feedback;
+    feedbackUrl = toDataUrl(renderText(feedback), 6);
+  }
+
+
   const info = $derived(st?.info ?? undefined);
   const result = $derived(st?.result);
   const error = $derived(failure || st?.error || "");
@@ -24,6 +49,7 @@
 
   function apply(next: RecvState) {
     st = next;
+    showFeedback(next);
     // What matters while waiting: how much is left and how fast it goes.
     if (next.info?.remaining_bytes != null) rate = meter.update(performance.now(), next.info.remaining_bytes);
   }
@@ -72,6 +98,20 @@
 
 {#if !result}
   <Camera {ontexts} {active} allowFile />
+{/if}
+
+{#if feedbackUrl}
+  <div class="card feedback">
+    <img src={feedbackUrl} alt="Feedback code for the sender" data-testid="feedback" data-code={feedback} />
+    <p class="small muted">
+      {#if result}
+        Show this to the sender’s camera once more so it knows everything arrived.
+      {:else}
+        The sender asked for feedback. Keep this code in view of its camera: it then sends only what is missing and
+        stops when everything has arrived.
+      {/if}
+    </p>
+  </div>
 {/if}
 
 {#if error}
@@ -139,3 +179,23 @@
   <Result {result} />
   <p class="small muted">Kept in your <a href="#/inbox">Inbox</a> until you delete it.</p>
 {/if}
+
+<style>
+  .feedback {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .feedback img {
+    width: min(240px, 100%);
+    image-rendering: pixelated;
+    border-radius: 8px;
+    background: #fff;
+  }
+  .feedback p {
+    flex: 1;
+    min-width: 12em;
+    margin: 0;
+  }
+</style>

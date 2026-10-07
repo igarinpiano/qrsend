@@ -48,7 +48,8 @@ export class Scanner {
     return all.filter((d) => d.kind === "videoinput");
   }
 
-  async start(deviceId?: string): Promise<void> {
+  /** `facing` is used when no particular camera is asked for. */
+  async start(deviceId?: string, facing: "environment" | "user" = "environment"): Promise<void> {
     this.stop();
     // Opening a camera takes a while. If something else took over meanwhile
     // (stop(), another start(), a video file), this call must not touch the
@@ -56,7 +57,7 @@ export class Scanner {
     const turn = this.turn;
     const video: MediaTrackConstraints = deviceId
       ? { deviceId: { exact: deviceId } }
-      : { facingMode: { ideal: "environment" } };
+      : { facingMode: { ideal: facing } };
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: { ...video, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },

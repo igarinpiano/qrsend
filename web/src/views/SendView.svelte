@@ -5,6 +5,7 @@
   import { engine, onEngineEvent } from "../lib/engine";
   import type { SendItem, SendStarted } from "../lib/engine-types";
   import { bytes } from "../lib/format";
+  import { featureOn } from "../lib/prefs";
   import Player from "./Player.svelte";
 
   let { params }: { params: URLSearchParams } = $props();
@@ -252,6 +253,13 @@
 </div>
 
 {#if error}<p class="error">{error}</p>{/if}
+
+<p class="small muted">
+  {#if featureOn("twoWay")}
+    Two-way transfer is on: the player will use this device’s camera to hear from the receiver.
+  {/if}
+  <a href="#/preview">Feature preview</a>
+</p>
 
 <button class="primary wide" disabled={!canSend} onclick={start}>
   {#if busy}

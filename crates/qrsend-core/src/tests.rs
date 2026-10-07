@@ -183,3 +183,176 @@ fn receiver_ignores_foreign_sessions() {
     );
     assert!(rx.push(b.next_frame().unwrap()).is_empty());
 }
+
+/// Frames a lossy transfer takes, with or without the receiver answering.
+fn frames_until_complete(with_feedback: bool, lose: impl Fn(u64) -> bool) -> u64 {
+    let seg_shift = 13;
+    let body = noise(200_000, 9);
+    let meta = noise(300, 3);
+    let layout = SessionLayout {
+        session_id: 77,
+        flags: 0,
+        seg_shift,
+        meta_len: meta.len() as u32,
+        body_len: body.len() as u64,
+        symbol_size: 200,
+    };
+    let source = MemorySource {
+        meta,
+        body: body.clone(),
+        seg_shift,
+    };
+    let mut sender = Sender::new(layout, source, ScheduleConfig::default(), None);
+    let mut rx = Receiver::new();
+    let mut got = vec![0u8; body.len()];
+    let mut sent = 0u64;
+    loop {
+        let frame = sender.next_frame().unwrap();
+        sent += 1;
+        assert!(sent < 100_000, "transfer did not converge");
+        if !lose(sent) {
+            for ev in rx.push(frame) {
+                if let Event::Completed { index, data } = ev
+                    && index > 0
+                {
+                    let off = rx.params().unwrap().offset(index) as usize;
+                    got[off..off + data.len()].copy_from_slice(&data);
+                }
+            }
+        }
+        // The answer reaches the sender a little later, and through text.
+        if with_feedback && sent.is_multiple_of(25) {
+            let fb = rx.feedback(rx.is_complete());
+            if let Some(fb) = fb {
+                let fb = crate::feedback::Feedback::decode(&fb.encode()).unwrap();
+                let complete = fb.complete;
+                assert!(sender.apply_feedback(fb));
+                if complete {
+                    break;
+                }
+            }
+        } else if !with_feedback && rx.is_complete() {
+            break;
+        }
+    }
+    assert_eq!(got, body);
+    sent
+}
+
+#[test]
+fn feedback_saves_frames() {
+    // No loss: the redundancy of a pass is not sent once a segment is acknowledged.
+    let (blind, guided) = (
+        frames_until_complete(false, |_| false),
+        frames_until_complete(true, |_| false),
+    );
+    assert!(guided <= blind + 25, "{guided} vs {blind}");
+
+    // Heavy loss (40%): without feedback every segment needs a second pass;
+    // with it each window is fed until it is complete.
+    let lose = |n: u64| n % 5 < 2;
+    let (blind, guided) = (
+        frames_until_complete(false, lose),
+        frames_until_complete(true, lose),
+    );
+    assert!(guided * 10 < blind * 9, "{guided} vs {blind}");
+    eprintln!("40% loss: {blind} frames blind, {guided} with feedback");
+}
+
+#[test]
+fn feedback_for_another_session_is_ignored() {
+    let layout = SessionLayout {
+        session_id: 1,
+        flags: 0,
+        seg_shift: 12,
+        meta_len: 10,
+        body_len: 5000,
+        symbol_size: 100,
+    };
+    let source = MemorySource {
+        meta: vec![0; 10],
+        body: vec![0; 5000],
+        seg_shift: 12,
+    };
+    let mut sender = Sender::new(layout, source, ScheduleConfig::default(), None);
+    let per_pass = sender.frames_per_pass();
+    let other = crate::feedback::Feedback {
+        session_id: 2,
+        seq: 1,
+        complete: true,
+        truncated: false,
+        frames: 0,
+        remaining_symbols: 0,
+        missing: vec![],
+    };
+    assert!(!sender.apply_feedback(other.clone()));
+    assert!(sender.feedback().is_none());
+    assert_eq!(sender.frames_per_pass(), per_pass);
+    assert!(sender.apply_feedback(crate::feedback::Feedback {
+        session_id: 1,
+        missing: vec![(2, 1)],
+        ..other
+    }));
+    assert!(sender.frames_per_pass() < per_pass);
+    sender.forget_receiver();
+    assert_eq!(sender.frames_per_pass(), per_pass);
+}
+
+/// The back channel may drop out at any moment; the transfer must not depend
+/// on it. Here the receiver even loses everything it had (think of a page
+/// reload without storage) right when its feedback stops being read.
+#[test]
+fn transfer_survives_losing_the_back_channel() {
+    let seg_shift = 12;
+    let body = noise(60_000, 5);
+    let meta = noise(200, 6);
+    let layout = SessionLayout {
+        session_id: 99,
+        flags: 0,
+        seg_shift,
+        meta_len: meta.len() as u32,
+        body_len: body.len() as u64,
+        symbol_size: 100,
+    };
+    let source = MemorySource {
+        meta,
+        body: body.clone(),
+        seg_shift,
+    };
+    let mut sender = Sender::new(layout, source, ScheduleConfig::default(), None);
+    let mut rx = Receiver::new();
+    let mut got = vec![0u8; body.len()];
+    let mut sent = 0u64;
+    let (cut, quiet_after, lost_after) = (300, 60, 300);
+    while !rx.is_complete() {
+        let frame = sender.next_frame().unwrap();
+        sent += 1;
+        assert!(sent < 20_000, "transfer did not converge");
+        if sent == cut {
+            assert!(
+                rx.completed_count() > 2,
+                "the first part should have arrived"
+            );
+            rx = Receiver::new();
+        }
+        for ev in rx.push(frame) {
+            if let Event::Completed { index, data } = ev
+                && index > 0
+            {
+                let off = rx.params().unwrap().offset(index) as usize;
+                got[off..off + data.len()].copy_from_slice(&data);
+            }
+        }
+        if sent < cut && sent.is_multiple_of(20) {
+            let fb = rx.feedback(false).unwrap();
+            assert!(sender.apply_feedback(fb));
+        } else if sent == cut + quiet_after {
+            sender.receiver_quiet();
+        } else if sent == cut + lost_after {
+            // Until now the sender still trusted the last report.
+            assert!(sender.feedback().is_some());
+            sender.forget_receiver();
+        }
+    }
+    assert_eq!(got, body);
+}

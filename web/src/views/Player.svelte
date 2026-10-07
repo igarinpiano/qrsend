@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { engine } from "../lib/engine";
-  import type { FrameBatch, SendStarted } from "../lib/engine-types";
+  import type { FrameBatch, ReceiverReport, SendStarted } from "../lib/engine-types";
   import { drawGrid, fitGrid } from "../lib/qrdraw";
   import { bytes, duration } from "../lib/format";
+  import { featureOn } from "../lib/prefs";
+  import { Scanner } from "../lib/scanner";
 
   /** `grid` is codes per side, or 0 to fill the screen. */
   let { info, fps: initialFps, grid, onclose }: { info: SendStarted; fps: number; grid: number; onclose: () => void } =
@@ -22,6 +24,85 @@
   let rows = $state(1);
   let error = $state("");
   let shown: FrameBatch | undefined;
+  let perPass = $state(untrack(() => info.framesPerPass));
+
+  // Two-way transfer (a preview feature): the stream asks the receiver for
+  // feedback, and a camera on this device watches the receiver's screen for
+  // its feedback codes. The engine then sends only what is missing, and the
+  // transfer ends by itself. Without the feature nothing here is active.
+  const FEEDBACK_PREFIX = "QSF1-";
+  // The feedback can drop out at any time (a hand in the way, the receiver
+  // moved, its page closed). Sending never depends on it:
+  /** after this long without it, stop waiting for answers (but trust the last one); */
+  const FEEDBACK_QUIET_MS = 2000;
+  /** after this long, assume nothing about the receiver and send everything again. */
+  const FEEDBACK_LOST_MS = 10000;
+  const twoWayFeature = featureOn("twoWay");
+  let twoWay = $state(false);
+  let eye: HTMLVideoElement;
+  let scanner: Scanner | undefined;
+  let report = $state<ReceiverReport | undefined>();
+  let heardAt = 0;
+  let quiet = $state(false);
+  let silentFor = $state(0);
+  let listenError = $state("");
+  const finished = $derived(!!report?.complete);
+
+  function onTexts(texts: string[]) {
+    const text = texts.find((t) => t.startsWith(FEEDBACK_PREFIX));
+    if (!text || finished) return;
+    engine
+      .sendFeedback(text)
+      .then((r) => {
+        if (!r) return;
+        report = r;
+        heardAt = performance.now();
+        quiet = false;
+      })
+      .catch(() => {});
+  }
+
+  async function listen(on: boolean) {
+    twoWay = on;
+    listenError = "";
+    engine.sendAskForFeedback(on).catch(() => {});
+    if (!on) {
+      scanner?.stop();
+      forget();
+      return;
+    }
+    try {
+      scanner ??= new Scanner(eye, onTexts);
+      await scanner.start(undefined, "user");
+    } catch (e) {
+      console.warn("two-way camera:", e);
+      listenError = e instanceof DOMException && e.name === "NotAllowedError" ? "camera access denied" : "no camera";
+      twoWay = false;
+      engine.sendAskForFeedback(false).catch(() => {});
+    }
+  }
+
+  // Nothing more to learn once the receiver has everything.
+  $effect(() => {
+    if (finished) scanner?.stop();
+  });
+
+  function forget() {
+    if (!report || finished) return;
+    report = undefined;
+    quiet = false;
+    engine.sendReceiverSilent(true).catch(() => {});
+  }
+
+  function watch() {
+    if (!report || finished) return;
+    silentFor = performance.now() - heardAt;
+    if (silentFor > FEEDBACK_LOST_MS) forget();
+    else if (silentFor > FEEDBACK_QUIET_MS && !quiet) {
+      quiet = true;
+      engine.sendReceiverSilent(false).catch(() => {});
+    }
+  }
 
   function layout(): [number, number] {
     if (grid > 0) return [grid, grid];
@@ -58,19 +139,22 @@
     };
 
     const tick = (now: number) => {
-      if (!paused && now >= next && ready) {
+      if (!paused && !finished && now >= next && ready) {
         shown = ready;
         ready = undefined;
         draw();
         frames = shown.frames;
         pass = shown.pass;
+        perPass = shown.framesPerPass;
         next = Math.max(next + 1000 / fps, now);
       }
-      if (!ready && !paused) fetchNext();
+      if (!ready && !paused && !finished) fetchNext();
       raf = requestAnimationFrame(tick);
     };
     fetchNext();
     raf = requestAnimationFrame(tick);
+    if (twoWayFeature) listen(true);
+    const watchdog = setInterval(watch, 500);
     const onResize = () => draw();
     window.addEventListener("resize", onResize);
     const onKey = (e: KeyboardEvent) => {
@@ -83,6 +167,8 @@
     return () => {
       stopped = true;
       cancelAnimationFrame(raf);
+      clearInterval(watchdog);
+      scanner?.dispose();
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
       lock?.release().catch(() => {});
@@ -106,17 +192,36 @@
   // everything is done by then).
   const inPass = $derived(frames % info.framesPerPass);
   const left = $derived(info.framesPerPass - inPass);
+  const received = $derived(report ? report.totalCodes - report.remainingCodes : 0);
   const rate = $derived(info.symbolSize * fps * perTick);
 </script>
 
 <div class="player" bind:this={root}>
-  <canvas bind:this={canvas} data-frames={frames} aria-label="QR code stream"></canvas>
+  <div class="stage">
+    <canvas bind:this={canvas} data-frames={frames} aria-label="QR code stream"></canvas>
+    {#if finished}
+      <div class="finished" role="status">
+        <p class="check">✓</p>
+        <p><strong>Received.</strong> The other device has everything.</p>
+        <button class="primary" onclick={stop}>Done</button>
+      </div>
+    {/if}
+  </div>
   <div class="bar">
     <div class="info small">
       <strong>{info.summary}</strong>
       <span>
         {#if error}
           {error}
+        {:else if report}
+          <span data-testid="receiver-report">
+            Receiver: {Math.floor((received / Math.max(report.totalCodes, 1)) * 100)}% · {received} of {report.totalCodes} codes,
+            {report.remainingCodes} to go
+          </span>
+          {#if quiet}
+            <span data-testid="receiver-quiet">· not heard for {Math.round(silentFor / 1000)}s, sending on</span>
+          {/if}
+          · {cols}×{rows} · ~{bytes(rate)}/s
         {:else}
           Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows} ·
           ~{bytes(rate)}/s
@@ -125,6 +230,13 @@
       </span>
     </div>
     <div class="row">
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video class="eye" class:on={twoWay} bind:this={eye} playsinline muted></video>
+      {#if twoWayFeature}
+        <button class:active={twoWay} aria-pressed={twoWay} onclick={() => listen(!twoWay)} title="Watch the receiver's screen for feedback codes">
+          Two-way{listenError ? ` (${listenError})` : twoWay && !report ? " …" : ""}
+        </button>
+      {/if}
       <button onclick={slower} aria-label="Slower">−</button>
       <span class="fps">{fps} fps</span>
       <button onclick={faster} aria-label="Faster">+</button>
@@ -143,10 +255,14 @@
     display: flex;
     flex-direction: column;
   }
-  canvas {
+  .stage {
+    position: relative;
     flex: 1;
-    width: 100%;
     min-height: 0;
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
     display: block;
   }
   .bar {
@@ -176,6 +292,38 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+  }
+  .eye {
+    display: none;
+    height: 40px;
+    border-radius: 6px;
+    background: #000;
+  }
+  .eye.on {
+    display: block;
+  }
+  .bar button.active {
+    border-color: #38bdf8;
+    color: #38bdf8;
+  }
+  .finished {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(255, 255, 255, 0.96);
+    color: #0f172a;
+    text-align: center;
+    padding: 16px;
+  }
+  .finished .check {
+    font-size: 4rem;
+    line-height: 1;
+    color: #16a34a;
+    margin: 0;
   }
   .fps {
     min-width: 4.5em;
