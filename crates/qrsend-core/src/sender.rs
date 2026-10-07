@@ -42,7 +42,7 @@ impl SessionLayout {
         source_symbol_count(self.seg_len(index), self.symbol_size)
     }
 
-    fn header(&self, seg_index: u32, esi: u32) -> FrameHeader {
+    pub(crate) fn header(&self, seg_index: u32, esi: u32) -> FrameHeader {
         FrameHeader {
             flags: self.flags,
             session_id: self.session_id,

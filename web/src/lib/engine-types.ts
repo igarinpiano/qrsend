@@ -42,6 +42,14 @@ export interface FrameBatch {
   framesPerPass: number;
 }
 
+/** Records for a network connection: one binary message, or the same as codes in text form. */
+export interface LinkBatch {
+  /** Records in this batch; 0 when everything was sent and the receiver's feedback has to tell what else is wanted. */
+  count: number;
+  data?: Uint8Array;
+  texts?: string[];
+}
+
 /** What the receiver told the sender through a feedback code. */
 export interface ReceiverReport {
   /** The receiver has everything: stop sending. */
@@ -102,6 +110,8 @@ export interface RecvState {
   feedbackBySound: boolean;
   /** Feedback code for the sender (`QSF1-…`), when the sender asked for feedback. */
   feedback?: string;
+  /** Records in the binary messages of this push. */
+  taken?: number;
 }
 
 export interface SessionRecord {
@@ -131,11 +141,14 @@ export interface EngineApi {
   sendStart(req: SendRequest): Promise<SendStarted>;
   sendFrames(count: number): Promise<FrameBatch>;
   sendStop(): Promise<void>;
-  /** The next codes of the stream as text, for channels other than the screen. */
-  sendTexts(count: number): Promise<string[]>;
   /**
-   * Whether another channel is carrying `sendTexts` codes right now. While it does, the codes on the screen start
-   * from the end of the transfer, so the two channels bring different parts.
+   * Up to `count` records for a network connection (`binary`: as one binary message; otherwise as codes in text
+   * form). `more`: send on even though the receiver has not said what it still lacks.
+   */
+  sendLink(count: number, binary: boolean, more: boolean): Promise<LinkBatch>;
+  /**
+   * Whether a network connection is carrying `sendLink` records right now. While it does, the codes on the screen
+   * start from the end of the transfer, so the two channels bring different parts.
    */
   sendTextChannelUp(up: boolean): Promise<void>;
   /** An offer to connect another way, repeated in the stream until replaced (`null`: none). */
@@ -145,15 +158,19 @@ export interface EngineApi {
    * them as sound.
    */
   sendAskForFeedback(on: boolean, bySound: boolean): Promise<void>;
-  /** A code read by the sender's camera; null unless it is feedback for this transfer. */
-  sendFeedback(text: string): Promise<ReceiverReport | null>;
+  /**
+   * A feedback code from the receiver; null unless it is feedback for this transfer. `linkTaken`: when it came
+   * through the network connection, the number of records the receiver had taken in from it by then.
+   */
+  sendFeedback(text: string, linkTaken?: number): Promise<ReceiverReport | null>;
   /**
    * No feedback is being read. `forget` false: for a moment (keep leaving out what the receiver has, stop waiting
    * for its answers); true: for long (assume nothing, send everything again).
    */
   sendReceiverSilent(forget: boolean): Promise<void>;
   recvStart(session?: string): Promise<RecvState>;
-  recvPush(texts: string[]): Promise<RecvState>;
+  /** Codes read by a camera (text) and messages from a network connection (packed records). */
+  recvPush(texts: string[], packed?: ArrayBuffer[]): Promise<RecvState>;
   recvStop(): Promise<void>;
   inboxList(): Promise<SessionRecord[]>;
   inboxOpen(session: string): Promise<RecvResult>;

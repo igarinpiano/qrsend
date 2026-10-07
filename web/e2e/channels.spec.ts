@@ -89,15 +89,17 @@ test("local network: after a handshake through the codes, the transfer travels o
   const answerVideo = path.join(WORK, "lan-answer.y4m");
   writeY4m(answerVideo, [blank()]);
   // Far more than the few captured frames could carry.
-  const data = crypto.randomBytes(20_000_000);
+  const data = crypto.randomBytes(Number(process.env.QRSEND_LAN_MB ?? 20) * 1_000_000);
+  const dataFile = path.join(WORK, "lan.bin");
+  fs.writeFileSync(dataFile, data);
 
   const senderBrowser = await playwright.chromium.launch({ channel: lanBrowser, args: fakeCamera(answerVideo) });
   let receiverBrowser: Awaited<ReturnType<typeof playwright.chromium.launch>> | undefined;
   try {
     const sender = await (await senderBrowser.newContext({ baseURL, permissions: ["camera"] })).newPage();
-    await enablePreview(sender, /Local network boost/);
+    await enablePreview(sender, /Local network boost/, /Show measurements/);
     await sender.goto("./#/send");
-    await sender.locator('input[type="file"]').first().setInputFiles({ name: "lan.bin", mimeType: "application/octet-stream", buffer: data });
+    await sender.locator('input[type="file"]').first().setInputFiles(dataFile);
     await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
     // Small codes: easy on the camera, which only has to carry the handshake.
     await sender.getByLabel("Density").selectOption("low");
@@ -128,8 +130,17 @@ test("local network: after a handshake through the codes, the transfer travels o
     // The screen keeps sending as well, now from the other end of the transfer.
     const shown = Number(await sender.getByLabel("QR code stream").getAttribute("data-frames"));
     await expect.poll(async () => Number(await sender.getByLabel("QR code stream").getAttribute("data-frames"))).toBeGreaterThan(shown);
+    if (process.env.QRSEND_LAN_TRACE) {
+      await receiver.evaluate(() => localStorage.setItem("qrsend.preview.stats", "1"));
+      for (let i = 0; i < 40 && !(await receiver.getByTestId("received-file").count()); i++) {
+        console.log(((Date.now() - started) / 1000).toFixed(1), await sender.getByTestId("tx-stats").innerText().catch(() => ""));
+        console.log("   ", await receiver.getByTestId("remaining").innerText().catch(() => ""));
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
     await expect(receiver.getByTestId("received-file")).toHaveText(["lan.bin"], { timeout: 90_000 });
     console.log(`local network: ${(data.length / 1024 / ((Date.now() - started) / 1000)).toFixed(0)} KiB/s`);
+    console.log(await sender.getByTestId("tx-stats").innerText());
     await expect(sender.getByText("The other device has everything.")).toBeVisible({ timeout: 30_000 });
     const [download] = await Promise.all([
       receiver.waitForEvent("download"),

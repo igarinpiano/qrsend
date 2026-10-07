@@ -12,6 +12,7 @@ import type {
   EngineApi,
   EngineEvent,
   FrameBatch,
+  LinkBatch,
   OutEntry,
   ReceiverReport,
   RecvInfo,
@@ -184,9 +185,9 @@ function sendLinkOffer(payload: Uint8Array | null, id: number): void {
   session.setLinkCodes(payload ? (linkSplit(sending.id, LINK_OFFER, id, payload, session.codeChars) as string[]) : []);
 }
 
-function sendFeedback(text: string): ReceiverReport | null {
+function sendFeedback(text: string, linkTaken?: number): ReceiverReport | null {
   if (!sending) return null;
-  return sending.session.applyFeedback(text) as ReceiverReport | null;
+  return sending.session.applyFeedback(text, linkTaken) as ReceiverReport | null;
 }
 
 // ---------------------------------------------------------------- receiving
@@ -426,7 +427,9 @@ async function recvStart(session?: string): Promise<RecvState> {
   return state(s);
 }
 
-async function recvPush(texts: string[]): Promise<RecvState> {
+type Pushed = { locked?: string; foreign?: string; rejected: number[]; records: number };
+
+async function recvPush(texts: string[], packed: ArrayBuffer[] = []): Promise<RecvState> {
   const s = receiving;
   if (!s) throw new Error("not receiving");
   if (s.result || s.error) {
@@ -437,14 +440,21 @@ async function recvPush(texts: string[]): Promise<RecvState> {
   }
   s.notice = undefined;
   const store = await fileStore();
-  for (const text of texts) {
-    const res = s.r.push(text) as { locked?: string; foreign?: string; rejected: number[] };
+  let taken = 0;
+  const note = (res: Pushed) => {
     if (res.foreign) s.notice = `Ignoring codes of another transfer (${res.foreign}).`;
     if (res.rejected.length) s.notice = `${res.rejected.length} segment(s) failed verification and will be received again.`;
+  };
+  for (const text of texts) note(s.r.push(text) as Pushed);
+  for (const message of packed) {
+    const res = s.r.pushPacked(new Uint8Array(message)) as Pushed;
+    taken += res.records;
+    note(res);
   }
+  const done = async (): Promise<RecvState> => ({ ...state(s), taken });
   if (!s.record) {
     const p = s.r.params() as { session: string; flags: number; segShift: number; segCount: number } | null;
-    if (!p) return state(s);
+    if (!p) return done();
     const saved = await db.get<SessionRecord>("sessions", p.session);
     if (saved && !saved.extracted && saved.segCount === p.segCount && saved.flags === p.flags) {
       // Seen before: continue where it stopped.
@@ -487,7 +497,7 @@ async function recvPush(texts: string[]): Promise<RecvState> {
   }
   await saveRecord(s, important || s.r.isComplete());
   await finishIfComplete(s);
-  return state(s);
+  return done();
 }
 
 // -------------------------------------------------------------------- inbox
@@ -527,14 +537,14 @@ const api: EngineApi = {
   sendStart,
   sendFrames: async (count) => sendFrames(count),
   sendStop,
-  sendTexts: async (count) => {
+  sendLink: async (count, binary, more) => {
     if (!sending) throw new Error("no transfer is being sent");
-    return sending.session.nextTexts(count) as string[];
+    return sending.session.nextLink(count, binary, more) as LinkBatch;
   },
   sendTextChannelUp: async (up) => sending?.session.setTextChannelUp(up),
   sendLinkOffer: async (payload, id) => sendLinkOffer(payload, id),
   sendAskForFeedback: async (on, bySound) => sending?.session.askForFeedback(on, bySound),
-  sendFeedback: async (text) => sendFeedback(text),
+  sendFeedback: async (text, linkTaken) => sendFeedback(text, linkTaken),
   sendReceiverSilent: async (forget) => sending?.session.receiverSilent(forget),
   recvStart,
   recvPush,
@@ -553,7 +563,8 @@ self.onmessage = (e: MessageEvent<{ id: number; method: keyof EngineApi; args: u
   queue = queue.then(async () => {
     try {
       const result = await (api[method] as (...a: unknown[]) => Promise<unknown>)(...args);
-      const transfer = method === "sendFrames" ? [(result as FrameBatch).data.buffer] : [];
+      const data = method === "sendFrames" || method === "sendLink" ? (result as FrameBatch | LinkBatch).data : undefined;
+      const transfer = data ? [data.buffer] : [];
       self.postMessage({ id, result }, transfer);
     } catch (err) {
       self.postMessage({ id, error: err instanceof Error ? err.message : String(err) });

@@ -17,6 +17,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use qrsend_core::crypto::{self, DeviceIdentity, DevicePublic, OpenMetaError, SharedSecrets};
+use qrsend_core::direct::{self, DirectSender, Record};
 use qrsend_core::fec;
 use qrsend_core::feedback::{self, Feedback, SenderNotice};
 use qrsend_core::frame::{self, FLAG_ENCRYPTED, Frame, META_INDEX};
@@ -590,12 +591,13 @@ impl SegmentSource for JsSource {
 #[wasm_bindgen]
 pub struct SendSession {
     sender: Sender<JsSource>,
-    /// A second stream over the same data for channels that carry text
-    /// instead of pictures, in symbols too large for a QR code (far less
-    /// coding work per byte). Created when first used.
-    wide: Option<Sender<JsSource>>,
+    /// A second stream over the same data while a network connection is up:
+    /// symbols too large for a QR code, each sent once (the connection loses
+    /// nothing).
+    direct: Option<DirectSender<JsSource>>,
+    /// Records handed out for the connection since it came up.
+    link_records: u64,
     source: JsSource,
-    redundancy: f64,
     params: QrParams,
     frames: u64,
     /// Whether the stream tells the receiver that feedback codes are read.
@@ -609,9 +611,13 @@ pub struct SendSession {
     extra_turn: usize,
 }
 
-/// Symbol size of the stream for text channels: a 1 MiB segment is 256
-/// symbols instead of thousands.
+/// Symbol size of the stream for a network connection: a 1 MiB segment is
+/// 256 symbols instead of thousands.
 const WIDE_SYMBOL_SIZE: usize = 4096;
+
+/// On a connection, every so many records one is a notice: a receiver that
+/// has not read one off the screen yet learns there that feedback is wanted.
+const LINK_NOTICE_EVERY: u64 = 256;
 
 /// How often something besides data replaces a data code: often while a link
 /// offer is waiting or the receiver has not answered yet (so it learns of it
@@ -666,9 +672,9 @@ impl SendSession {
         let source = JsSource(read);
         Ok(SendSession {
             sender: Sender::new(layout, source.clone(), config, None),
-            wide: None,
+            direct: None,
+            link_records: 0,
             source,
-            redundancy,
             params,
             frames: 0,
             asking: false,
@@ -685,7 +691,7 @@ impl SendSession {
         let w = self.params.modules();
         let mut out = Vec::with_capacity(n * w * w);
         for _ in 0..n {
-            let text = self.next_code(false)?;
+            let text = self.next_code()?;
             let m = qr::render(&text, self.params).map_err(js_err)?;
             out.extend(m.modules.into_iter().map(u8::from));
         }
@@ -693,16 +699,56 @@ impl SendSession {
         Ok(Uint8Array::from(&out[..]))
     }
 
-    /// The next `n` codes as text, for channels that carry text instead of
-    /// pictures (a network connection). These are frames of the same
-    /// transfer in much larger symbols than a QR code holds; a receiver
-    /// collects a segment in one size at a time, so a channel like this
-    /// takes over from the screen rather than adding to it.
-    #[wasm_bindgen(js_name = nextTexts)]
-    pub fn next_texts(&mut self, n: usize) -> JsResult<Array> {
-        let out = Array::new();
-        for _ in 0..n {
-            out.push(&self.next_code(true)?.into());
+    /// Up to `n` records for a network connection: `{ count, data }` with
+    /// `data` one message of packed records (frames in binary), or with
+    /// `binary` false `{ count, texts }`, the same as codes in text form.
+    /// These are frames of the same transfer in much larger symbols than a
+    /// QR code holds, each sent once. `count` is 0 when everything was sent
+    /// and the receiver's next feedback has to tell what else is wanted;
+    /// `more` asks for more regardless (the feedback is taking too long).
+    #[wasm_bindgen(js_name = nextLink)]
+    pub fn next_link(&mut self, n: usize, binary: bool, more: bool) -> JsResult<Object> {
+        let notice = self.asking.then(|| self.notice());
+        let Some(direct) = &mut self.direct else {
+            return Err(js_err("no connection is up"));
+        };
+        if more {
+            direct.send_more();
+        }
+        let mut packed = Vec::new();
+        let texts = Array::new();
+        let mut count = 0u32;
+        while (count as usize) < n {
+            let frame = match &notice {
+                Some(notice) if self.link_records.is_multiple_of(LINK_NOTICE_EVERY) => {
+                    if binary {
+                        direct::pack(&mut packed, notice.as_bytes());
+                    } else {
+                        texts.push(&notice.as_str().into());
+                    }
+                    None
+                }
+                _ => match direct.next_frame().map_err(js_err)? {
+                    Some(frame) => Some(frame),
+                    None => break,
+                },
+            };
+            if let Some(frame) = frame {
+                if binary {
+                    direct::pack(&mut packed, &frame.encode());
+                } else {
+                    texts.push(&frame.to_qr_text().into());
+                }
+            }
+            self.link_records += 1;
+            count += 1;
+        }
+        let out = Object::new();
+        set(&out, "count", count);
+        if binary {
+            set(&out, "data", Uint8Array::from(&packed[..]));
+        } else {
+            set(&out, "texts", texts);
         }
         Ok(out)
     }
@@ -713,12 +759,23 @@ impl SendSession {
         qrsend_core::base45::encoded_len(frame::OVERHEAD + self.sender.layout().symbol_size)
     }
 
-    /// Whether another channel is carrying `nextTexts` codes right now. While
-    /// it does, the picture codes start from the end of the transfer, so the
-    /// two channels bring different parts instead of the same ones.
+    /// Whether a network connection is carrying `nextLink` records right
+    /// now. While it does, the picture codes start from the end of the
+    /// transfer, so the two channels bring different parts instead of the
+    /// same ones. A connection that comes up (again) starts from what the
+    /// receiver is known to lack: what was on its way through an earlier
+    /// one may never have arrived.
     #[wasm_bindgen(js_name = setTextChannelUp)]
     pub fn set_text_channel_up(&mut self, up: bool) {
         self.sender.set_backwards(up);
+        self.link_records = 0;
+        self.direct = up.then(|| {
+            let layout = SessionLayout {
+                symbol_size: WIDE_SYMBOL_SIZE,
+                ..*self.sender.layout()
+            };
+            DirectSender::new(layout, self.source.clone(), self.sender.feedback())
+        });
     }
 
     /// Link codes (see `linkSplit`) to repeat in the stream until replaced;
@@ -773,13 +830,17 @@ impl SendSession {
     /// only what it still lacks is sent from now on. Returns
     /// `{ complete, remainingBytes, totalBytes, frames }`, or null when the
     /// text is not feedback for this transfer.
+    ///
+    /// `link_taken`: for feedback that came through the network connection,
+    /// the number of records the receiver had taken in from it by then.
     #[wasm_bindgen(js_name = applyFeedback)]
-    pub fn apply_feedback(&mut self, text: &str) -> JsResult<JsValue> {
+    pub fn apply_feedback(&mut self, text: &str, link_taken: Option<f64>) -> JsResult<JsValue> {
         let Ok(feedback) = Feedback::decode(text) else {
             return Ok(JsValue::NULL);
         };
-        if let Some(wide) = &mut self.wide {
-            wide.apply_feedback(feedback.clone());
+        if let Some(direct) = &mut self.direct {
+            let settled = link_taken.is_some_and(|n| n as u64 >= self.link_records);
+            direct.apply_feedback(&feedback, settled);
         }
         if !self.sender.apply_feedback(feedback) {
             return Ok(JsValue::NULL);
@@ -811,11 +872,44 @@ impl SendSession {
     /// true: for long (assume nothing, send everything again).
     #[wasm_bindgen(js_name = receiverSilent)]
     pub fn receiver_silent(&mut self, forget: bool) {
-        for sender in std::iter::once(&mut self.sender).chain(&mut self.wide) {
-            if forget {
-                sender.forget_receiver();
-            } else {
-                sender.receiver_quiet();
+        if forget {
+            self.sender.forget_receiver();
+            if self.direct.is_some() {
+                self.set_text_channel_up(true);
+            }
+        } else {
+            self.sender.receiver_quiet();
+        }
+    }
+}
+
+impl Receive {
+    fn push_text(&mut self, text: &str, out: &mut PushResult) {
+        if text.starts_with(feedback::NOTICE_PREFIX) {
+            if let Ok(notice) = SenderNotice::decode(text) {
+                self.feedback_for = notice.wants_feedback.then_some(notice.session_id);
+                self.feedback_by_sound = notice.wants_feedback && notice.hears_sound;
+            }
+        } else if let Ok(frame) = Frame::from_qr_text(text) {
+            self.push_frame(frame, out);
+        }
+    }
+
+    fn push_frame(&mut self, frame: Frame, out: &mut PushResult) {
+        for ev in self.rx.push(frame) {
+            match ev {
+                Event::Locked(p) => out.locked = Some(session_hex(p.session_id)),
+                Event::ForeignSession(id) => out.foreign = Some(session_hex(id)),
+                Event::Inconsistent => {}
+                Event::Completed { index, data } => {
+                    if index != META_INDEX && !self.matches_manifest(index, &data) {
+                        self.rx.reset(index);
+                        out.rejected.push(index);
+                    } else {
+                        out.completed.push(index);
+                        self.completed.push((index, data));
+                    }
+                }
             }
         }
     }
@@ -824,35 +918,20 @@ impl SendSession {
 impl SendSession {
     /// The next code of the stream: a data frame, or now and then something
     /// else the receiver should know (a notice, a link offer).
-    fn next_code(&mut self, wide: bool) -> JsResult<String> {
+    fn next_code(&mut self) -> JsResult<String> {
         if let Some(extra) = self.extra() {
             return Ok(extra);
         }
-        let sender = if wide {
-            self.wide_sender()
-        } else {
-            &mut self.sender
-        };
-        Ok(sender.next_frame().map_err(js_err)?.to_qr_text())
+        Ok(self.sender.next_frame().map_err(js_err)?.to_qr_text())
     }
 
-    fn wide_sender(&mut self) -> &mut Sender<JsSource> {
-        let (narrow, source, redundancy) = (&self.sender, &self.source, self.redundancy);
-        self.wide.get_or_insert_with(|| {
-            let layout = SessionLayout {
-                symbol_size: WIDE_SYMBOL_SIZE,
-                ..*narrow.layout()
-            };
-            let config = ScheduleConfig {
-                redundancy,
-                ..ScheduleConfig::default()
-            };
-            let mut wide = Sender::new(layout, source.clone(), config, None);
-            if let Some(feedback) = narrow.feedback() {
-                wide.apply_feedback(feedback.clone());
-            }
-            wide
-        })
+    fn notice(&self) -> String {
+        SenderNotice {
+            session_id: self.sender.layout().session_id,
+            wants_feedback: true,
+            hears_sound: self.hearing,
+        }
+        .encode()
     }
 
     fn extra(&mut self) -> Option<String> {
@@ -869,14 +948,7 @@ impl SendSession {
         let turn = self.extra_turn % count;
         self.extra_turn = self.extra_turn.wrapping_add(1);
         if self.asking && turn == 0 {
-            return Some(
-                SenderNotice {
-                    session_id: self.sender.layout().session_id,
-                    wants_feedback: true,
-                    hears_sound: self.hearing,
-                }
-                .encode(),
-            );
+            return Some(self.notice());
         }
         Some(self.link[turn - self.asking as usize].clone())
     }
@@ -979,6 +1051,8 @@ struct PushResult {
     completed: Vec<u32>,
     /// Segments that failed verification and will be received again.
     rejected: Vec<u32>,
+    /// Records in the message (`pushPacked`).
+    records: u32,
 }
 
 #[derive(Serialize)]
@@ -1147,30 +1221,22 @@ impl Receive {
     /// when the manifest is already known.
     pub fn push(&mut self, text: &str) -> JsResult<JsValue> {
         let mut out = PushResult::default();
-        if text.starts_with(feedback::NOTICE_PREFIX) {
-            if let Ok(notice) = SenderNotice::decode(text) {
-                self.feedback_for = notice.wants_feedback.then_some(notice.session_id);
-                self.feedback_by_sound = notice.wants_feedback && notice.hears_sound;
-            }
-            return to_js(&out);
-        }
-        let Ok(frame) = Frame::from_qr_text(text) else {
-            return to_js(&out);
-        };
-        for ev in self.rx.push(frame) {
-            match ev {
-                Event::Locked(p) => out.locked = Some(session_hex(p.session_id)),
-                Event::ForeignSession(id) => out.foreign = Some(session_hex(id)),
-                Event::Inconsistent => {}
-                Event::Completed { index, data } => {
-                    if index != META_INDEX && !self.matches_manifest(index, &data) {
-                        self.rx.reset(index);
-                        out.rejected.push(index);
-                    } else {
-                        out.completed.push(index);
-                        self.completed.push((index, data));
-                    }
-                }
+        self.push_text(text, &mut out);
+        to_js(&out)
+    }
+
+    /// Feeds one message of packed records from a network connection (see
+    /// `SendSession::nextLink`); the result is that of `push` for all of
+    /// them together, with `records` the number of records in the message.
+    #[wasm_bindgen(js_name = pushPacked)]
+    pub fn push_packed(&mut self, message: &[u8]) -> JsResult<JsValue> {
+        let mut out = PushResult::default();
+        for record in direct::unpack(message) {
+            out.records += 1;
+            match Record::parse(record) {
+                Record::Frame(frame) => self.push_frame(frame, &mut out),
+                Record::Text(text) => self.push_text(text, &mut out),
+                Record::Unreadable => {}
             }
         }
         to_js(&out)

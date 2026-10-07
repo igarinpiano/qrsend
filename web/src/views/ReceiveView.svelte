@@ -134,21 +134,30 @@
   let linkError = $state("");
   let lan: LanReceiver | undefined;
   let linkCodes: string[] = [];
+  let linkPacked: ArrayBuffer[] = [];
+  /** Messages handed to the engine in one go: about 2 MiB of data. */
+  const PACKED_PER_PUSH = 32;
   let linkTaken = 0;
   let linkAcked = 0;
   let feedbackSent = "";
+  let feedbackSentAt = 0;
+  const FEEDBACK_AGAIN_MS = 1000;
   let replyTimer: ReturnType<typeof setInterval> | undefined;
 
   /** Tells the sender how far we are: codes taken in ("A<n>") and the latest feedback. */
   function reply() {
     if (!lan?.connected) return;
     const lines: string[] = [];
-    if (linkTaken !== linkAcked) {
+    if (linkTaken > linkAcked) {
       linkAcked = linkTaken;
       lines.push(`A${linkTaken}`);
     }
-    if (st?.feedback && st.feedback !== feedbackSent) {
+    // Said again once a second while nothing changes (a large transfer takes
+    // a while to unpack): the sender must not take silence for a lost receiver.
+    const now = performance.now();
+    if (st?.feedback && (st.feedback !== feedbackSent || now - feedbackSentAt > FEEDBACK_AGAIN_MS)) {
       feedbackSent = st.feedback;
+      feedbackSentAt = now;
       lines.push(st.feedback);
     }
     if (lines.length) lan.send(lines.join("\n"));
@@ -178,10 +187,20 @@
         linkCodes.push(...codes);
         flush();
       },
+      packed: (message) => {
+        linkPacked.push(message);
+        flush();
+      },
       state: (state) => {
         linkState = state;
         clearInterval(replyTimer);
         if (state === "connected") {
+          // Counts start over with every connection (the sender's do), and
+          // the sender starts again from what is missing.
+          linkCodes = [];
+          linkPacked = [];
+          linkTaken = linkAcked = 0;
+          feedbackSent = "";
           answerUrl = "";
           replyTimer = setInterval(reply, REPLY_EVERY_MS);
         }
@@ -233,28 +252,32 @@
     if (pushing) return;
     pushing = true;
     try {
-      while ((queued.length || linkCodes.length) && !result && !error) {
-        // A connection delivers codes much faster than they can be taken in:
-        // take them in pieces, and tell the sender how far we are.
+      while ((queued.length || linkCodes.length || linkPacked.length) && !result && !error) {
+        // A connection delivers much faster than it can be taken in: take it
+        // in pieces, and tell the sender how far we are.
         const fromLink = linkCodes.splice(0, 64);
+        const packed = linkPacked.splice(0, PACKED_PER_PUSH);
+        const packedBytes = packed.reduce((n, m) => n + m.byteLength, 0);
         const batch = queued.concat(fromLink);
         queued = [];
         const pushedAt = performance.now();
-        apply(await engine.recvPush(batch));
-        linkTaken += fromLink.length;
+        const next = await engine.recvPush(batch, packed);
+        linkTaken += fromLink.length + (next.taken ?? 0);
+        apply(next);
         if (showStats) {
           const now = performance.now();
           const ease = (average: number, value: number) => (average === 0 ? value : average + (value - average) / 20);
           // Codes are Base45 text: three characters carry two bytes.
           for (const code of fromLink) linkBytes += (code.length * 2) / 3;
+          linkBytes += packedBytes;
           if (now - linkBytesAt > 1000) {
             if (linkBytesAt) intake.linkRate = ((linkBytes - linkBytesSeen) * 1000) / (now - linkBytesAt);
             linkBytesAt = now;
             linkBytesSeen = linkBytes;
           }
           intake.msPerBatch = ease(intake.msPerBatch, now - pushedAt);
-          intake.codesPerBatch = ease(intake.codesPerBatch, batch.length);
-          intake.waiting = linkCodes.length;
+          intake.codesPerBatch = ease(intake.codesPerBatch, batch.length + (next.taken ?? 0));
+          intake.waiting = linkCodes.length + linkPacked.length * 16;
         }
       }
     } catch (e) {
@@ -294,7 +317,7 @@
 
 {#if showStats && intake.msPerBatch > 0 && !result}
   <p class="small muted" data-testid="rx-stats">
-    Taking in: {intake.msPerBatch.toFixed(1)} ms per batch of {intake.codesPerBatch.toFixed(0)} codes · {intake.waiting} waiting
+    Taking in: {intake.msPerBatch.toFixed(1)} ms per batch of {intake.codesPerBatch.toFixed(0)} pieces · {intake.waiting} waiting
     {#if intake.linkRate > 0}· network {bytes(Math.round(intake.linkRate))}/s{/if}
   </p>
 {/if}

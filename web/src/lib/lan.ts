@@ -3,16 +3,18 @@
 // carries an offer, the receiver shows an answer. No server is involved and
 // no address outside the local network is contacted (no STUN/TURN).
 //
-// The channel carries the same codes as the screen, as text, and the
-// receiver's feedback in the other direction. It is one more way for codes to
-// travel, nothing else: if it never comes up or breaks, the screen and the
-// camera carry on.
+// The channel carries frames of the same transfer as the screen (in binary,
+// and in far larger pieces than a code can hold), and the receiver's feedback
+// in the other direction. It is one more way for the data to travel, nothing
+// else: if it never comes up or breaks, the screen and the camera carry on.
 import { linkParse, linkSplit } from "./core";
 
 export const LINK_PREFIX = "QSL1-";
 const KIND_OFFER = 1;
 const KIND_ANSWER = 2;
 const FEEDBACK_PREFIX = "QSF1-";
+/** The receiver's first line: it takes messages of packed binary records. */
+const HELLO_BINARY = "B1";
 
 /** What two peers must know about each other to connect. */
 interface Description {
@@ -174,32 +176,63 @@ export class LinkAssembler {
 
 export type LinkState = "offering" | "connected" | "closed";
 
-// Codes for this channel are about 6 KiB of text each (4 KiB of data).
-/** Codes per message; a message must stay well below 256 KiB. */
+// A record for this channel is a frame with 4 KiB of data.
+/** Records per message; a message must stay well below 256 KiB. */
 const BATCH = 16;
-// How many codes may be on their way, i.e. sent but not yet confirmed as
-// taken in by the receiver, is found out as the transfer goes, the way TCP
-// does: start small, double while the receiver keeps up, grow gently after
-// the first trouble, and fall back when nothing is confirmed for a while.
-// (Pouring everything in at once looks faster but is not: measured on one
-// machine, the first megabytes overran the network buffers, 359 packets were
-// dropped, and the connection needed 8 seconds to recover.)
+// How fast to send is found out as the transfer goes. The sender hands
+// records to the browser at a pace (records per second) instead of all at
+// once: the pace starts low and rises with every round of confirmations
+// while the receiver keeps up (by half, but by no more than 4 MiB/s a round),
+// and only gently once it is near a pace that caused trouble before.
+// "Keeps up" is judged by how much is on its way, i.e. sent but not yet
+// confirmed as taken in: more than a third of a second's worth means the
+// receiver or the network is slower than the pace, which then drops to what
+// actually got through.
+//
+// Why a pace and not just a limit on what is on its way: whatever is handed
+// over at once, the browser sends in one burst, and its own probing for the
+// network's capacity doubles those bursts until packets are lost. Measured on
+// one machine, that happened about a megabyte into every transfer and cost one
+// to three seconds of standstill each time (and with everything poured in at
+// once, 359 lost packets and 8 seconds). Fed at a pace, the connection is
+// never asked to carry more than it just did, plus a little. (The limit per
+// round is what keeps "a little" small at high speeds: the same test lost
+// packets again when the pace went from 23 to 115 MiB/s within half a second.)
+const RATE_START = 512;
+const RATE_MIN = 64;
+const RATE_MAX = 65536;
+/** The most the pace rises in one round of confirmations (records per second). */
+const RATE_STEP_MAX = 1024;
+/** What may be on its way at most, in seconds of the current pace. */
+const IN_FLIGHT_S = 0.5;
+/** More than this on its way: the pace is too high. */
+const BEHIND_S = 0.3;
+/** Less than this on its way: there is room for more. */
+const KEEPING_UP_S = 0.15;
+/** The least that may be on its way, whatever the pace. */
 const WINDOW_START = 32;
-const WINDOW_MAX = 4096;
 /** Without a confirmation for this long, what is on its way counts as stuck. */
 const QUIET_MS = 1500;
 /** Bytes handed to the browser but not yet to the network. */
 const BUFFER_HIGH = 512 << 10;
 /** A connection through which nothing was confirmed for this long counts as lost. */
 const STALL_MS = 8000;
+/**
+ * Everything was sent, the receiver still lacks something and does not say so in a way that settles it: after this
+ * long, send more regardless.
+ */
+const IDLE_MS = 3000;
 
 export interface SenderHooks {
   /** Codes of the offer to mix into the stream (`null`: none any more). */
   offer(payload: Uint8Array | null, id: number): void;
-  /** The next codes of the stream, as text. */
-  pull(count: number): Promise<string[]>;
-  /** A feedback code the receiver sent through the connection. */
-  feedback(code: string): void;
+  /**
+   * The next records of the stream: one binary message, or codes as text for a receiver that does not take binary.
+   * None when everything was sent and the receiver's feedback has to tell what else is wanted (`more`: regardless).
+   */
+  pull(count: number, binary: boolean, more: boolean): Promise<{ count: number; data?: Uint8Array; texts?: string[] }>;
+  /** A feedback code the receiver sent through the connection, having taken in `taken` records by then. */
+  feedback(code: string, taken: number): void;
   state(state: LinkState): void;
 }
 
@@ -210,12 +243,20 @@ export class LanSender {
   private id = Math.floor(Math.random() * 256);
   private sent = 0;
   private acked = 0;
-  private window = WINDOW_START;
-  /** Above this the window grows gently instead of doubling. */
-  private gentleFrom = WINDOW_MAX;
-  /** The window, not the browser's buffer, was what held sending back. */
-  private windowLimited = false;
+  /** Records per second handed to the browser at most. */
+  private rate = RATE_START;
+  /** Below this pace there was no trouble: up to it the pace rises fast. */
+  private ceiling = RATE_MAX;
+  /** Since the last look at the pace: it held sending back; the network did. */
+  private paced = false;
+  private networkBound = false;
+  private ratedAt = 0;
+  private freshSince = 0;
+  private tokens = 0;
+  private tokensAt = 0;
   private confirmedAt = 0;
+  /** The receiver takes binary messages (it said so). */
+  private binary = false;
   private stopped = false;
   private wake?: () => void;
 
@@ -247,7 +288,10 @@ export class LanSender {
         if (line.startsWith("A")) {
           this.confirmed(Number(line.slice(1)) || 0);
         } else if (line.startsWith(FEEDBACK_PREFIX)) {
-          this.hooks.feedback(line);
+          this.hooks.feedback(line, this.acked);
+          this.wake?.();
+        } else if (line === HELLO_BINARY) {
+          this.binary = true;
         }
       }
     };
@@ -272,36 +316,73 @@ export class LanSender {
     await pc.setRemoteDescription({ type: "answer", sdp: buildSdp(unpack(msg.payload), "answer") });
   }
 
-  /** The receiver has taken in `count` codes so far. */
+  private get window(): number {
+    return Math.max(WINDOW_START, Math.round(this.rate * IN_FLIGHT_S));
+  }
+
+  /** The receiver has taken in `count` records so far. */
   private confirmed(count: number): void {
     const fresh = count - this.acked;
     if (fresh <= 0) return;
     this.acked = count;
-    this.confirmedAt = performance.now();
-    if (this.windowLimited) {
-      // Doubling at first; later about one more message per round.
-      const step = this.window < this.gentleFrom ? fresh : Math.max(1, Math.round((BATCH * fresh) / this.window));
-      this.window = Math.min(WINDOW_MAX, this.window + step);
-      this.windowLimited = false;
+    const now = performance.now();
+    this.confirmedAt = now;
+    this.freshSince += fresh;
+    const elapsed = now - this.ratedAt;
+    if (elapsed >= 80) {
+      const onTheirWay = this.sent - this.acked;
+      if (onTheirWay > Math.max(2 * BATCH, this.rate * BEHIND_S)) {
+        // More goes in than comes out: down to what came out (a standstill
+        // says little about that, so not below a third at once).
+        const delivered = (this.freshSince * 1000) / elapsed;
+        this.ceiling = Math.max(RATE_MIN, this.rate * 0.7);
+        this.rate = Math.max(RATE_MIN, Math.min(this.rate, Math.max(delivered * 0.9, this.rate * 0.3)));
+      } else if (this.networkBound) {
+        // The browser could not pass on what it was given: this is the limit.
+        this.ceiling = Math.min(this.ceiling, this.rate);
+      } else if (this.paced && onTheirWay < Math.max(2 * BATCH, this.rate * KEEPING_UP_S)) {
+        const step = this.rate < this.ceiling ? this.rate * 0.5 : this.rate * 0.03;
+        this.rate = Math.min(RATE_MAX, this.rate + Math.min(Math.max(step, BATCH), RATE_STEP_MAX));
+      }
+      this.paced = this.networkBound = false;
+      this.freshSince = 0;
+      this.ratedAt = now;
     }
     this.wake?.();
   }
 
   /** Time spent, in milliseconds, since the connection came up (for the measurements display). */
-  private spent = { window: 0, buffer: 0, pull: 0, since: 0 };
+  private spent = { window: 0, buffer: 0, pace: 0, pull: 0, idle: 0, since: 0 };
 
   /** What the connection is doing: for finding out what holds a transfer back. */
-  get measurements(): { window: number; onTheirWay: number; sent: number; waitingForReceiver: number; waitingForNetwork: number; preparing: number } {
+  get measurements(): {
+    /** Records per second the sender allows itself at the moment. */
+    rate: number;
+    window: number;
+    onTheirWay: number;
+    sent: number;
+    binary: boolean;
+    waitingForReceiver: number;
+    waitingForNetwork: number;
+    holdingBack: number;
+    preparing: number;
+    nothingToSend: number;
+  } {
     const total = Math.max(performance.now() - this.spent.since, 1);
     return {
+      rate: Math.round(this.rate),
       window: this.window,
       onTheirWay: this.sent - this.acked,
       sent: this.sent,
+      binary: this.binary,
       // Shares of the time: the receiver has not confirmed enough, the browser
-      // has not handed enough to the network, the next codes are being made.
+      // has not handed enough to the network, the sender's own pace, the next
+      // records are being made, there is nothing to send.
       waitingForReceiver: this.spent.window / total,
       waitingForNetwork: this.spent.buffer / total,
+      holdingBack: this.spent.pace / total,
       preparing: this.spent.pull / total,
+      nothingToSend: this.spent.idle / total,
     };
   }
 
@@ -309,10 +390,25 @@ export class LanSender {
   private async pump(channel: RTCDataChannel): Promise<void> {
     this.sent = 0;
     this.acked = 0;
-    this.window = WINDOW_START;
-    this.gentleFrom = WINDOW_MAX;
-    this.confirmedAt = performance.now();
-    this.spent = { window: 0, buffer: 0, pull: 0, since: performance.now() };
+    this.rate = RATE_START;
+    this.ceiling = RATE_MAX;
+    this.paced = this.networkBound = false;
+    this.freshSince = 0;
+    this.tokens = BATCH;
+    this.confirmedAt = this.ratedAt = this.tokensAt = performance.now();
+    this.spent = { window: 0, buffer: 0, pace: 0, pull: 0, idle: 0, since: performance.now() };
+    const nap = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        this.wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      }).then(() => (this.wake = undefined));
+    // The receiver says at once whether it takes binary messages; one that
+    // does not say so (an older version) gets text.
+    if (!this.binary) await nap(300);
+    let idleSince = 0;
     while (this.channel === channel && channel.readyState === "open") {
       const waiting = this.sent - this.acked;
       const quiet = performance.now() - this.confirmedAt;
@@ -322,40 +418,57 @@ export class LanSender {
         this.giveUp(channel);
         return;
       }
-      if (waiting > 0 && quiet > QUIET_MS && this.window > WINDOW_START) {
-        // Too much was on its way at once: start small again, and be
-        // careful from half of what was too much.
-        this.gentleFrom = Math.max(WINDOW_START, this.window >> 1);
-        this.window = WINDOW_START;
+      if (waiting > 0 && quiet > QUIET_MS && this.rate > RATE_MIN && performance.now() - this.ratedAt > QUIET_MS) {
+        // Nothing comes out at all: whatever the pace was, it was too much.
+        this.ceiling = Math.max(RATE_MIN, this.rate / 2);
+        this.rate = Math.max(RATE_MIN, this.rate / 4);
+        this.ratedAt = performance.now();
       }
       const byWindow = waiting >= this.window;
       if (byWindow || channel.bufferedAmount > BUFFER_HIGH) {
-        if (byWindow) this.windowLimited = true;
+        if (!byWindow) this.networkBound = true;
         const waitingSince = performance.now();
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 100);
-          this.wake = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-        });
-        this.wake = undefined;
+        await nap(100);
         this.spent[byWindow ? "window" : "buffer"] += performance.now() - waitingSince;
         continue;
       }
-      let codes: string[];
+      // The pace: a message goes out when its share of time has come. (A
+      // little may be saved up, as timers are coarser than a message's share.)
+      const at = performance.now();
+      this.tokens = Math.min(this.tokens + ((at - this.tokensAt) * this.rate) / 1000, Math.max(BATCH, this.rate * 0.008));
+      this.tokensAt = at;
+      if (this.tokens < BATCH) {
+        this.paced = true;
+        await nap(Math.max(1, ((BATCH - this.tokens) * 1000) / this.rate));
+        this.spent.pace += performance.now() - at;
+        continue;
+      }
+      let batch: Awaited<ReturnType<SenderHooks["pull"]>>;
       const pullingSince = performance.now();
+      const more = idleSince > 0 && pullingSince - idleSince > IDLE_MS;
       try {
-        codes = await this.hooks.pull(BATCH);
+        batch = await this.hooks.pull(BATCH, this.binary, more);
       } catch {
         break;
       }
       this.spent.pull += performance.now() - pullingSince;
       if (this.channel !== channel || channel.readyState !== "open") break;
+      if (batch.count === 0) {
+        // Everything was sent once. What happens next is up to the receiver:
+        // its feedback tells what it still lacks (or that it has it all).
+        const idleFrom = performance.now();
+        if (!idleSince || more) idleSince = idleFrom;
+        await nap(100);
+        this.spent.idle += performance.now() - idleFrom;
+        continue;
+      }
+      idleSince = 0;
       // Nothing was waiting: the clock for "no confirmation" starts now.
       if (this.sent === this.acked) this.confirmedAt = performance.now();
-      channel.send(codes.join("\n"));
-      this.sent += codes.length;
+      if (batch.data) channel.send(batch.data as Uint8Array<ArrayBuffer>);
+      else channel.send((batch.texts ?? []).join("\n"));
+      this.sent += batch.count;
+      this.tokens -= batch.count;
     }
   }
 
@@ -370,6 +483,7 @@ export class LanSender {
     const { pc, channel } = this;
     this.pc = undefined;
     this.channel = undefined;
+    this.binary = false;
     this.wake?.();
     try {
       channel?.close();
@@ -388,8 +502,10 @@ export class LanSender {
 }
 
 export interface ReceiverHooks {
-  /** Codes that arrived through the connection. */
+  /** Codes that arrived through the connection as text (from a sender that does not send binary). */
   codes(codes: string[]): void;
+  /** A message of packed binary records that arrived through the connection. */
+  packed(message: ArrayBuffer): void;
   state(state: "connected" | "closed"): void;
 }
 
@@ -411,14 +527,22 @@ export class LanReceiver {
     pc.ondatachannel = (e) => {
       const channel = e.channel;
       this.channel = channel;
-      channel.onopen = () => this.hooks.state("connected");
-      channel.onmessage = (m) => this.hooks.codes(String(m.data).split("\n"));
+      channel.binaryType = "arraybuffer";
+      const opened = () => {
+        this.hooks.state("connected");
+        channel.send(HELLO_BINARY);
+      };
+      channel.onopen = opened;
+      channel.onmessage = (m) => {
+        if (m.data instanceof ArrayBuffer) this.hooks.packed(m.data);
+        else this.hooks.codes(String(m.data).split("\n"));
+      };
       channel.onclose = () => {
         if (this.channel !== channel) return;
         this.channel = undefined;
         this.hooks.state("closed");
       };
-      if (channel.readyState === "open") this.hooks.state("connected");
+      if (channel.readyState === "open") opened();
     };
     await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(unpack(offer.payload), "offer") });
     await pc.setLocalDescription(await pc.createAnswer());

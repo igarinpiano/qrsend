@@ -55,7 +55,9 @@ function call(method: string, args: unknown[]): Promise<unknown> {
   const id = nextId++;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    worker!.postMessage({ id, method, args });
+    // Binary messages (from a network connection) are handed over, not copied.
+    const buffers = args.flatMap((a) => (Array.isArray(a) ? a : [a])).filter((a) => a instanceof ArrayBuffer);
+    worker!.postMessage({ id, method, args }, buffers);
   });
 }
 

@@ -52,8 +52,8 @@
   function startLink() {
     lan ??= new LanSender(info.session, {
       offer: (payload, id) => void engine.sendLinkOffer(payload, id).catch(() => {}),
-      pull: (count) => engine.sendTexts(count),
-      feedback: (code) => hear(code),
+      pull: (count, binary, more) => engine.sendLink(count, binary, more),
+      feedback: (code, taken) => hear(code, taken),
       state: (state) => {
         link = state;
         engine.sendTextChannelUp(state === "connected").catch(() => {});
@@ -94,11 +94,11 @@
     if (text) hear(text);
   }
 
-  /** A feedback code from the receiver, by whatever way it came. */
-  function hear(text: string) {
+  /** A feedback code from the receiver, by whatever way it came (`linkTaken`: through the connection). */
+  function hear(text: string, linkTaken?: number) {
     if (finished) return;
     engine
-      .sendFeedback(text)
+      .sendFeedback(text, linkTaken)
       .then((r) => {
         if (!r) return;
         report = r;
@@ -136,7 +136,7 @@
     }
     if (soundFeature) {
       try {
-        ear ??= new Ear(hear);
+        ear ??= new Ear((code) => hear(code));
         await ear.start();
         hearing = true;
       } catch (e) {
@@ -320,9 +320,10 @@
       <div class="info small" data-testid="tx-stats">
         {#if linkStats}
           <span>
-            Network: {linkStats.sent} codes sent, {linkStats.onTheirWay} of {linkStats.window} on their way · waiting for the
-            receiver {percent(linkStats.waitingForReceiver)}, for the network {percent(linkStats.waitingForNetwork)}, preparing
-            {percent(linkStats.preparing)}
+            Network: {linkStats.sent} pieces sent{linkStats.binary ? "" : " as text"}, {linkStats.onTheirWay} on their way · pace
+            {bytes(linkStats.rate * 4096)}/s · waiting for the receiver {percent(linkStats.waitingForReceiver)}, for the network
+            {percent(linkStats.waitingForNetwork)}, holding back {percent(linkStats.holdingBack)}, preparing
+            {percent(linkStats.preparing)}, nothing to send {percent(linkStats.nothingToSend)}
           </span>
         {/if}
         {#if eyeStats}
