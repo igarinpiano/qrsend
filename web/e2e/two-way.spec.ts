@@ -38,6 +38,8 @@ test("two-way: the sender stops once the receiver's feedback says everything arr
     await sender.getByLabel("Density").selectOption("low");
     await sender.getByRole("button", { name: "Start sending" }).click();
     // Its stream now carries the data plus a notice asking for feedback.
+    // Slow enough that the capture misses no frame: the notice is only in some of them.
+    for (let i = 0; i < 4; i++) await sender.getByRole("button", { name: "Slower" }).click();
     const frames = await capturePlayer(sender, 24);
     expect(frames.length).toBeGreaterThan(16);
     writeY4m(codesVideo, frames);
