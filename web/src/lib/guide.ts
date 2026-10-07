@@ -63,6 +63,12 @@ const FOLLOW = 1 / 8;
 
 const median = (values: number[]) => [...values].sort((a, b) => a - b)[values.length >> 1];
 
+/** Camera pixels per dot of the codes in a picture (0 when none was located). */
+export function dotSize(look: Look): number {
+  if (look.boxes.length === 0) return 0;
+  return median(look.boxes.map((b) => (b.x1 - b.x0 + (b.y1 - b.y0)) / 2 / modulesFor(b.chars)));
+}
+
 export class Guide {
   private scores: Record<Advice, number> = { closer: 0, back: 0, fewer: 0, blurred: 0 };
   private shown: Advice | undefined;
@@ -74,7 +80,7 @@ export class Guide {
     if (look.boxes.length) {
       // Whatever was read was sharp enough to read.
       this.sharpest = Math.max(this.sharpest * 0.995, look.sharp);
-      const dot = median(look.boxes.map((b) => (b.x1 - b.x0 + (b.y1 - b.y0)) / 2 / modulesFor(b.chars)));
+      const dot = dotSize(look);
       const x0 = Math.min(...look.boxes.map((b) => b.x0));
       const y0 = Math.min(...look.boxes.map((b) => b.y0));
       const x1 = Math.max(...look.boxes.map((b) => b.x1));

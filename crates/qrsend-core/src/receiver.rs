@@ -70,6 +70,8 @@ pub struct Receiver {
     size_bytes: HashMap<usize, u64>,
     distinct: u64,
     feedback_seq: u32,
+    /// What the caller's camera makes of the codes, for the feedback.
+    camera: feedback::Camera,
 }
 
 /// How many recent frames are remembered to recognize repeats.
@@ -124,6 +126,7 @@ impl Receiver {
             size_bytes: HashMap::new(),
             distinct: 0,
             feedback_seq: 0,
+            camera: feedback::Camera::default(),
         }
     }
 
@@ -244,6 +247,12 @@ impl Receiver {
         Some(out)
     }
 
+    /// What the camera reading the codes makes of them (see
+    /// [`feedback::Camera`]); passed on to the sender in the feedback.
+    pub fn set_camera(&mut self, camera: feedback::Camera) {
+        self.camera = camera;
+    }
+
     /// What to tell the sender (None before a session is locked). `complete`
     /// is the caller's verdict: every segment received, verified and stored.
     pub fn feedback(&mut self, complete: bool) -> Option<Feedback> {
@@ -259,6 +268,7 @@ impl Receiver {
             remaining_symbols: self.progress().map_or(0, |p| p.remaining_symbols),
             symbol_size: self.progress().map_or(0, |p| p.symbol_size as u32),
             missing,
+            camera: self.camera,
         })
     }
 

@@ -1,7 +1,7 @@
 // Feeds pictures to the decoding worker, one at a time: live from a camera
 // or a captured screen, or frame by frame from a video file (a recording of a
 // sender's screen).
-import { Guide, type Advice, type Look } from "./guide";
+import { Guide, dotSize, type Advice, type Look } from "./guide";
 import ScanWorker from "./scan.worker?worker";
 import { recoverFromLoadFailure } from "./update";
 
@@ -20,6 +20,8 @@ export interface ScanStats {
   msWithout: number;
   /** With `guide(true)`: advice for whoever holds the camera. */
   advice?: Advice;
+  /** Camera pixels per dot of the codes, lately (0 until codes were located). */
+  dot: number;
 }
 
 /** A running average that follows the last twenty or so values. */
@@ -40,7 +42,7 @@ export class Scanner {
   /** Counts stop() calls, so slow async steps notice they were superseded. */
   private turn = 0;
   private decoded?: () => void;
-  stats: ScanStats = { frames: 0, codes: 0, engine: "…", width: 0, height: 0, rate: 0, msWithCodes: 0, msWithout: 0 };
+  stats: ScanStats = { frames: 0, codes: 0, engine: "…", width: 0, height: 0, rate: 0, msWithCodes: 0, msWithout: 0, dot: 0 };
   private readAt = 0;
 
   constructor(
@@ -65,6 +67,9 @@ export class Scanner {
       recoverFromLoadFailure().catch(() => {});
     };
     this.worker.onerror = loadFailed;
+    // Where the codes are in the picture: for advice on holding the camera,
+    // and for telling a sender that adjusts to it how large they come out.
+    this.worker.postMessage({ guide: true });
     this.worker.onmessage = (
       e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean; ms?: number; error?: string; look?: Look }>,
     ) => {
@@ -82,6 +87,8 @@ export class Scanner {
       this.stats.engine = e.data.engine;
       this.stats.colored = !!e.data.colored;
       this.stats.advice = e.data.look && this.adviser ? this.adviser.notice(e.data.look) : undefined;
+      const dot = e.data.look ? dotSize(e.data.look) : 0;
+      if (dot > 0) this.stats.dot = follow(this.stats.dot, dot);
       if (e.data.texts.length) this.onTexts(e.data.texts);
       this.onStats?.({ ...this.stats });
       this.decoded?.();
@@ -93,7 +100,6 @@ export class Scanner {
   /** Whether to work out advice on holding the camera (`stats.advice`). */
   guide(on: boolean): void {
     this.adviser = on ? new Guide() : undefined;
-    this.worker.postMessage({ guide: on });
   }
 
   static async cameras(): Promise<MediaDeviceInfo[]> {

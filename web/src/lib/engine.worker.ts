@@ -429,9 +429,14 @@ async function recvStart(session?: string): Promise<RecvState> {
 
 type Pushed = { locked?: string; foreign?: string; rejected: number[]; records: number };
 
-async function recvPush(texts: string[], packed: ArrayBuffer[] = []): Promise<RecvState> {
+async function recvPush(
+  texts: string[],
+  packed: ArrayBuffer[] = [],
+  camera?: { reads: number; dot: number },
+): Promise<RecvState> {
   const s = receiving;
   if (!s) throw new Error("not receiving");
+  if (camera) s.r.setCamera(camera.reads, camera.dot);
   if (s.result || s.error) {
     // The data is in, but the sender may only now say that it reads
     // feedback: it still has to learn that everything arrived.
@@ -546,8 +551,8 @@ const api: EngineApi = {
   sendAskForFeedback: async (on, bySound) => sending?.session.askForFeedback(on, bySound),
   sendFeedback: async (text, linkTaken) => sendFeedback(text, linkTaken),
   sendReceiverSilent: async (forget) => sending?.session.receiverSilent(forget),
-  sendTune: async (levels, fps, level) =>
-    sending?.session.setTuner(new Uint32Array(levels), fps, level, performance.now() / 1000),
+  sendTune: async (levels, scales, fps, level) =>
+    sending?.session.setTuner(new Uint32Array(levels), new Float64Array(scales), fps, level, performance.now() / 1000),
   recvStart,
   recvPush,
   recvStop,

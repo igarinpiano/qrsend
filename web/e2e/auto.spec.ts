@@ -16,7 +16,7 @@ test("automatic speed: the sender shows more codes once the feedback says they a
     await cameraFrom(sender, "to-sender");
     await enablePreview(sender, /Two-way transfer/, /Automatic speed/);
     await sender.goto("./#/send");
-    // More than one code at a time could carry in the time the test takes.
+    // More than one code at a time would carry in the time the test takes.
     const data = crypto.randomBytes(Number(process.env.QRSEND_AUTO_KB ?? 300) * 1000);
     await sender.locator('input[type="file"]').first().setInputFiles({ name: "auto.bin", mimeType: "application/octet-stream", buffer: data });
     await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
@@ -33,26 +33,32 @@ test("automatic speed: the sender shows more codes once the feedback says they a
     await expect(receiver.getByTestId("feedback")).toBeVisible({ timeout: 30_000 });
     await broadcast(receiver, "to-sender", '[data-testid="feedback"]', 150, 2);
 
-    // The receiver reads everything shown, so there is room for more: within
-    // a few tries the sender shows several codes at once, or shows them faster.
+    // The receiver reads everything shown, so there is room for more: the
+    // sender shows several codes at once, and shows them faster.
     await expect(sender.getByTestId("receiver-report")).toBeVisible({ timeout: 30_000 });
     await expect(sender.getByTestId("fps")).toContainText("auto");
-    const codesPerSecond = async () => {
+    const shown = async () => {
       const text = await sender.locator(".bar .info").first().innerText();
       const [, cols, rows] = /screen (\d+)×(\d+)/.exec(text) ?? [];
-      return Number(cols) * Number(rows) * parseFloat(await sender.getByTestId("fps").innerText());
+      const perPicture = Number(cols) * Number(rows);
+      return { perPicture, perSecond: perPicture * parseFloat(await sender.getByTestId("fps").innerText()) };
     };
-    await expect.poll(codesPerSecond, { timeout: 60_000 }).toBeGreaterThan(20);
+    // The receiver also reports how its camera sees the codes (how many
+    // pictures it reads, how large the dots come out), which takes the sender
+    // most of the way in one step instead of many small ones. (Step by step
+    // it took eight seconds to get from one code per picture to three.)
+    await expect.poll(async () => (await shown()).perPicture, { timeout: 5_000 }).toBeGreaterThanOrEqual(3);
+    await expect.poll(async () => (await shown()).perSecond, { timeout: 60_000 }).toBeGreaterThan(20);
     if (process.env.QRSEND_TRACE) {
       for (let i = 0; i < 25; i++) {
         console.log(i * 2, (await sender.locator(".bar .info").first().innerText()).replace(/\s+/g, " "), "|", await sender.getByTestId("fps").innerText());
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
-    // And the transfer goes on through the changes.
-    const left = () => receiver.getByTestId("remaining").innerText();
-    const before = await left();
-    await expect.poll(left, { timeout: 30_000 }).not.toBe(before);
+    // And the transfer arrives through all the changes, after which the
+    // sender stops by itself.
+    await expect(receiver.getByTestId("received-file")).toHaveText(["auto.bin"], { timeout: 60_000 });
+    await expect(sender.getByText("The other device has everything.")).toBeVisible({ timeout: 30_000 });
   } finally {
     await browser.close();
   }

@@ -6,9 +6,16 @@
 
   let {
     ontexts,
+    oncamera,
     active = true,
     allowFile = false,
-  }: { ontexts: (texts: string[]) => void; active?: boolean; allowFile?: boolean } = $props();
+  }: {
+    ontexts: (texts: string[]) => void;
+    /** What the camera makes of the codes: pictures read per second, camera pixels per dot. */
+    oncamera?: (reads: number, dot: number) => void;
+    active?: boolean;
+    allowFile?: boolean;
+  } = $props();
 
   let video: HTMLVideoElement;
   let scanner: Scanner | undefined;
@@ -88,7 +95,15 @@
   let autoStarted = false;
 
   onMount(() => {
-    scanner = new Scanner(video, (t) => ontexts(t), (s) => (stats = s));
+    scanner = new Scanner(
+      video,
+      (t) => ontexts(t),
+      (s) => {
+        stats = s;
+        // Only a camera's numbers say something about the camera.
+        if (!onScreen && !fileProgress) oncamera?.(s.rate, s.dot);
+      },
+    );
     scanner.guide(guideFeature);
     ready = true;
     return () => scanner?.dispose();

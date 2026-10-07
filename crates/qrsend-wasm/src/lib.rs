@@ -815,16 +815,24 @@ impl SendSession {
 
     /// Lets the session choose how the codes are shown, from the receiver's
     /// feedback: `levels` are the codes per picture of every layout the
-    /// screen offers (fewest first), `fps` and `level` the setting to start
-    /// from. `applyFeedback` then reports the setting to use. An empty
-    /// `levels` turns this off.
+    /// screen offers (fewest first), `scales` the size of a dot on the
+    /// screen in each of them, `fps` and `level` the setting to start from.
+    /// `applyFeedback` then reports the setting to use. An empty `levels`
+    /// turns this off.
     #[wasm_bindgen(js_name = setTuner)]
-    pub fn set_tuner(&mut self, levels: Vec<u32>, fps: f64, level: usize, now: f64) {
+    pub fn set_tuner(
+        &mut self,
+        levels: Vec<u32>,
+        scales: Vec<f64>,
+        fps: f64,
+        level: usize,
+        now: f64,
+    ) {
         let setting = tune::Setting { fps, level };
         match &mut self.tuner {
             _ if levels.is_empty() => self.tuner = None,
             Some(tuner) if tuner.levels() == levels => tuner.set(now, setting),
-            _ => self.tuner = Some(tune::Tuner::new(levels, setting)),
+            _ => self.tuner = Some(tune::Tuner::new(levels, setting).with_scales(scales)),
         }
     }
 
@@ -883,7 +891,12 @@ impl SendSession {
         // unless a connection is bringing codes of its own.
         let setting = match &mut self.tuner {
             Some(tuner) if self.direct.is_none() && !f.complete => {
-                tuner.observe(now, self.frames, f.frames)
+                // What the receiver's camera reports can settle a lot at
+                // once; after that, the count of codes read guides the rest.
+                let (reads, dot) = (f.camera.reads_tenths, f.camera.dot_tenths);
+                tuner
+                    .hint(now, reads as f64 / 10.0, dot as f64 / 10.0)
+                    .or_else(|| tuner.observe(now, self.frames, f.frames))
             }
             _ => None,
         };
@@ -1430,6 +1443,18 @@ impl Receive {
     #[wasm_bindgen(js_name = isComplete)]
     pub fn is_complete(&self) -> bool {
         self.rx.is_complete() && self.manifest.is_some()
+    }
+
+    /// What the camera reading the codes makes of them: pictures read per
+    /// second, and camera pixels per dot of the codes (0: unknown). Goes
+    /// into the feedback, for a sender that adjusts to it.
+    #[wasm_bindgen(js_name = setCamera)]
+    pub fn set_camera(&mut self, reads: f64, dot: f64) {
+        let tenths = |v: f64| (v * 10.0).round().clamp(0.0, 10_000.0) as u32;
+        self.rx.set_camera(feedback::Camera {
+            reads_tenths: tenths(reads),
+            dot_tenths: tenths(dot),
+        });
     }
 
     /// A feedback code (`QSF1-…`) telling the sender what is still missing;

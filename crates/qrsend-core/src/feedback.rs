@@ -96,6 +96,18 @@ pub struct Feedback {
     /// Missing segments as sorted, non-adjacent `(first, count)` ranges
     /// (0 = meta).
     pub missing: Vec<(u32, u32)>,
+    /// What the receiver's camera makes of the codes (all zero: not told).
+    pub camera: Camera,
+}
+
+/// How the receiver's camera sees the sender's screen, so that the sender
+/// can choose speed and density at once instead of feeling its way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Camera {
+    /// Pictures read per second, in tenths.
+    pub reads_tenths: u32,
+    /// Camera pixels per dot of the codes, in tenths.
+    pub dot_tenths: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -194,6 +206,10 @@ impl Feedback {
             end = start as u64 + len as u64;
         }
         put_leb(&mut data, self.symbol_size as u64);
+        if self.camera != Camera::default() {
+            put_leb(&mut data, self.camera.reads_tenths as u64);
+            put_leb(&mut data, self.camera.dot_tenths as u64);
+        }
         let check = crc32fast::hash(&data) as u16;
         data.extend_from_slice(&check.to_le_bytes());
         data
@@ -230,6 +246,14 @@ impl Feedback {
         } else {
             0
         };
+        let camera = if pos < payload.len() {
+            Camera {
+                reads_tenths: get_leb(payload, &mut pos)? as u32,
+                dot_tenths: get_leb(payload, &mut pos)? as u32,
+            }
+        } else {
+            Camera::default()
+        };
         // Anything after that belongs to a later revision of the format.
         Ok(Feedback {
             session_id,
@@ -240,6 +264,7 @@ impl Feedback {
             remaining_symbols,
             symbol_size,
             missing,
+            camera,
         })
     }
 }
@@ -258,6 +283,7 @@ mod tests {
             remaining_symbols: 7_890,
             symbol_size: 181,
             missing: vec![(0, 1), (5, 3), (1000, 24)],
+            camera: Camera::default(),
         }
     }
 
@@ -337,7 +363,14 @@ mod tests {
 
     #[test]
     fn ignores_fields_added_later() {
-        let f = sample();
+        let f = Feedback {
+            camera: Camera {
+                reads_tenths: 143,
+                dot_tenths: 52,
+            },
+            ..sample()
+        };
+        assert_eq!(Feedback::decode(&f.encode()).unwrap(), f);
         let data = base45::decode(f.encode().strip_prefix(PREFIX).unwrap()).unwrap();
         let mut longer = data[..data.len() - 2].to_vec();
         longer.extend_from_slice(&[1, 2, 3]);
@@ -345,7 +378,11 @@ mod tests {
         longer.extend_from_slice(&check.to_le_bytes());
         let text = format!("{PREFIX}{}", base45::encode(&longer));
         assert_eq!(Feedback::decode(&text).unwrap(), f);
-        // And a code without the symbol size (the first draft) still reads.
+        // A code without what the camera sees (0.1.2) still reads…
+        assert_eq!(Feedback::decode(&sample().encode()).unwrap(), sample());
+        // …and so does one without the symbol size (the first draft).
+        let data = base45::decode(sample().encode().strip_prefix(PREFIX).unwrap()).unwrap();
+        let f = sample();
         let ranges_end = data.len() - 2 - 2;
         let mut shorter = data[..ranges_end].to_vec();
         let check = crc32fast::hash(&shorter) as u16;

@@ -20,6 +20,8 @@
   let failure = $state("");
   let rate = $state(0);
   let queued: string[] = [];
+  /** What the camera makes of the codes, for a sender that adjusts to it. */
+  let camera: { reads: number; dot: number } | undefined;
   let pushing = false;
   const meter = new RateMeter();
 
@@ -261,7 +263,7 @@
         const batch = queued.concat(fromLink);
         queued = [];
         const pushedAt = performance.now();
-        const next = await engine.recvPush(batch, packed);
+        const next = await engine.recvPush(batch, packed, camera);
         linkTaken += fromLink.length + (next.taken ?? 0);
         apply(next);
         if (showStats) {
@@ -312,7 +314,7 @@
 <h2>Receive</h2>
 
 {#if watching}
-  <Camera {ontexts} {active} allowFile={!result} />
+  <Camera {ontexts} oncamera={(reads, dot) => (camera = { reads, dot })} {active} allowFile={!result} />
 {/if}
 
 {#if showStats && intake.msPerBatch > 0 && !result}

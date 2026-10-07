@@ -88,6 +88,8 @@
   // legible; the level is an index into them.
   const autoFeature = featureOn("autoTune") && featureOn("twoWay");
   let layouts: [number, number][] = [];
+  /** Device pixels per dot of the codes in each layout. */
+  let dots: number[] = [];
   let level = $state(0);
   let readShare = $state<number | undefined>();
 
@@ -106,13 +108,15 @@
     const wanted = grid > 0 ? grid * grid : Infinity;
     const count = layouts.length ? layouts[level][0] * layouts[level][1] : wanted;
     layouts = found;
+    const { modules, quiet } = info;
+    dots = found.map(([c, r]) => Math.min(w / (c * (modules + quiet) + quiet), h / (r * (modules + quiet) + quiet)));
     level = Math.max(0, found.filter(([c, r]) => c * r <= count).length - 1);
     tune();
   }
 
   function tune() {
     if (!autoFeature || layouts.length === 0) return;
-    engine.sendTune(layouts.map(([c, r]) => c * r * layers), fps, level).catch(() => {});
+    engine.sendTune(layouts.map(([c, r]) => c * r * layers), dots, fps, level).catch(() => {});
   }
 
   let heardAt = 0;

@@ -170,18 +170,21 @@ export interface EngineApi {
   sendFeedback(text: string, linkTaken?: number): Promise<ReceiverReport | null>;
   /**
    * Lets the engine choose speed and layout from the receiver's feedback. `levels`: codes per picture of every
-   * layout the screen offers, fewest first (empty: off); `fps` and `level`: the setting in use. `sendFeedback` then
-   * reports the setting to switch to.
+   * layout the screen offers, fewest first (empty: off); `scales`: the size of a dot on the screen in each of them;
+   * `fps` and `level`: the setting in use. `sendFeedback` then reports the setting to switch to.
    */
-  sendTune(levels: number[], fps: number, level: number): Promise<void>;
+  sendTune(levels: number[], scales: number[], fps: number, level: number): Promise<void>;
   /**
    * No feedback is being read. `forget` false: for a moment (keep leaving out what the receiver has, stop waiting
    * for its answers); true: for long (assume nothing, send everything again).
    */
   sendReceiverSilent(forget: boolean): Promise<void>;
   recvStart(session?: string): Promise<RecvState>;
-  /** Codes read by a camera (text) and messages from a network connection (packed records). */
-  recvPush(texts: string[], packed?: ArrayBuffer[]): Promise<RecvState>;
+  /**
+   * Codes read by a camera (text) and messages from a network connection (packed records). `camera`: what the
+   * camera makes of the codes at the moment (pictures read per second, camera pixels per dot), for the feedback.
+   */
+  recvPush(texts: string[], packed?: ArrayBuffer[], camera?: { reads: number; dot: number }): Promise<RecvState>;
   recvStop(): Promise<void>;
   inboxList(): Promise<SessionRecord[]>;
   inboxOpen(session: string): Promise<RecvResult>;

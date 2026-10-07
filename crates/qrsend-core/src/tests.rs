@@ -285,6 +285,7 @@ fn feedback_for_another_session_is_ignored() {
         remaining_symbols: 0,
         symbol_size: 0,
         missing: vec![],
+        camera: Default::default(),
     };
     assert!(!sender.apply_feedback(other.clone()));
     assert!(sender.feedback().is_none());

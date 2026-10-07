@@ -38,6 +38,8 @@ const SETTLE_S: f64 = 1.0;
 const MEASURE_S: f64 = 2.5;
 /// A change has to bring this much more to be kept: less is noise.
 const GAIN: f64 = 1.05;
+/// Camera pixels per dot at which codes read without trouble.
+const COMFORTABLE_DOT: f64 = 4.0;
 /// Feedback missing for this long: what was being measured is thrown away.
 const GAP_S: f64 = 1.5;
 /// Evaluations a move that did not help is left alone, at first and at most.
@@ -67,6 +69,10 @@ pub struct Tuner {
     next_move: usize,
     /// Share of the shown codes the receiver read, at the last evaluation.
     ratio: f64,
+    /// Size of a dot on the screen at each level (any unit), when known.
+    scales: Vec<f64>,
+    /// The setting was changed since the start (by a trial or by hand).
+    touched: bool,
 }
 
 impl Tuner {
@@ -89,7 +95,50 @@ impl Tuner {
             rest: [(0, REST); 4],
             next_move: 0,
             ratio: 1.0,
+            scales: Vec::new(),
+            touched: false,
         }
+    }
+
+    /// Tells how large a dot of the codes is on the screen at each level (in
+    /// any unit: only the proportions matter). With this, what the
+    /// receiver's camera reports can be turned into a setting at once (see
+    /// `hint`).
+    pub fn with_scales(mut self, scales: Vec<f64>) -> Self {
+        if scales.len() == self.levels.len() {
+            self.scales = scales;
+        }
+        self
+    }
+
+    /// What the receiver's camera makes of the current setting: it reads
+    /// `reads` pictures a second, and a dot of the codes comes out `dot`
+    /// camera pixels wide. Before anything has been tried, that is enough to
+    /// go straight to a setting that should work, instead of climbing there
+    /// step by step: as many pictures as the camera reads, and the densest
+    /// layout whose dots stay comfortably readable. Returns the setting to
+    /// switch to, if it changes; the search then carries on from there.
+    pub fn hint(&mut self, now: f64, reads: f64, dot: f64) -> Option<Setting> {
+        if self.touched || self.scales.is_empty() || reads <= 0.0 || dot <= 0.0 {
+            return None;
+        }
+        self.touched = true;
+        let here = self.scales[self.setting.level];
+        let level = (0..self.levels.len())
+            .rev()
+            .find(|&l| dot * self.scales[l] / here >= COMFORTABLE_DOT)
+            .unwrap_or(0)
+            // Never sparser than what already works.
+            .max(self.setting.level);
+        let next = Setting {
+            fps: (reads * 0.9).clamp(MIN_FPS, MAX_FPS).max(self.setting.fps),
+            level,
+        };
+        if next == self.setting {
+            return None;
+        }
+        self.set(now, next);
+        Some(next)
     }
 
     pub fn levels(&self) -> &[u32] {
@@ -115,6 +164,7 @@ impl Tuner {
         self.start = None;
         self.baseline = None;
         self.trial = None;
+        self.touched = true;
     }
 
     fn apply(&self, m: Move) -> Option<Setting> {
@@ -217,6 +267,7 @@ impl Tuner {
         }
 
         let (m, next) = self.pick()?;
+        self.touched = true;
         self.trial = Some((m, self.setting));
         self.setting = next;
         self.since = now;
@@ -341,6 +392,35 @@ mod tests {
             "{rate} of {best} at {:?}",
             tuner.setting()
         );
+    }
+
+    #[test]
+    fn a_camera_report_takes_it_there_at_once() {
+        // Dots on the screen: 8 px with one code, down to 2 px with sixteen.
+        let scales = vec![8.0, 6.0, 5.0, 4.0, 3.0, 2.5, 2.0];
+        let start = Setting {
+            fps: 10.0,
+            level: 0,
+        };
+        let mut tuner = Tuner::new(LEVELS.to_vec(), start).with_scales(scales.clone());
+        // The camera reads 20 pictures a second and sees a dot as 12 pixels:
+        // at level 4 (3 px on the screen) it would still be 4.5.
+        let next = tuner.hint(1.0, 20.0, 12.0).unwrap();
+        assert_eq!(
+            next,
+            Setting {
+                fps: 18.0,
+                level: 4
+            }
+        );
+        // Only once: later reports belong to settings tried since.
+        assert_eq!(tuner.hint(2.0, 30.0, 30.0), None);
+        // A camera that barely copes changes nothing (never down from here).
+        let mut tuner = Tuner::new(LEVELS.to_vec(), start).with_scales(scales);
+        assert_eq!(tuner.hint(1.0, 6.0, 3.0), None);
+        // Without the sizes of the layouts there is nothing to work out.
+        let mut tuner = Tuner::new(LEVELS.to_vec(), start);
+        assert_eq!(tuner.hint(1.0, 20.0, 12.0), None);
     }
 
     #[test]
