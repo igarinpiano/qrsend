@@ -88,6 +88,9 @@ export interface RecvInfo {
   /** Codes the whole transfer takes (without redundancy), and about how many more it takes to finish. */
   total_codes: number | null;
   remaining_codes: number | null;
+  /** While the file list is on its way: codes of it read, and needed. */
+  list_have: number | null;
+  list_need: number | null;
 }
 
 /** A received entry inside the session's output file. */

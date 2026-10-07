@@ -611,6 +611,8 @@ pub struct SendSession {
     link: Vec<String>,
     /// Codes shown since something besides data had to be said.
     since_extras: u64,
+    /// When the offer to connect went out (milliseconds, as `Date.now`).
+    offer_since: f64,
     /// When the next code besides data is due.
     extra_turn_due: Recurring,
     extra_turn: usize,
@@ -624,11 +626,28 @@ const WIDE_SYMBOL_SIZE: usize = 4096;
 /// has not read one off the screen yet learns there that feedback is wanted.
 const LINK_NOTICE_EVERY: u64 = 256;
 
+// A sender cannot see when a receiver starts reading. One that is ready from
+// the first code gets everything said at the start; one that turns up half a
+// minute later used to wait a long time for the file list and for the offer
+// to connect (found on real devices). So while an offer waits to be taken,
+// the stream turns to newcomers again and again: four seconds in every
+// twelve, the offer and the file list come about twice and three times as
+// often.
+const GREETING_CYCLE_MS: f64 = 12_000.0;
+const GREETING_MS: f64 = 4_000.0;
+
+/// Whether the stream is turned to newcomers at the moment; `waiting_ms` is
+/// how long the offer has been out.
+fn greeting(waiting_ms: f64, offering: bool) -> bool {
+    offering && waiting_ms.rem_euclid(GREETING_CYCLE_MS) < GREETING_MS
+}
+
 /// How often something besides data replaces a data code: often while a link
 /// offer is waiting or the receiver has not answered yet (so it learns of it
 /// at once), rarely otherwise.
-fn extra_interval(shown: u64, offering: bool, answered: bool) -> u64 {
+fn extra_interval(shown: u64, offering: bool, answered: bool, greeting: bool) -> u64 {
     match (offering, answered, shown) {
+        _ if greeting => 4,
         (true, ..) => 6,
         (false, true, _) => 64,
         (false, false, ..240) => 8,
@@ -687,6 +706,7 @@ impl SendSession {
             hearing: false,
             link: Vec::new(),
             since_extras: 0,
+            offer_since: 0.0,
             extra_turn_due: Recurring::new(0),
             extra_turn: 0,
         })
@@ -786,6 +806,7 @@ impl SendSession {
         if codes != self.link {
             self.link = codes;
             self.since_extras = 0;
+            self.offer_since = js_sys::Date::now();
             self.extra_turn_due.soon();
         }
     }
@@ -996,6 +1017,9 @@ impl SendSession {
     }
 
     fn extra(&mut self) -> Option<String> {
+        let offering = !self.link.is_empty();
+        let greeting = greeting(js_sys::Date::now() - self.offer_since, offering);
+        self.sender.set_meta_urgent(greeting);
         let count = self.asking as usize + self.link.len();
         if count == 0 {
             return None;
@@ -1006,9 +1030,20 @@ impl SendSession {
         // Never at a fixed distance: see `Recurring`.
         if !self
             .extra_turn_due
-            .due(extra_interval(shown, !self.link.is_empty(), answered))
+            .due(extra_interval(shown, offering, answered, greeting))
         {
             return None;
+        }
+        let parts = self.link.len();
+        if greeting {
+            // The offer twice for every notice: it is what a newcomer needs.
+            let turn = self.extra_turn % (2 * parts + self.asking as usize);
+            self.extra_turn = self.extra_turn.wrapping_add(1);
+            return Some(if turn < 2 * parts {
+                self.link[turn % parts].clone()
+            } else {
+                self.notice()
+            });
         }
         let turn = self.extra_turn % count;
         self.extra_turn = self.extra_turn.wrapping_add(1);
@@ -1154,6 +1189,9 @@ struct Info {
     remaining_bytes: Option<f64>,
     total_codes: Option<f64>,
     remaining_codes: Option<f64>,
+    /// While the file list is on its way: codes of it read, and needed.
+    list_have: Option<u32>,
+    list_need: Option<u32>,
 }
 
 /// One incoming transfer. Segment data is not kept here: completed segments
@@ -1410,6 +1448,11 @@ impl Receive {
         };
         let (frames, useful, _) = self.rx.stats();
         let progress = self.rx.progress();
+        let list = self
+            .rx
+            .partial()
+            .into_iter()
+            .find(|part| part.0 == META_INDEX);
         to_js(&Info {
             session: p.map(|p| session_hex(p.session_id)),
             encrypted: p.is_some_and(|p| p.flags & FLAG_ENCRYPTED != 0),
@@ -1444,6 +1487,8 @@ impl Receive {
             remaining_bytes: progress.map(|p| p.remaining_bytes as f64),
             total_codes: progress.map(|p| p.total_symbols as f64),
             remaining_codes: progress.map(|p| p.remaining_symbols as f64),
+            list_have: list.map(|l| l.1.min(l.2)),
+            list_need: list.map(|l| l.2),
         })
     }
 

@@ -417,7 +417,9 @@
 {#if info?.session && !result}
   <div class="card stack">
     <div class="row spread">
-      <strong class="ellipsis">{info.summary ?? "Waiting for the file list…"}</strong>
+      <strong class="ellipsis" data-testid="summary">
+        {info.summary ?? `Waiting for the file list…${info.list_need ? ` ${info.list_have} of ${info.list_need} codes` : ""}`}
+      </strong>
       <span class="badge">{info.session}</span>
     </div>
     {#if info.sender_status}

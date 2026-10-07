@@ -123,6 +123,11 @@ impl<S: SegmentSource> Sender<S> {
         self.scheduler.set_backwards(backwards);
     }
 
+    /// Sends the file list often for now (see `Scheduler::set_meta_urgent`).
+    pub fn set_meta_urgent(&mut self, on: bool) {
+        self.scheduler.set_meta_urgent(on);
+    }
+
     /// The latest feedback, unless the receiver was forgotten.
     pub fn feedback(&self) -> Option<&Feedback> {
         self.feedback.as_ref()

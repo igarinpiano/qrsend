@@ -117,6 +117,8 @@ pub struct Scheduler {
     pos: usize,
     /// The receiver is answering: stay on a window until it is acknowledged.
     live: bool,
+    /// The sender wants the file list out often right now.
+    urgent: bool,
     /// Extra rounds granted to the current window while waiting for that.
     extensions: u32,
 }
@@ -165,6 +167,7 @@ impl Scheduler {
             next_start: 0,
             pos: 0,
             live: false,
+            urgent: false,
             extensions: 0,
         };
         s.fill_window();
@@ -221,6 +224,14 @@ impl Scheduler {
         self.fill_window();
     }
 
+    /// Puts meta symbols in between often (or as usual again). A sender
+    /// cannot see when a receiver starts reading: one that joins late has
+    /// missed the opening, so a sender that is waiting for a receiver to
+    /// turn up (to take an offer to connect, say) asks for this now and then.
+    pub fn set_meta_urgent(&mut self, on: bool) {
+        self.urgent = on;
+    }
+
     /// Whether to stay on a window until the receiver has it. Turned off
     /// while the receiver is not heard from: what it reported last still
     /// holds, but nothing tells any more when a window is complete.
@@ -275,11 +286,12 @@ impl Scheduler {
     /// 33 kB for 1 GiB, 28 codes at a usual size), and at one code in ten a
     /// camera that reads a fifth of what is shown waited a minute for it. So
     /// it comes more often while that helps: at the start of the stream, for
-    /// as many symbols as a pass holds, and for as long as a receiver that
-    /// answers says it lacks it.
+    /// as many symbols as a pass holds; for as long as a receiver that
+    /// answers says it lacks it; and whenever the sender says so (see
+    /// `set_meta_urgent`).
     fn meta_every(&self) -> u64 {
         let m = self.config.meta_interval;
-        if self.meta_j < self.segments[0].n || self.live {
+        if self.meta_j < self.segments[0].n || self.live || self.urgent {
             m.min(URGENT_META_EVERY)
         } else {
             m
@@ -397,6 +409,14 @@ mod tests {
         metas(&mut s, 2000);
         let later = metas(&mut s, 1000);
         assert!((80..=130).contains(&later), "{later}");
+        // …often again when the sender asks for it (a receiver may just
+        // have turned up)…
+        s.set_meta_urgent(true);
+        let asked = metas(&mut s, 300);
+        assert!(asked >= 95, "{asked}");
+        s.set_meta_urgent(false);
+        let usual = metas(&mut s, 1000);
+        assert!((80..=130).contains(&usual), "{usual}");
         // …and often again for a receiver that says it lacks it,
         s.set_needed(|_| true);
         let wanted = metas(&mut s, 300);

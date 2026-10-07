@@ -118,20 +118,38 @@ function unpack(bytes: Uint8Array): Description {
   return { ufrag, pwd, fingerprint, candidates };
 }
 
-/** Local description once the addresses are known (there is no trickling: it all has to fit into codes). */
+/** After the first local address is known, others get this long to follow. */
+const ADDRESSES_SETTLE_MS = 250;
+/** Without any address after this long, there is none to wait for. */
+const ADDRESSES_TIMEOUT_MS = 3000;
+
+/**
+ * Local description once the addresses are known (there is no trickling: it all has to fit into codes).
+ *
+ * Addresses on the local network are known almost at once. The browser's word that it is done looking can take
+ * seconds more (it also looks for kinds of addresses not used here), and both devices wait for it in turn, so the
+ * wait ends a moment after the first usable address instead.
+ */
 async function described(pc: RTCPeerConnection): Promise<Uint8Array> {
   if (pc.iceGatheringState !== "complete") {
     await new Promise<void>((resolve) => {
+      let settle: ReturnType<typeof setTimeout> | undefined;
       const done = () => {
         if (pc.iceGatheringState === "complete") finish();
       };
+      const found = (e: RTCPeerConnectionIceEvent) => {
+        if (e.candidate?.type === "host" && e.candidate.protocol === "udp") settle ??= setTimeout(finish, ADDRESSES_SETTLE_MS);
+      };
       const finish = () => {
         pc.removeEventListener("icegatheringstatechange", done);
+        pc.removeEventListener("icecandidate", found);
         clearTimeout(timer);
+        clearTimeout(settle);
         resolve();
       };
-      const timer = setTimeout(finish, 3000);
+      const timer = setTimeout(finish, ADDRESSES_TIMEOUT_MS);
       pc.addEventListener("icegatheringstatechange", done);
+      pc.addEventListener("icecandidate", found);
     });
   }
   const d = parseSdp(pc.localDescription?.sdp ?? "");

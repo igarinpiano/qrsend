@@ -113,3 +113,48 @@ for (const [color, name] of [
     }
   });
 }
+
+// A sender cannot see when a receiver starts reading. Found on real devices:
+// with the camera ready from the first code everything was there at once,
+// but a receiver that turned up a little later waited a long time for the
+// file list and for the offer to connect.
+test("a receiver that turns up late still gets the file list and the offer soon", async ({ playwright, baseURL }) => {
+  const browser = await playwright.chromium.launch({
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+  });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1000, height: 700 } });
+    const sender = await context.newPage();
+    await cameraFrom(sender, "to-sender");
+    await enablePreview(sender, /Local network boost/);
+    await sender.goto("./#/send");
+    // Many files make a long file list: it takes dozens of codes, as that of a very large file does.
+    const files = Array.from({ length: 240 }, (_, i) => ({
+      name: `photo-${String(i).padStart(4, "0")}-${crypto.randomBytes(6).toString("hex")}.jpg`,
+      mimeType: "image/jpeg",
+      buffer: crypto.randomBytes(300),
+    }));
+    await sender.locator('input[type="file"]').first().setInputFiles(files);
+    await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    await sender.getByLabel("Codes on screen").selectOption("1");
+    await sender.getByRole("button", { name: "Start sending" }).click();
+    await expect(sender.getByRole("button", { name: /offering LAN/ })).toBeVisible();
+    // The receiver is not there yet.
+    await sender.waitForTimeout(20_000);
+
+    const receiver = await context.newPage();
+    await cameraFrom(receiver, "to-receiver");
+    await enablePreview(receiver, /Show measurements/);
+    await receiver.goto("./#/receive");
+    await broadcast(sender, "to-receiver", "canvas", 50);
+    await expect(receiver.getByTestId("link-answer")).toBeVisible({ timeout: 15_000 });
+    // While it waits for the file list, it says how far that is.
+    if (!process.env.QRSEND_BASELINE) {
+      await expect(receiver.getByTestId("summary")).toHaveText(/Waiting for the file list… \d+ of \d+ codes|240 files/);
+    }
+    await expect(receiver.getByText(/240 files/)).toBeVisible({ timeout: 60_000 });
+    console.log(`late receiver: ${(await receiver.getByTestId("rx-steps").innerText()).replace(/\s+/g, " ")}`);
+  } finally {
+    await browser.close();
+  }
+});
