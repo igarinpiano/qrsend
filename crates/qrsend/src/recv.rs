@@ -398,7 +398,13 @@ pub fn run(args: RecvArgs) -> Result<()> {
     // arrives through it joins what the codes bring: frames are frames.
     let mut offers = link::Assembler::default();
     let mut link: Option<net::Link> = None;
-    let mut tried_offer: Option<u8> = None;
+    // The offer last taken up, and when: a connection that could not be
+    // made (a firewall still asking, say) is tried again after a while.
+    let mut tried_offer: Option<(u8, Instant)> = None;
+    const TRY_AGAIN: Duration = Duration::from_secs(5);
+    // Not forever, though: the two may simply not be on one network.
+    const TRIES: u32 = 3;
+    let mut tries = 0;
     let mut link_taken = 0u64;
     let mut link_reported = 0u64;
     let mut last_report = Instant::now();
@@ -442,9 +448,14 @@ pub fn run(args: RecvArgs) -> Result<()> {
                     }
                 }
                 Err(_) => {
-                    if link_taken > 0 {
-                        say(&pb, "The network connection ended; reading the codes.");
-                    }
+                    say(
+                        &pb,
+                        if link_taken > 0 {
+                            "The network connection ended; reading the codes."
+                        } else {
+                            "No network connection could be made; reading the codes."
+                        },
+                    );
                     link = None;
                     if !codes_open {
                         break 'outer;
@@ -566,12 +577,14 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 || args.no_lan
                 || !ours
                 || link.is_some()
-                || tried_offer == Some(message.id)
+                || tries >= TRIES
+                || tried_offer.is_some_and(|(id, at)| id == message.id && at.elapsed() < TRY_AGAIN)
             {
                 continue;
             }
             if let Ok(offer) = TcpOffer::from_bytes(&message.payload) {
-                tried_offer = Some(message.id);
+                tried_offer = Some((message.id, Instant::now()));
+                tries += 1;
                 link_taken = 0;
                 link_reported = 0;
                 say(

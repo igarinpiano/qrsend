@@ -292,6 +292,7 @@ export class LanSender {
           this.wake?.();
         } else if (line === HELLO_BINARY) {
           this.binary = true;
+          this.wake?.();
         }
       }
     };

@@ -773,13 +773,7 @@ impl SendSession {
     pub fn set_text_channel_up(&mut self, up: bool) {
         self.sender.set_backwards(up);
         self.link_records = 0;
-        self.direct = up.then(|| {
-            let layout = SessionLayout {
-                symbol_size: WIDE_SYMBOL_SIZE,
-                ..*self.sender.layout()
-            };
-            DirectSender::new(layout, self.source.clone(), self.sender.feedback())
-        });
+        self.direct = up.then(|| self.new_direct());
     }
 
     /// Link codes (see `linkSplit`) to repeat in the stream until replaced;
@@ -912,7 +906,9 @@ impl SendSession {
         if forget {
             self.sender.forget_receiver();
             if self.direct.is_some() {
-                self.set_text_channel_up(true);
+                // The same connection (its count of records goes on), but
+                // nothing is taken for received any more.
+                self.direct = Some(self.new_direct());
             }
         } else {
             self.sender.receiver_quiet();
@@ -960,6 +956,16 @@ impl SendSession {
             return Ok(extra);
         }
         Ok(self.sender.next_frame().map_err(js_err)?.to_qr_text())
+    }
+
+    /// The stream for a network connection, starting from what the receiver
+    /// is known to lack.
+    fn new_direct(&self) -> DirectSender<JsSource> {
+        let layout = SessionLayout {
+            symbol_size: WIDE_SYMBOL_SIZE,
+            ..*self.sender.layout()
+        };
+        DirectSender::new(layout, self.source.clone(), self.sender.feedback())
     }
 
     fn notice(&self) -> String {
