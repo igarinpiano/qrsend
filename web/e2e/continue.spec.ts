@@ -126,3 +126,65 @@ test("a receiver waiting for one transfer can take the one being shown instead",
     await browser.close();
   }
 });
+
+test("the receiver's resume code, typed into the sender, sends only what is missing", async ({ playwright, baseURL }) => {
+  test.setTimeout(180_000);
+  fs.mkdirSync(WORK, { recursive: true });
+  const file = path.join(WORK, "resume-a.bin");
+  const otherFile = path.join(WORK, "resume-b.bin");
+  const data = crypto.randomBytes(450_000);
+  fs.writeFileSync(file, data);
+  fs.writeFileSync(otherFile, crypto.randomBytes(30_000));
+  const browser = await playwright.chromium.launch({
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+  });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1000, height: 760 }, acceptDownloads: true });
+    const sender = await context.newPage();
+    const receiver = await context.newPage();
+    await cameraFrom(receiver, "to-receiver");
+    await send(sender, file);
+    await receiver.goto("./#/receive");
+    await broadcast(sender, "to-receiver", "canvas", 50);
+    await expect.poll(() => percent(receiver), { timeout: 60_000 }).toBeGreaterThan(15);
+    await sender.getByRole("button", { name: "Done" }).click();
+
+    // The code is read off the receiver's screen…
+    await receiver.goto("./#/inbox");
+    await receiver.getByRole("button", { name: "How to continue" }).click();
+    const code = (await receiver.getByTestId("resume-text").innerText()).split("--resume")[1].trim();
+    expect(code).toMatch(/^QSR1-[A-Z2-7]+$/);
+    await receiver.getByRole("link", { name: "Continue" }).first().click();
+
+    /** Fills in the send form with a resume code and starts. */
+    const sendWith = async (what: string, resume: string) => {
+      await sender.goto("./#/");
+      await sender.goto("./#/send");
+      await sender.locator('input[type="file"]').first().setInputFiles(what);
+      await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+      await sender.getByLabel("Density").selectOption("low");
+      await sender.getByLabel("Codes on screen").selectOption("3");
+      await sender.getByText("Continuing a transfer that stopped halfway?").click();
+      await sender.getByLabel("Resume code").fill(resume);
+      await sender.getByRole("button", { name: "Start sending" }).click();
+    };
+
+    // …and belongs to that data only: with other data, nothing is sent.
+    await sendWith(otherFile, code);
+    await expect(sender.getByRole("alert")).toContainText("This resume code is for another transfer");
+    await expect(sender.getByLabel("QR code stream")).toHaveCount(0);
+
+    // With the same data (a lower-case, padded code is as good), only what is missing goes out.
+    await sendWith(file, `  ${code.toLowerCase().replace("qsr1-", "QSR1-")} `);
+    await expect(sender.getByTestId("resumed")).toHaveText(/Only what is missing \(1 of 1 parts\)/);
+    await broadcast(sender, "to-receiver", "canvas", 50);
+    await expect(receiver.getByTestId("received-file")).toHaveText(["resume-a.bin"], { timeout: 120_000 });
+    const [download] = await Promise.all([
+      receiver.waitForEvent("download"),
+      receiver.getByRole("listitem").filter({ hasText: "resume-a.bin" }).getByRole("button", { name: "Save" }).click(),
+    ]);
+    expect(fs.readFileSync(await download.path()).equals(data)).toBe(true);
+  } finally {
+    await browser.close();
+  }
+});

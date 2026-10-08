@@ -164,6 +164,12 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       req.redundancy,
     );
     sending = { session, id: info.session, body, offers: { usual: [], known: [] } };
+    let resumed: { parts: number; of: number } | undefined;
+    if (req.resume?.trim()) {
+      // (Throws when the code is for another transfer: nothing is sent then.)
+      resumed = { parts: session.resume(req.resume), of: Math.ceil(info.bodyLen / 2 ** info.segShift) };
+      logLine("tx", "resume code taken", resumed);
+    }
     const params = session.params() as { version: number; ec: string; modules: number; symbolSize: number };
     logLine("tx", "packed", {
       ms: Math.round(performance.now() - packingSince),
@@ -183,12 +189,17 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       wireBytes: info.bodyLen + info.metaLen,
       encrypted: info.encrypted,
       recipients: req.recipients,
+      resumed,
       signed: !!me,
       framesPerPass: session.framesPerPass,
       ...params,
       quiet: quietModules(),
     };
   } catch (e) {
+    if (sending?.body === body) {
+      sending.session.free();
+      sending = undefined;
+    }
     body.close();
     await store.remove(SEND_DIR);
     throw e;

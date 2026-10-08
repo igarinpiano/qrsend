@@ -63,6 +63,8 @@ pub struct Sender<S> {
     cache_size: usize,
     /// The latest feedback from the receiver, while it is answering.
     feedback: Option<Feedback>,
+    /// See `set_from_the_end`.
+    from_the_end: bool,
 }
 
 impl<S: SegmentSource> Sender<S> {
@@ -86,6 +88,7 @@ impl<S: SegmentSource> Sender<S> {
             cache: VecDeque::new(),
             cache_size,
             feedback: None,
+            from_the_end: false,
         }
     }
 
@@ -173,9 +176,25 @@ impl<S: SegmentSource> Sender<S> {
         Ok(&self.cache.back().unwrap().1)
     }
 
+    /// Sends each segment's own (source) symbols last to first instead of
+    /// first to last. For a receiver that is continuing: it stopped somewhere
+    /// in the usual order, so what it has of a segment is mostly the beginning,
+    /// and from the end every symbol is new to it at once. It costs nothing:
+    /// they are the same symbols, and a receiver that has none of them is
+    /// served just as well. (Not the default, so that senders which know
+    /// nothing of their receiver all send alike.)
+    pub fn set_from_the_end(&mut self, on: bool) {
+        self.from_the_end = on;
+    }
+
     pub fn next_frame(&mut self) -> io::Result<Frame> {
         let slot = self.scheduler.next_slot();
-        let (esi, symbol) = self.encoder(slot.seg_index)?.symbol(slot.j);
+        let k = self.layout.k(slot.seg_index) as u64;
+        let j = match self.from_the_end && slot.j < k {
+            true => k - 1 - slot.j,
+            false => slot.j,
+        };
+        let (esi, symbol) = self.encoder(slot.seg_index)?.symbol(j);
         Ok(Frame {
             header: self.layout.header(slot.seg_index, esi),
             symbol,

@@ -418,3 +418,76 @@ fn a_segment_is_collected_in_the_size_that_brings_most() {
     // Progress is counted in the size that carried the data.
     assert_eq!(rx.progress().unwrap().symbol_size, 2000);
 }
+
+/// Continuing with a resume code: only the missing segments are sent, and
+/// each from its end, so that a receiver which has the beginning of one
+/// needs exactly the rest of it.
+#[test]
+fn a_resumed_sender_brings_what_is_missing_at_once() {
+    let body = noise(300_000, 21);
+    let meta = noise(200, 22);
+    let seg_shift = 16;
+    let layout = SessionLayout {
+        session_id: 77,
+        flags: 0,
+        seg_shift,
+        meta_len: meta.len() as u32,
+        body_len: body.len() as u64,
+        symbol_size: 500,
+    };
+    let source = || MemorySource {
+        meta: meta.clone(),
+        body: body.clone(),
+        seg_shift,
+    };
+    let quiet = ScheduleConfig {
+        meta_interval: 0,
+        window: 2,
+        ..ScheduleConfig::default()
+    };
+    // The first attempt stops in its second window (two segments at a
+    // time): segment 1 is there, segments 2 and 3 to 60 %.
+    let mut rx = Receiver::new();
+    let mut first = Sender::new(layout, source(), quiet.clone(), None);
+    let k = layout.k(2) as usize;
+    let mut of_each = [0usize; 6];
+    while of_each[2] < k * 6 / 10 || of_each[3] < k * 6 / 10 {
+        let f = first.next_frame().unwrap();
+        of_each[f.header.seg_index as usize] += 1;
+        rx.push(f);
+    }
+    assert!(rx.is_done(0) && rx.is_done(1) && !rx.is_done(2) && !rx.is_done(3));
+    let code = crate::resume::ResumeCode::new(77, rx.missing());
+    assert_eq!(code.segments, vec![2, 3, 4, 5]);
+
+    // Sent again in the usual order, the first 60 % of segments 2 and 3 would
+    // repeat what is there. With the code:
+    let mut again = Sender::new(layout, source(), quiet, Some(&code.segments));
+    again.set_from_the_end(true);
+    // How many symbols of each segment it took until that segment was there.
+    let mut took = [0usize; 6];
+    let mut frames = 0;
+    while !(rx.is_done(2) && rx.is_done(3)) {
+        let f = again.next_frame().unwrap();
+        let index = f.header.seg_index as usize;
+        assert_ne!(index, 1, "a segment that is not missing");
+        if !rx.is_done(f.header.seg_index) {
+            took[index] += 1;
+        }
+        rx.push(f);
+        frames += 1;
+        assert!(frames < 8 * k, "never completes");
+    }
+    // Each lacked 40 %: that is all it took, the first symbol on.
+    let lacking = k - k * 6 / 10;
+    assert!(
+        took[2] <= lacking + 1,
+        "{} symbols for {lacking} lacking",
+        took[2]
+    );
+    assert!(
+        took[3] <= lacking + 1,
+        "{} symbols for {lacking} lacking",
+        took[3]
+    );
+}

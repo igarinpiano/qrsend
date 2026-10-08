@@ -14,6 +14,8 @@ export interface SendRequest {
   /** null = choose from the transfer size. */
   density: { version: number; ec: string } | null;
   redundancy: number;
+  /** A resume code read off the receiver (`QSR1-…`): send only what it lists. */
+  resume?: string;
 }
 
 export interface SendStarted {
@@ -23,6 +25,8 @@ export interface SendStarted {
   encrypted: boolean;
   /** Device IDs the transfer is encrypted for (empty: for anyone). */
   recipients: string[];
+  /** With a resume code: how many parts (of how many) are sent. */
+  resumed?: { parts: number; of: number };
   signed: boolean;
   framesPerPass: number;
   version: number;

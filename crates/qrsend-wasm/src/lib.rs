@@ -621,6 +621,9 @@ pub struct SendSession {
     link_records: u64,
     /// Adjusts speed and density to what the receiver reports reading.
     tuner: Option<tune::Tuner>,
+    config: ScheduleConfig,
+    /// Whether it has been looked at yet if the receiver is continuing.
+    receiver_seen: bool,
     source: JsSource,
     params: QrParams,
     frames: u64,
@@ -716,10 +719,12 @@ impl SendSession {
         };
         let source = JsSource(read);
         Ok(SendSession {
-            sender: Sender::new(layout, source.clone(), config, None),
+            sender: Sender::new(layout, source.clone(), config.clone(), None),
             direct: None,
             link_records: 0,
             tuner: None,
+            config,
+            receiver_seen: false,
             source,
             params,
             frames: 0,
@@ -859,6 +864,42 @@ impl SendSession {
         self.sender.pass() as f64
     }
 
+    /// Takes a resume code read off the receiver's screen (`QSR1-…`): from
+    /// now on only the segments it lists are sent, each from its end (a
+    /// receiver that is continuing mostly has their beginnings). Returns how
+    /// many body segments that is. An error when the code is for another
+    /// transfer.
+    pub fn resume(&mut self, code: &str) -> JsResult<u32> {
+        let code = ResumeCode::decode(code.trim()).map_err(js_err)?;
+        let layout = *self.sender.layout();
+        if code.session_id != layout.session_id {
+            return Err(js_err(format!(
+                "This resume code is for another transfer ({}, not {}). It fits only when the very same data is sent again, unencrypted.",
+                session_hex(code.session_id),
+                session_hex(layout.session_id)
+            )));
+        }
+        let only: Vec<u32> = code
+            .segments
+            .iter()
+            .copied()
+            .filter(|&i| i != META_INDEX && i <= layout.seg_count())
+            .collect();
+        let mut sender = Sender::new(
+            layout,
+            self.source.clone(),
+            self.config.clone(),
+            Some(&only),
+        );
+        sender.set_from_the_end(true);
+        if let Some(feedback) = self.sender.feedback() {
+            sender.apply_feedback(feedback.clone());
+        }
+        self.sender = sender;
+        self.receiver_seen = true;
+        Ok(only.len() as u32)
+    }
+
     /// Lets the session choose how the codes are shown, from the receiver's
     /// feedback: `levels` are the codes per picture of every layout the
     /// screen offers (fewest first), `scales` the size of a dot on the
@@ -919,6 +960,18 @@ impl SendSession {
         }
         if !self.sender.apply_feedback(feedback) {
             return Ok(JsValue::NULL);
+        }
+        // A receiver whose first report counts more codes than this sender
+        // has shown is continuing something it began earlier: what it has of
+        // the unfinished segments is their beginnings, so the rest goes out
+        // from their ends. (Without any report, everything is sent the usual
+        // way: nothing is known about who is watching.)
+        if !self.receiver_seen {
+            self.receiver_seen = true;
+            let reported = self.sender.feedback().map_or(0, |f| f.frames);
+            if reported > self.frames + 20 {
+                self.sender.set_from_the_end(true);
+            }
         }
         let f = self.sender.feedback().expect("just applied");
         let layout = self.sender.layout();

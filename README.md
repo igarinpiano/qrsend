@@ -156,7 +156,8 @@ loaded (PWA).
 - A transfer that stopped halfway continues when the sender simply sends the
   same data again (unencrypted transfers): it is the same transfer, bit for
   bit, and the receiver keeps what it had — also of the part it was in the
-  middle of. The inbox shows the resume code for the command-line sender.
+  middle of. To send only what is missing without any channel back, type the
+  resume code the receiver shows into the sender (web or command line).
 - “Copy log” at the bottom of every page copies a diagnostic log for bug
   reports: what happened when (steps, timings, counts, connection states) —
   never file names, contents, device IDs or network addresses.

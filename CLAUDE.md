@@ -128,6 +128,8 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
   - 受信済みのセッションをもう一度見たら受信し直さず、Inbox の内容を「Already received」として出す（ID が内容で決まるようになったので、同じデータの再送で起こる）。
   - 待っている転送と別の転送が映ったら、カードで知らせて「Receive the other transfer instead」で切り替えられる（`RecvState.foreign`。以前は小さな注意書きだけで、接続の申し出も黙って無視されるため「QR がいつまでも出ない」ように見えた）。
   - resume code は Inbox と受信画面の「How to continue」で **表示** する（`ResumeCode.svelte`: 大きな文字、QR、コピー。ユーザーの指摘: コピーしても送信側の端末に渡す手段がほとんど無い）。続きから開いた直後で進み具合がまだ分からないときは「N of M parts are here」と出す。
+  - **送信側が流すものは「受信側について知っていること」で決まる**（PROTOCOL §8.2。ユーザーの指示: 応答が無いときは通常どおり最初から流す）: 何も届かなければ先頭から全部（続きの受信側は読み飛ばすだけで、時間は最初から受け取るのと変わらない）。resume code を入力されたら、挙げられたセグメントだけを **末尾のソースシンボルから** 流す（`Sender::set_from_the_end`、wasm の `SendSession::resume`、送信画面の「Continuing a transfer that stopped halfway?」）。フィードバックが届き、その最初の `frames` が送信側の表示数より多ければ（前から持っている）、同じく末尾から流す。末尾からにするのは、続きの受信側が持っているのは主にセグメントの先頭側だから（1 個目から新しいコードになる。core のテストで「60% 持っているセグメントが残り 40% ちょうどで完成する」ことを確認）。
+  - 再開の手段の整理: (1) Two-way のフィードバック QR、(2) 音でのフィードバック、(3) ネットワーク接続（つながればフィードバックもそこを流れる）、(4) resume code の手入力（Web / CLI）、(5) 何も無し（同じデータを送り直す。受信側だけで続きになる）。
   - e2e: `continue.spec.ts`。`setInputFiles` にバッファを渡すと更新時刻が毎回「いま」になり別の転送になるので、ディスク上のファイルを渡す。
 - カラーコード（preview、PROTOCOL §2.3）: `drawColorGrid` が 1 枠に 3 コードを RGB で重ねる。受信は `scan.worker.ts` が 12 フレームに 1 回 RGB を分けて読み、3 成分の内容が違えばカラーとして読み続ける（送信側からの合図は無い）。
 - 画面キャプチャ受信（preview）: `Scanner.startScreen`（getDisplayMedia）。ヘッドレスのブラウザには共有できる画面が無いので、e2e は getDisplayMedia を仮想カメラのストリームに差し替えて確認している（実際の画面共有は未検証）。

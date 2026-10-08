@@ -40,6 +40,8 @@
   let packed = $state<{ done: number; total: number } | undefined>();
   let error = $state("");
   let info = $state<SendStarted | undefined>();
+  /** A resume code typed in from the receiver's screen: only what it lists is sent. */
+  let resume = $state("");
   let dragging = $state(false);
   let perCode = $state(0);
 
@@ -133,6 +135,7 @@
         recipients: anyone ? [] : selected.map((fp) => devices.find((dev) => dev.fingerprint === fp)!.id),
         density: d.version ? { version: d.version, ec: d.ec } : null,
         redundancy: 0.1,
+        resume: resume.trim() || undefined,
       });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -252,7 +255,7 @@
   </p>
 </div>
 
-{#if error}<p class="error">{error}</p>{/if}
+{#if error}<p class="error" role="alert">{error}</p>{/if}
 
 <p class="small muted">
   {#if featureOn("twoWay")}
@@ -260,6 +263,26 @@
   {/if}
   <a href="#/preview">Feature preview</a>
 </p>
+
+<details class="resume">
+  <summary class="small">Continuing a transfer that stopped halfway?</summary>
+  <p class="small muted">
+    Sending the same data again continues it by itself (if it was not encrypted for a device). To send only what the
+    receiver is missing, type in the resume code it shows (Inbox → How to continue):
+  </p>
+  <label class="field">
+    <span>Resume code</span>
+    <input
+      type="text"
+      bind:value={resume}
+      placeholder="QSR1-…"
+      autocapitalize="characters"
+      autocomplete="off"
+      spellcheck="false"
+      class="mono"
+    />
+  </label>
+</details>
 
 <button class="primary wide" disabled={!canSend} onclick={start}>
   {#if busy}

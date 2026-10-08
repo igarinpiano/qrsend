@@ -486,6 +486,7 @@
             ? `, ${Math.round(readShare * 100)}% read`
             : ""}
         {:else}
+          {#if info.resumed}<span data-testid="resumed">Only what is missing ({info.resumed.parts} of {info.resumed.of} parts) ·</span>{/if}
           Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows}{layers === 3 ? " ×3 colors" : ""} ·
           ~{bytes(rate)}/s
           {info.encrypted ? "· encrypted" : "· not encrypted"}
