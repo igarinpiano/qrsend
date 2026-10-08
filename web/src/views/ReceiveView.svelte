@@ -16,6 +16,7 @@
     introductionMessage,
     isKnownOfferFor,
     isOffer,
+    isOpenOffer,
     isTcpOffer,
     type LinkMessage,
   } from "../lib/lan";
@@ -285,6 +286,7 @@
   let knownTried: number | undefined;
   /** A command-line sender offered its kind of connection, which a browser cannot take. */
   let tcpOffered = $state(false);
+  let tcpNoted = false;
   async function knownOffer(msg: LinkMessage) {
     overIfOfferedAnew(msg.id);
     if (linkDeclined || linked || knownTried === msg.id) return;
@@ -298,6 +300,25 @@
       await silent.acceptKnown(msg, mine.certificate);
     } catch (e) {
       console.warn("offer to this device:", e);
+    }
+  }
+
+  // An offer to whoever reads it (a command-line sender's): taken up
+  // without showing anything, like the one above.
+  let openOffered = false;
+  async function openOffer(msg: LinkMessage) {
+    openOffered = true;
+    tcpOffered = false;
+    overIfOfferedAnew(msg.id);
+    if (linkDeclined || linked || knownTried === msg.id) return;
+    knownTried = msg.id;
+    log("rx", "open offer", { id: msg.id });
+    try {
+      silent ??= receiver();
+      silentOffer = msg.id;
+      await silent.acceptOpen(msg);
+    } catch (e) {
+      console.warn("open offer:", e);
     }
   }
 
@@ -344,9 +365,21 @@
   function onLinkCode(code: string) {
     const msg = assembler.add(code);
     if (!msg || !canConnect || msg.session !== info?.session) return;
+    if (isOpenOffer(msg)) {
+      void openOffer(msg);
+      return;
+    }
     if (isTcpOffer(msg)) {
-      if (!tcpOffered) log("rx", "the sender offers a connection only the command line can take");
-      tcpOffered = true;
+      // (A newer command-line sender offers a connection for browsers as
+      // well, a moment later or earlier: only without that is this worth
+      // a note.)
+      if (tcpNoted) return;
+      tcpNoted = true;
+      setTimeout(() => {
+        if (openOffered) return;
+        log("rx", "the sender offers a connection only the command line can take");
+        tcpOffered = true;
+      }, 6000);
       return;
     }
     if (!isOffer(msg)) {

@@ -17,7 +17,7 @@ use qrsend_core::{base45, link};
 use crate::display::export::Canvas;
 use crate::display::{self, FrameStream, GridSpec};
 use crate::spool::{Content, Spool, SpoolOptions};
-use crate::{collect, identity, net, util};
+use crate::{collect, identity, net, rtc, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DisplayKind {
@@ -360,8 +360,19 @@ pub fn run(args: SendArgs) -> Result<()> {
             offer,
             wide,
             move || Spool::open(id)?.source(),
-            events_tx,
+            events_tx.clone(),
         );
+        // And one to a receiving browser, which cannot use the above.
+        if let Err(e) = rtc::serve(
+            id,
+            args.lan_address.as_deref(),
+            room,
+            layout,
+            move || Spool::open(id)?.source(),
+            events_tx,
+        ) {
+            eprintln!("No connection is offered to browsers: {e:#}");
+        }
         stream.with_link(codes, events);
     }
     // After an export there is no display loop to end; with --lan the

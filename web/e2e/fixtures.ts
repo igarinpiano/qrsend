@@ -8,7 +8,7 @@ export const BIN = process.env.QRSEND_BIN ?? path.resolve(import.meta.dirname, "
 export const WORK = path.join(os.tmpdir(), "qrsend-e2e");
 
 /** Environment of one CLI "device" (own identity, inbox and cache). */
-function env(device: string): NodeJS.ProcessEnv {
+export function env(device: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
     QRSEND_DATA_DIR: path.join(WORK, device, "data"),

@@ -16,6 +16,12 @@ pub const KIND_ANSWER: u8 = 2;
 /// The sender listens for a TCP connection (see [`TcpOffer`]); the receiver
 /// connects, so no answer is needed.
 pub const KIND_TCP_OFFER: u8 = 3;
+/// A browser's offer to one device it has connected to before (§12.3).
+pub const KIND_KNOWN_OFFER: u8 = 4;
+/// An offer of a WebRTC connection to whoever reads it, made by a sender
+/// that cannot be shown an answer: both sides work the answer out from the
+/// offer (§12.4).
+pub const KIND_OPEN_OFFER: u8 = 5;
 
 const HEADER_LEN: usize = 8;
 const CHECK_LEN: usize = 2;

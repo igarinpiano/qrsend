@@ -31,6 +31,13 @@ const KIND_OFFER = 1;
 const KIND_ANSWER = 2;
 /** An offer to one device the sender has connected to before: it needs no answer (see `LanSender.start`). */
 const KIND_KNOWN_OFFER = 4;
+/**
+ * An offer to whoever reads it, from a sender that cannot be shown an answer (the command-line program, which has no
+ * camera on the receiver): 16 bytes of key, then the description. See `LanReceiver.acceptOpen`.
+ */
+const KIND_OPEN_OFFER = 5;
+/** Starts the line with which a receiver shows that it read an open offer. */
+const PROOF = "K";
 /** In an offer: the sender remembers devices it trusts, to connect without an answer next time. */
 const FLAG_REMEMBERS = 1;
 const FEEDBACK_PREFIX = "QSF1-";
@@ -671,6 +678,8 @@ export class LanReceiver {
   private channel?: RTCDataChannel;
   /** The connection uses this device's lasting certificate (so the sender may remember it). */
   lasting = false;
+  /** What to send first on a connection made from an open offer. */
+  private proof?: string;
 
   constructor(private hooks: ReceiverHooks) {}
 
@@ -680,6 +689,7 @@ export class LanReceiver {
 
   private open(certificate?: RTCCertificate): RTCPeerConnection {
     this.stop();
+    this.proof = undefined;
     this.lasting = !!certificate;
     const pc = new RTCPeerConnection({ iceServers: [], certificates: certificate ? [certificate] : undefined });
     watch(pc, "answer");
@@ -718,6 +728,26 @@ export class LanReceiver {
     await pc.setLocalDescription({ type: "answer", sdp });
   }
 
+  /**
+   * Takes up an offer made to whoever reads it. Nothing is shown here either: this side answers with the credentials
+   * both work out from the offer and knocks at the sender's addresses. The sender cannot know this side's certificate
+   * beforehand, so the first thing sent ties it to the key in the offer: only someone who read the code can say it.
+   */
+  async acceptOpen(offer: LinkMessage): Promise<void> {
+    const key = offer.payload.subarray(0, 16);
+    const description = unpack(offer.payload.subarray(16));
+    log("link", "open offer taken up", { id: offer.id, addresses: kinds(description.candidates) });
+    const pc = this.open();
+    await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(description, "offer") });
+    const { ufrag, pwd } = await answerCredentials(offer.payload);
+    const answer = await pc.createAnswer();
+    const sdp = (answer.sdp ?? "").replace(/a=ice-ufrag:.*/g, `a=ice-ufrag:${ufrag}`).replace(/a=ice-pwd:.*/g, `a=ice-pwd:${pwd}`);
+    const own = parseSdp(sdp).fingerprint;
+    if (own.length !== 32) throw new Error("this browser gave no usable connection details");
+    await pc.setLocalDescription({ type: "answer", sdp });
+    this.proof = PROOF + hex(await sha256("qrsend open link\n", new Uint8Array([...key, ...own])));
+  }
+
   private listen(pc: RTCPeerConnection): void {
     // A sender that goes away without a word (its page closed, the network
     // gone) leaves the channel looking open; the connection itself tells.
@@ -737,6 +767,7 @@ export class LanReceiver {
         greeted = true;
         log("link", "answer: channel open");
         this.hooks.state("connected");
+        if (this.proof) channel.send(this.proof);
         channel.send(HELLO_BINARY);
       };
       channel.onopen = opened;
@@ -784,6 +815,7 @@ export async function isKnownOfferFor(m: LinkMessage, fingerprint: Uint8Array): 
 export const KNOWN_OFFER = KIND_KNOWN_OFFER;
 /** A command-line sender's offer (a TCP address to connect to): nothing a browser can take. */
 export const isTcpOffer = (m: LinkMessage) => m.kind === 3;
+export const isOpenOffer = (m: LinkMessage) => m.kind === KIND_OPEN_OFFER && m.payload.length > 16;
 
 /** The line in which a receiver says who it is: its device ID, its certificate, and its signature over both. */
 export const introductionLine = (id: string, certificate: string, signature: string) =>

@@ -84,9 +84,7 @@ qrsend recv --images frames/
 A webcam often hands out small pictures unless asked (640×480 is a common
 default on Linux), which is too little for dense codes: `recv` prints the size
 it gets, and `--camera-size` / `--camera-fps` ask for more. The web app's
-*Color codes* are noticed and read without being asked for. A network
-connection is made between two command-line programs or between two browsers,
-not yet between one of each.
+*Color codes* are noticed and read without being asked for.
 
 If something is still missing, `recv` prints a resume code. Run on the sender:
 
@@ -147,6 +145,10 @@ the connection is encrypted with it, and only someone who saw the sender's
 screen can connect. The sender stops by itself once the receiver reports that
 everything arrived. (`recv --no-lan` keeps to the codes. On macOS the firewall
 may ask whether `qrsend` may accept incoming connections.)
+
+A receiving **web app** connects as well: `--lan` also offers the kind of
+connection a browser can make (WebRTC), and the browser takes it up by itself
+once its camera has read the code. Nothing has to be shown back to the sender.
 
 ## Web app
 
@@ -236,7 +238,7 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] Auto-tuning speed and codes per picture from that feedback (web app, feature preview)
 - [x] More transports side by side: text over any byte channel (CLI), color codes, screen capture, local network (web app, feature preview)
 - [x] Sound as a back channel (web app, feature preview)
-- [x] A direct network connection between two CLIs, started by a code (`send --lan`)
+- [x] A direct network connection between two CLIs, started by a code (`send --lan`), and from the CLI to a receiving browser
 - [ ] Two-way mode and sound in the CLI; a network connection between the CLI and a browser; auto-tuning the code size
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).

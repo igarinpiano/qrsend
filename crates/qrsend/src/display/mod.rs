@@ -74,6 +74,8 @@ pub struct FrameStream {
     /// Codes besides frames, repeated in the stream: the offer to connect
     /// over the network.
     extras: Vec<String>,
+    /// Codes of an offer that changes as connections come and go.
+    extras_live: Vec<String>,
     extra_due: Recurring,
     extra_turn: usize,
     link: Option<Receiver<LinkEvent>>,
@@ -92,6 +94,7 @@ impl FrameStream {
             frames: 0,
             started: Instant::now(),
             extras: Vec::new(),
+            extras_live: Vec::new(),
             extra_due: Recurring::new(EXTRA_EVERY - 1),
             extra_turn: 0,
             link: None,
@@ -129,6 +132,7 @@ impl FrameStream {
                     self.finished |= f.complete;
                     self.sender.apply_feedback(f);
                 }
+                LinkEvent::Offer(codes) => self.extras_live = codes,
             }
         }
     }
@@ -145,12 +149,17 @@ impl FrameStream {
     pub fn next_text(&mut self) -> Result<String> {
         self.poll();
         self.frames += 1;
-        if !self.extras.is_empty() && !self.link_up {
+        let extras = self.extras.len() + self.extras_live.len();
+        if extras > 0 && !self.link_up {
             // Never at a fixed distance, which would keep the offer to one
             // place in a grid (see `Recurring`).
             if self.extra_due.due(EXTRA_EVERY) {
-                self.extra_turn = (self.extra_turn + 1) % self.extras.len();
-                return Ok(self.extras[self.extra_turn].clone());
+                self.extra_turn = (self.extra_turn + 1) % extras;
+                let code = match self.extra_turn.checked_sub(self.extras.len()) {
+                    Some(i) => &self.extras_live[i],
+                    None => &self.extras[self.extra_turn],
+                };
+                return Ok(code.clone());
             }
         }
         Ok(self.sender.next_frame()?.to_qr_text())

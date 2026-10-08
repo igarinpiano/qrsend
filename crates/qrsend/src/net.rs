@@ -118,12 +118,15 @@ pub enum LinkEvent {
     Up,
     Down,
     Feedback(Feedback),
+    /// The codes of an offer that replaces the one before it (a WebRTC
+    /// offer makes one connection, see [`crate::rtc`]).
+    Offer(Vec<String>),
 }
 
 /// Addresses of this machine other devices on the network may reach. Asking
 /// the system which address it would use toward a few places finds them
 /// without sending anything.
-fn local_addresses() -> Vec<IpAddr> {
+pub(crate) fn local_addresses() -> Vec<IpAddr> {
     let mut found = Vec::new();
     for target in [
         "192.168.255.254:9",
