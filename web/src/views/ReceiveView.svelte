@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ready, renderText } from "../lib/core";
+  import { colorsWorthShowing, ready, renderText } from "../lib/core";
   import { persist } from "../lib/db";
   import { engine } from "../lib/engine";
   import type { RecvState } from "../lib/engine-types";
@@ -38,7 +38,21 @@
   let rate = $state(0);
   let queued: string[] = [];
   /** What the camera makes of the codes, for a sender that adjusts to it. */
-  let camera: { reads: number; dot: number } | undefined;
+  // (Not a deep state: it is handed to the engine's worker as it is.)
+  let camera: { reads: number; dot: number; colors: number } | undefined = $state.raw();
+  // The sender says it shows colors, and this camera does not tell them all
+  // apart. A sender that takes feedback finds out and adapts by itself; one
+  // that does not, cannot know, so the person is told.
+  const bits = (n: number) => [1, 2, 4].filter((b) => n & b).length;
+  const colorsLost = $derived.by(() => {
+    const shown = st?.senderColors ?? -1;
+    if (shown <= 0 || bits(shown) < 2 || !camera?.colors || st?.feedback || linkState === "connected") return false;
+    try {
+      return bits(colorsWorthShowing(shown, camera.colors)) < bits(shown);
+    } catch {
+      return false;
+    }
+  });
   let pushing = false;
   const meter = new RateMeter();
 
@@ -561,11 +575,12 @@
     <div class="eye">
       <Camera
         {ontexts}
-        oncamera={(reads, dot) => (camera = { reads, dot })}
+        oncamera={(reads, dot, colors) => (camera = { reads, dot, colors })}
         {active}
         allowFile={!result}
         compact={!!showing && !sideways}
         advise={!showing && linkState !== "connected"}
+        senderColors={st?.senderColors ?? -1}
       />
     </div>
   {/if}
@@ -630,6 +645,11 @@
   </p>
 {:else if linkError}
   <p class="small muted">No direct connection ({linkError}); the camera carries on.</p>
+{:else if colorsLost && !result}
+  <p class="small muted" data-testid="colors-advice">
+    The sender shows color codes, but this camera does not tell the colors apart. The transfer still arrives, more
+    slowly than it could: turning off Color codes on the sender is faster.
+  </p>
 {:else if tcpOffered && !result}
   <p class="small muted" data-testid="tcp-offer">
     The sender (a command-line program) offers a network connection, but only to another command-line receiver

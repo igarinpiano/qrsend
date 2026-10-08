@@ -194,6 +194,13 @@ pub fn parse_device_id(id: &str) -> JsResult<JsValue> {
     to_js(&device_info(&DevicePublic::parse(id).map_err(js_err)?))
 }
 
+/// The colors of a color code worth showing (bit 0 red, 1 green, 2 blue) to
+/// a camera that reports `seen`, out of those `shown`.
+#[wasm_bindgen(js_name = colorsWorthShowing)]
+pub fn colors_worth_showing(shown: u8, seen: u8) -> u8 {
+    feedback::colors_worth_showing(shown, seen)
+}
+
 /// SHA-256 fingerprint of the DTLS certificate that follows from `seed`: the
 /// one a receiver that cannot show an answer connects with (see
 /// `qrsend_core::linkcert`).
@@ -641,6 +648,8 @@ pub struct SendSession {
     asking: bool,
     /// Whether the stream also says that feedback may come as sound.
     hearing: bool,
+    /// The colors the codes are stacked in (0: black and white).
+    colors: u8,
     /// Link codes (an offer to connect another way) to mix into the stream.
     link: Vec<String>,
     /// Codes shown since something besides data had to be said.
@@ -740,6 +749,7 @@ impl SendSession {
             frames: 0,
             asking: false,
             hearing: false,
+            colors: 0,
             link: Vec::new(),
             since_extras: 0,
             offer_since: 0.0,
@@ -933,6 +943,18 @@ impl SendSession {
         }
     }
 
+    /// The colors the codes are being stacked in (bit 0 red, 1 green, 2
+    /// blue; 0: black and white). The receiver is told through notices: it
+    /// cannot always tell by looking.
+    #[wasm_bindgen(js_name = setColors)]
+    pub fn set_colors(&mut self, colors: u8) {
+        if colors != self.colors {
+            self.since_extras = 0;
+            self.extra_turn_due.soon();
+        }
+        self.colors = colors & 0b111;
+    }
+
     /// Tells the receiver (through notices mixed into the stream) whether
     /// this sender can read feedback codes.
     #[wasm_bindgen(js_name = askForFeedback)]
@@ -1018,6 +1040,7 @@ impl SendSession {
             fps: setting.map(|s| s.fps),
             level: setting.map(|s| s.level as u32),
             read_share: self.tuner.as_ref().map(|t| t.ratio()),
+            colors: f.camera.colors,
         })
     }
 
@@ -1045,6 +1068,7 @@ impl Receive {
             if let Ok(notice) = SenderNotice::decode(text) {
                 self.feedback_for = notice.wants_feedback.then_some(notice.session_id);
                 self.feedback_by_sound = notice.wants_feedback && notice.hears_sound;
+                self.sender_colors = Some((notice.session_id, notice.colors));
             }
         } else if let Ok(frame) = Frame::from_qr_text(text) {
             self.push_frame(frame, out);
@@ -1101,8 +1125,9 @@ impl SendSession {
     fn notice(&self) -> String {
         SenderNotice {
             session_id: self.sender.layout().session_id,
-            wants_feedback: true,
+            wants_feedback: self.asking,
             hears_sound: self.hearing,
+            colors: self.colors,
         }
         .encode()
     }
@@ -1111,7 +1136,10 @@ impl SendSession {
         let offering = !self.link.is_empty();
         let greeting = greeting(js_sys::Date::now() - self.offer_since, offering);
         self.sender.set_meta_urgent(greeting);
-        let count = self.asking as usize + self.link.len();
+        // A notice says that feedback is taken, and in which colors the codes
+        // are stacked: worth saying when either is the case.
+        let noticing = self.asking || self.colors != 0;
+        let count = noticing as usize + self.link.len();
         if count == 0 {
             return None;
         }
@@ -1128,7 +1156,7 @@ impl SendSession {
         let parts = self.link.len();
         if greeting {
             // The offer twice for every notice: it is what a newcomer needs.
-            let turn = self.extra_turn % (2 * parts + self.asking as usize);
+            let turn = self.extra_turn % (2 * parts + noticing as usize);
             self.extra_turn = self.extra_turn.wrapping_add(1);
             return Some(if turn < 2 * parts {
                 self.link[turn % parts].clone()
@@ -1138,10 +1166,10 @@ impl SendSession {
         }
         let turn = self.extra_turn % count;
         self.extra_turn = self.extra_turn.wrapping_add(1);
-        if self.asking && turn == 0 {
+        if noticing && turn == 0 {
             return Some(self.notice());
         }
-        Some(self.link[turn - self.asking as usize].clone())
+        Some(self.link[turn - noticing as usize].clone())
     }
 }
 
@@ -1232,6 +1260,9 @@ struct ReceiverReport {
     fps: Option<f64>,
     level: Option<u32>,
     read_share: Option<f64>,
+    /// What the receiver's camera makes of the colors (see
+    /// `feedback::Camera::colors`; 0: not told).
+    colors: u8,
 }
 
 // ---------------------------------------------------------------- receiving
@@ -1302,6 +1333,8 @@ pub struct Receive {
     feedback_for: Option<u32>,
     /// That sender also listens for feedback as sound.
     feedback_by_sound: bool,
+    /// What the sender of a session said about its colors.
+    sender_colors: Option<(u32, u8)>,
 }
 
 #[wasm_bindgen]
@@ -1322,6 +1355,7 @@ impl Receive {
             completed: Vec::new(),
             feedback_for: None,
             feedback_by_sound: false,
+            sender_colors: None,
         })
     }
 
@@ -1603,11 +1637,12 @@ impl Receive {
     /// second, and camera pixels per dot of the codes (0: unknown). Goes
     /// into the feedback, for a sender that adjusts to it.
     #[wasm_bindgen(js_name = setCamera)]
-    pub fn set_camera(&mut self, reads: f64, dot: f64) {
+    pub fn set_camera(&mut self, reads: f64, dot: f64, colors: u8) {
         let tenths = |v: f64| (v * 10.0).round().clamp(0.0, 10_000.0) as u32;
         self.rx.set_camera(feedback::Camera {
             reads_tenths: tenths(reads),
             dot_tenths: tenths(dot),
+            colors: colors & 0x3f,
         });
     }
 
@@ -1623,6 +1658,17 @@ impl Receive {
     }
 
     /// Whether the sender of this transfer listens for feedback as sound.
+    /// The colors the sender of this transfer says its codes are stacked in
+    /// (bit 0 red, 1 green, 2 blue; 0: black and white); -1 when it has not
+    /// said.
+    #[wasm_bindgen(getter, js_name = senderColors)]
+    pub fn sender_colors(&self) -> i32 {
+        match (self.sender_colors, self.rx.params()) {
+            (Some((session, colors)), Some(p)) if session == p.session_id => colors as i32,
+            _ => -1,
+        }
+    }
+
     #[wasm_bindgen(getter, js_name = feedbackBySound)]
     pub fn feedback_by_sound(&self) -> bool {
         self.feedback_by_sound

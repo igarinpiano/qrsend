@@ -557,6 +557,7 @@ impl<'a, S: SegmentSource> Connection<'a, S> {
                         session_id: self.direct.layout().session_id,
                         wants_feedback: true,
                         hears_sound: false,
+                        colors: 0,
                     };
                     direct::pack(&mut message, notice.encode().as_bytes());
                     records += 1;

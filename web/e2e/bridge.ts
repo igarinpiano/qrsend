@@ -48,14 +48,20 @@ export async function broadcast(
   everyMs: number,
   scale = 1,
   margin = 24,
-  /** Pass on only this color of the picture, as gray (0 red, 1 green, 2 blue): a camera that makes out one color. */
-  only = -1,
+  /**
+   * What the camera makes of the colors. A number: only that color of the picture, as gray (0 red, 1 green, 2 blue).
+   * A list of three: where the camera's red, green and blue come from (a color of the picture, or -1 for nothing
+   * legible, an even gray; or -2 for all three run together). `[-1, 1, 2]` does not read red; `[1, 1, 2]` takes red
+   * for green; `[-1, 1, -1]` reads green alone; `[-2, -2, -2]` sees no color at all, so that three codes on top of
+   * each other are a blur to it while a black-and-white code is as clear as ever.
+   */
+  only: number | readonly [number, number, number] = -1,
 ) {
   await page.evaluate(
-    ([name, sel, every, zoom, margin, only]) => {
+    ([name, sel, every, zoom, margin, from]) => {
       const out = new BroadcastChannel(name);
       const stage = document.createElement("canvas");
-      const ctx = stage.getContext("2d", { willReadFrequently: only >= 0 })!;
+      const ctx = stage.getContext("2d", { willReadFrequently: !!from })!;
       setInterval(async () => {
         const el = document.querySelector(sel) as HTMLCanvasElement | HTMLImageElement | null;
         if (!el) return;
@@ -67,15 +73,18 @@ export async function broadcast(
         ctx.fillRect(0, 0, stage.width, stage.height);
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(el, margin, margin, w * zoom, h * zoom);
-        if (only >= 0) {
+        if (from) {
           const picture = ctx.getImageData(0, 0, stage.width, stage.height);
           const d = picture.data;
-          for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = d[i + only];
+          for (let i = 0; i < d.length; i += 4) {
+            const [r, g, b] = [d[i], d[i + 1], d[i + 2]];
+            for (let c = 0; c < 3; c++) d[i + c] = from[c] === -2 ? (r + g + b) / 3 : from[c] < 0 ? 128 : [r, g, b][from[c]];
+          }
           ctx.putImageData(picture, 0, 0);
         }
         out.postMessage(await createImageBitmap(stage));
       }, every);
     },
-    [channel, selector, everyMs, scale, margin, only] as const,
+    [channel, selector, everyMs, scale, margin, typeof only === "number" ? (only < 0 ? null : ([only, only, only] as const)) : only] as const,
   );
 }

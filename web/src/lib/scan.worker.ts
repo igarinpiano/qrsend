@@ -130,10 +130,69 @@ async function detectColors(bitmap: ImageBitmap, native: BarcodeDetector | null)
 const COLOR_PROBE_EVERY = 12;
 let colored = false;
 let sinceProbe = 0;
+// What the camera makes of the three colors, over the last pictures taken
+// apart in which anything was read: in which parts codes were found, and
+// which pairs of parts held the same codes. The sender is told (bits 0-2:
+// red, green, blue are read; bits 3-5: red and green, red and blue, green
+// and blue look alike), and when it is showing color codes it keeps to the
+// colors this camera tells apart. Zero: nothing to say yet.
+const PAIRS = [
+  [0, 1],
+  [0, 2],
+  [1, 2],
+] as const;
+interface ColorsSeen {
+  read: boolean[];
+  /** Per pair: both parts were read, and whether they shared a code. */
+  both: boolean[];
+  alike: boolean[];
+}
+const seen: ColorsSeen[] = [];
+const SEEN_REMEMBERED = 8;
+let colors = 0;
+
+function noteColors(parts: Found[][]): void {
+  const read = parts.map((p) => p.length > 0);
+  if (!read.some(Boolean)) return;
+  const texts = parts.map((p) => new Set(p.map((f) => f.text)));
+  const both = PAIRS.map(([a, b]) => read[a] && read[b]);
+  const alike = PAIRS.map(([a, b], n) => both[n] && [...texts[a]].some((t) => texts[b].has(t)));
+  seen.push({ read, both, alike });
+  if (seen.length > SEEN_REMEMBERED) seen.shift();
+  if (seen.length < SEEN_REMEMBERED) {
+    colors = 0;
+    return;
+  }
+  let bits = 0;
+  // A part counts as read when it was in a fair share of the pictures (a
+  // weak camera loses any part now and then)…
+  for (let c = 0; c < 3; c++) if (seen.filter((s) => s.read[c]).length * 3 >= seen.length) bits |= 1 << c;
+  // …and two parts as alike when they mostly were, whenever both were read.
+  PAIRS.forEach((_, n) => {
+    const together = seen.filter((s) => s.both[n]);
+    if (together.length >= 2 && together.filter((s) => s.alike[n]).length * 2 > together.length) bits |= 8 << n;
+  });
+  colors = bits;
+}
+
+/** Only one part held codes in the picture last taken apart. */
+const oneColorLast = () => seen.length > 0 && seen[seen.length - 1].read.filter(Boolean).length === 1;
+
+// What the sender said about its colors (see `declare` below): with two or
+// more in use, every picture is read color by color whatever it looks like.
+// To a camera that does not keep the colors apart, color codes look black
+// and white; going by looks, the receiver would read one picture in twelve
+// by color and never find out what it is missing.
+let declared = -1;
+const declaredColored = () => declared > 0 && (declared & (declared - 1)) !== 0;
 
 async function scan(bitmap: ImageBitmap, native: BarcodeDetector | null): Promise<Found[]> {
   sinceProbe++;
-  if (!colored && sinceProbe < COLOR_PROBE_EVERY) return detect(bitmap, native);
+  // (Sooner again after a picture with codes in one part only: that is how
+  // color codes look to a camera that cannot keep the colors apart, and the
+  // sender should hear of it before long.)
+  const every = oneColorLast() ? COLOR_PROBE_EVERY / 4 : COLOR_PROBE_EVERY;
+  if (!colored && !declaredColored() && sinceProbe < every) return detect(bitmap, native);
   sinceProbe = 0;
   const parts = await detectColors(bitmap, native);
   const all = new Map<string, Found>();
@@ -146,13 +205,18 @@ async function scan(bitmap: ImageBitmap, native: BarcodeDetector | null): Promis
     // Every part that could be read holds the same codes.
     colored = false;
   }
+  noteColors(parts);
   return [...all.values()];
 }
 
 /** Whether to report where the codes are and how sharp the picture is (for advice on holding the camera). */
 let guiding = false;
 
-self.onmessage = async (e: MessageEvent<{ bitmap?: ImageBitmap; zxing?: boolean; guide?: boolean }>) => {
+self.onmessage = async (e: MessageEvent<{ bitmap?: ImageBitmap; zxing?: boolean; guide?: boolean; declared?: number }>) => {
+  if (e.data.declared !== undefined) {
+    declared = e.data.declared;
+    return;
+  }
   if (e.data.guide !== undefined) {
     guiding = e.data.guide;
     return;
@@ -180,7 +244,7 @@ self.onmessage = async (e: MessageEvent<{ bitmap?: ImageBitmap; zxing?: boolean;
           sharp: sharpness(bitmap),
         }
       : undefined;
-    self.postMessage({ texts, engine, colored, ms, look });
+    self.postMessage({ texts, engine, colored, colors, ms, look });
   } catch (err) {
     self.postMessage({ texts: [], engine, colored, error: String(err) });
   } finally {

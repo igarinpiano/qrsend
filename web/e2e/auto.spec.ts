@@ -221,3 +221,164 @@ test("codes shown to the other device: large, placeable, full screen", async ({ 
     await browser.close();
   }
 });
+
+// Color codes are three times the codes only for a camera that keeps the
+// colors apart. Real cameras fall short in different ways: one reads a
+// single color (a real phone did), one loses a color, one takes two for the
+// same, one sees no color at all. The receiver reads each color on its own
+// and says in its feedback what it finds; the sender keeps to the colors
+// that camera tells apart, or goes back to black and white.
+for (const [what, camera, note, colors] of [
+  ["reads green alone", [-1, 1, -1], /colors off/, 1],
+  ["sees no colors (everything as its green)", [1, 1, 1], /colors off/, 1],
+  ["does not read red", [-1, 1, 2], /colors: green and blue only/, 2],
+  ["does not read blue", [0, 1, -1], /colors: red and green only/, 2],
+  ["takes red for green", [1, 1, 2], /colors: green and blue only/, 2],
+  ["takes blue for red", [0, 1, 0], /colors: red and green only/, 2],
+] as const) {
+  test(`color codes: a camera that ${what} is shown what it can tell apart`, async ({ playwright, baseURL }) => {
+    test.setTimeout(120_000);
+    const browser = await playwright.chromium.launch({
+      args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+    });
+    try {
+      const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1000, height: 700 } });
+      const sender = await context.newPage();
+      await cameraFrom(sender, "to-sender");
+      await enablePreview(sender, /Two-way transfer/, /Color codes/);
+      await sender.goto("./#/send");
+      // Enough to still be going when the colors change.
+      const data = crypto.randomBytes(40_000);
+      await sender.locator('input[type="file"]').first().setInputFiles({ name: "colors.bin", mimeType: "application/octet-stream", buffer: data });
+      await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+      await sender.getByLabel("Density").selectOption("low");
+      await sender.getByLabel("Codes on screen").selectOption("1");
+      await sender.getByRole("button", { name: "Start sending" }).click();
+      await expect(sender.getByText("×3 colors")).toBeVisible();
+
+      const receiver = await context.newPage();
+      await cameraFrom(receiver, "to-receiver");
+      await receiver.goto("./#/receive");
+      await broadcast(sender, "to-receiver", "canvas", 50, 1, 24, camera);
+      await expect(receiver.getByTestId("feedback")).toBeVisible({ timeout: 30_000 });
+      await broadcast(receiver, "to-sender", '[data-testid="feedback"]', 150, 2);
+
+      await expect(sender.getByTestId("colors-reduced")).toHaveText(note, { timeout: 60_000 });
+      await expect(sender.getByText("×3 colors")).toHaveCount(0);
+      if (colors === 2) await expect(sender.getByText("×2 colors")).toBeVisible();
+      // And it stays at that: what is left, the camera does tell apart.
+      await sender.waitForTimeout(6_000);
+      await expect(sender.getByTestId("colors-reduced")).toHaveText(note);
+      if (colors === 2) await expect(sender.getByText("×2 colors")).toBeVisible();
+      await expect(receiver.getByTestId("received-file")).toHaveText(["colors.bin"], { timeout: 90_000 });
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
+// A camera that tells all three apart keeps all three.
+test("color codes: a camera that reads every color keeps them", async ({ playwright, baseURL }) => {
+  const browser = await playwright.chromium.launch({
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+  });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1000, height: 700 } });
+    const sender = await context.newPage();
+    await cameraFrom(sender, "to-sender");
+    await enablePreview(sender, /Two-way transfer/, /Color codes/);
+    await sender.goto("./#/send");
+    const data = crypto.randomBytes(60_000);
+    await sender.locator('input[type="file"]').first().setInputFiles({ name: "colors.bin", mimeType: "application/octet-stream", buffer: data });
+    await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    await sender.getByLabel("Density").selectOption("low");
+    await sender.getByLabel("Codes on screen").selectOption("1");
+    await sender.getByRole("button", { name: "Start sending" }).click();
+    const receiver = await context.newPage();
+    await cameraFrom(receiver, "to-receiver");
+    await receiver.goto("./#/receive");
+    await broadcast(sender, "to-receiver", "canvas", 50);
+    await expect(receiver.getByTestId("feedback")).toBeVisible({ timeout: 30_000 });
+    await broadcast(receiver, "to-sender", '[data-testid="feedback"]', 150, 2);
+    await expect(sender.getByTestId("receiver-report")).toBeVisible({ timeout: 30_000 });
+    await sender.waitForTimeout(8_000);
+    await expect(sender.getByText("×3 colors")).toBeVisible();
+    await expect(sender.getByTestId("colors-reduced")).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+// The hard case: a camera to which color codes are no codes at all (three on
+// top of each other, seen without color, are a blur). It reads nothing, so
+// it never learns that feedback is wanted, and the sender hears nothing. A
+// sender that expects feedback and gets none shows plain codes until it
+// does; the colors then get their turn, and when the receiver stops reading
+// under them, they are off for good.
+test("color codes: a camera that reads nothing in them gets plain codes", async ({ playwright, baseURL }) => {
+  test.setTimeout(150_000);
+  const browser = await playwright.chromium.launch({
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+  });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1000, height: 700 } });
+    const sender = await context.newPage();
+    await cameraFrom(sender, "to-sender");
+    await enablePreview(sender, /Two-way transfer/, /Color codes/);
+    await sender.goto("./#/send");
+    const data = crypto.randomBytes(60_000);
+    await sender.locator('input[type="file"]').first().setInputFiles({ name: "blur.bin", mimeType: "application/octet-stream", buffer: data });
+    await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    await sender.getByLabel("Density").selectOption("low");
+    await sender.getByLabel("Codes on screen").selectOption("1");
+    await sender.getByRole("button", { name: "Start sending" }).click();
+    await expect(sender.getByText("×3 colors")).toBeVisible();
+
+    const receiver = await context.newPage();
+    await cameraFrom(receiver, "to-receiver");
+    await receiver.goto("./#/receive");
+    await broadcast(sender, "to-receiver", "canvas", 50, 1, 24, [-2, -2, -2]);
+    await broadcast(receiver, "to-sender", '[data-testid="feedback"]', 150, 2);
+
+    // (The receiver can only come to show its feedback through the plain
+    // codes: it reads nothing else. They are shown for a moment only, until
+    // the sender hears it.)
+    await expect(receiver.getByTestId("feedback")).toBeVisible({ timeout: 30_000 });
+    await expect(sender.getByTestId("colors-reduced")).toHaveText(/colors off: the receiver reads nothing while they are shown/, { timeout: 60_000 });
+    await expect(receiver.getByTestId("received-file")).toHaveText(["blur.bin"], { timeout: 90_000 });
+  } finally {
+    await browser.close();
+  }
+});
+
+// Without feedback the sender cannot know. The receiver can: the sender says
+// in its notices that it shows colors, and the receiver sees that its camera
+// does not tell them apart. It says so to the person.
+test("color codes: without feedback, the receiver says that its camera does not tell them apart", async ({ playwright, baseURL }) => {
+  const browser = await playwright.chromium.launch({
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+  });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1000, height: 700 } });
+    const sender = await context.newPage();
+    await enablePreview(sender, /Color codes/);
+    await sender.goto("./#/send");
+    const data = crypto.randomBytes(200_000);
+    await sender.locator('input[type="file"]').first().setInputFiles({ name: "one-way.bin", mimeType: "application/octet-stream", buffer: data });
+    await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    await sender.getByLabel("Density").selectOption("low");
+    await sender.getByLabel("Codes on screen").selectOption("1");
+    await sender.getByRole("button", { name: "Start sending" }).click();
+    await expect(sender.getByText("×3 colors")).toBeVisible();
+
+    const receiver = await context.newPage();
+    await cameraFrom(receiver, "to-receiver");
+    await receiver.goto("./#/receive");
+    await broadcast(sender, "to-receiver", "canvas", 50, 1, 24, [1, 1, 1]);
+    await expect(receiver.getByTestId("colors-advice")).toBeVisible({ timeout: 60_000 });
+    // The sender, hearing nothing and expecting nothing, goes on as chosen.
+    await expect(sender.getByText("×3 colors")).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});

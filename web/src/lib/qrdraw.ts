@@ -68,9 +68,10 @@ export function drawGrid(
 const COLORS = ["#fff", "#0ff", "#f0f", "#00f", "#ff0", "#0f0", "#f00", "#000"];
 
 /**
- * Like `drawGrid`, but every cell stacks three codes: one in each of the red,
- * green and blue parts of the picture (a dark module switches that part off).
- * `data` holds `3 × cells` codes; cell `n` shows codes `3n`, `3n+1`, `3n+2`.
+ * Like `drawGrid`, but every cell stacks several codes: one in each of the
+ * colors in `channels` (0 red, 1 green, 2 blue; a dark module switches that
+ * part of the picture off, and a color left out stays on throughout). `data`
+ * holds `k × cells` codes for `k` colors; cell `n` shows codes `kn … kn+k-1`.
  */
 export function drawColorGrid(
   canvas: HTMLCanvasElement,
@@ -80,6 +81,7 @@ export function drawColorGrid(
   cols: number,
   rows: number,
   quiet: number,
+  channels: readonly number[] = [0, 1, 2],
 ): number {
   const dpr = window.devicePixelRatio || 1;
   const w = Math.floor(canvas.clientWidth * dpr);
@@ -91,7 +93,8 @@ export function drawColorGrid(
   const ctx = canvas.getContext("2d", { alpha: false })!;
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, w, h);
-  const cells = Math.min(Math.floor(count / 3), cols * rows);
+  const k = channels.length;
+  const cells = Math.min(Math.floor(count / k), cols * rows);
   if (cells === 0) return 0;
   const extW = cols * (modules + quiet) + quiet;
   const extH = rows * (modules + quiet) + quiet;
@@ -103,14 +106,18 @@ export function drawColorGrid(
   for (let n = 0; n < cells; n++) {
     const ox = x0 + quiet * scale + (n % cols) * pitch;
     const oy = y0 + quiet * scale + Math.floor(n / cols) * pitch;
-    const base = n * 3 * size;
+    const base = n * k * size;
     for (let y = 0; y < modules; y++) {
       const row = y * modules;
       let run = 0;
       let current = 0;
       for (let x = 0; x <= modules; x++) {
         const at = base + row + x;
-        const color = x < modules ? data[at] | (data[at + size] << 1) | (data[at + 2 * size] << 2) : -1;
+        let color = -1;
+        if (x < modules) {
+          color = 0;
+          for (let j = 0; j < k; j++) color |= data[at + j * size] << channels[j];
+        }
         if (color === current) continue;
         if (current > 0) {
           ctx.fillStyle = COLORS[current];

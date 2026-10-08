@@ -12,16 +12,19 @@
     allowFile = false,
     compact = false,
     advise = true,
+    senderColors = -1,
   }: {
     ontexts: (texts: string[]) => void;
     /** What the camera makes of the codes: pictures read per second, camera pixels per dot. */
-    oncamera?: (reads: number, dot: number) => void;
+    oncamera?: (reads: number, dot: number, colors: number) => void;
     active?: boolean;
     allowFile?: boolean;
     /** Take little room: something else on the page matters more right now. */
     compact?: boolean;
     /** Whether advice on holding the camera is wanted (not while the camera has nothing it must see). */
     advise?: boolean;
+    /** What the sender said about the colors of its codes (-1: nothing). */
+    senderColors?: number;
   } = $props();
 
   let video: HTMLVideoElement;
@@ -56,6 +59,7 @@
   // Camera guidance (a preview feature): advice on how to hold the camera.
   // A captured screen or a video file needs none.
   const guideFeature = featureOn("guide");
+
 
   // Receiving from the screen (a preview feature, and only where the browser can capture one).
   const screenOffered = featureOn("screenCapture") && Scanner.canCaptureScreen;
@@ -101,6 +105,10 @@
   }
 
   let ready = $state(false);
+  $effect(() => {
+    const colors = senderColors;
+    if (ready) scanner?.declareColors(colors);
+  });
   let autoStarted = false;
 
   onMount(() => {
@@ -119,11 +127,12 @@
           msWithout: s.msWithout,
           codes: s.codes,
           color: !!s.colored,
+          colorsRead: s.colors || undefined,
           dotPx: s.dot,
           advice: s.advice,
         }));
         // Only a camera's numbers say something about the camera.
-        if (!onScreen && !fileProgress) oncamera?.(s.rate, s.dot);
+        if (!onScreen && !fileProgress) oncamera?.(s.rate, s.dot, s.colors ?? 0);
       },
     );
     scanner.guide(guideFeature);

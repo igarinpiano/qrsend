@@ -347,6 +347,7 @@ function state(s: RecvSession): RecvState {
     result: s.result,
     persistent,
     feedbackBySound: s.r.feedbackBySound,
+    senderColors: s.r.senderColors,
     foreign: s.foreign,
     already: s.already,
     // "Complete" only once everything is verified and unpacked.
@@ -542,11 +543,11 @@ type Pushed = { locked?: string; foreign?: string; rejected: number[]; records: 
 async function recvPush(
   texts: string[],
   packed: ArrayBuffer[] = [],
-  camera?: { reads: number; dot: number },
+  camera?: { reads: number; dot: number; colors?: number },
 ): Promise<RecvState> {
   const s = receiving;
   if (!s) throw new Error("not receiving");
-  if (camera) s.r.setCamera(camera.reads, camera.dot);
+  if (camera) s.r.setCamera(camera.reads, camera.dot, camera.colors ?? 0);
   if (s.result || s.error) {
     // The data is in, but the sender may only now say that it reads
     // feedback: it still has to learn that everything arrived.
@@ -701,6 +702,7 @@ const api: EngineApi = {
   sendTextChannelUp: async (up) => sending?.session.setTextChannelUp(up),
   sendLinkOffer: async (payload, id, known) => sendLinkOffer(payload, id, known),
   sendAskForFeedback: async (on, bySound) => sending?.session.askForFeedback(on, bySound),
+  sendColors: async (colors) => sending?.session.setColors(colors),
   sendFeedback: async (text, linkTaken) => sendFeedback(text, linkTaken),
   sendReceiverSilent: async (forget) => sending?.session.receiverSilent(forget),
   sendTune: async (levels, scales, fps, level) =>

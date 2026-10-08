@@ -70,6 +70,8 @@ export interface ReceiverReport {
   level?: number | null;
   /** With `sendTune`: the share of the shown codes the receiver read when last measured. */
   readShare?: number | null;
+  /** What the receiver's camera makes of the colors: bits 0-2 red, green, blue are read; bits 3-5 red and green, red and blue, green and blue look alike (0: not told). */
+  colors?: number;
 }
 
 export interface RecvInfo {
@@ -122,6 +124,8 @@ export interface RecvState {
   persistent: boolean;
   /** The sender also listens for feedback as sound. */
   feedbackBySound: boolean;
+  /** The colors the sender says its codes are stacked in (bits: red, green, blue; 0: black and white), -1: not said. */
+  senderColors: number;
   /** Feedback code for the sender (`QSF1-…`), when the sender asked for feedback. */
   feedback?: string;
   /** Records in the binary messages of this push. */
@@ -184,6 +188,8 @@ export interface EngineApi {
    * them as sound.
    */
   sendAskForFeedback(on: boolean, bySound: boolean): Promise<void>;
+  /** The colors the codes are being stacked in (bit 0 red, 1 green, 2 blue; 0: black and white): the receiver is told. */
+  sendColors(colors: number): Promise<void>;
   /**
    * A feedback code from the receiver; null unless it is feedback for this transfer. `linkTaken`: when it came
    * through the network connection, the number of records the receiver had taken in from it by then.
@@ -205,7 +211,7 @@ export interface EngineApi {
    * Codes read by a camera (text) and messages from a network connection (packed records). `camera`: what the
    * camera makes of the codes at the moment (pictures read per second, camera pixels per dot), for the feedback.
    */
-  recvPush(texts: string[], packed?: ArrayBuffer[], camera?: { reads: number; dot: number }): Promise<RecvState>;
+  recvPush(texts: string[], packed?: ArrayBuffer[], camera?: { reads: number; dot: number; colors?: number }): Promise<RecvState>;
   recvStop(): Promise<void>;
   inboxList(): Promise<SessionRecord[]>;
   inboxOpen(session: string): Promise<RecvResult>;

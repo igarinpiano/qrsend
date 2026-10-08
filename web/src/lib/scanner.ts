@@ -13,6 +13,8 @@ export interface ScanStats {
   height: number;
   /** The stream is being read as color codes. */
   colored?: boolean;
+  /** What the camera makes of the three colors (see `scan.worker.ts`; 0: nothing to say). */
+  colors?: number;
   /** Pictures read per second, lately. */
   rate: number;
   /** Milliseconds the decoder took per picture, lately: with codes in it, and without. */
@@ -71,7 +73,7 @@ export class Scanner {
     // and for telling a sender that adjusts to it how large they come out.
     this.worker.postMessage({ guide: true });
     this.worker.onmessage = (
-      e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean; ms?: number; error?: string; look?: Look }>,
+      e: MessageEvent<{ texts: string[]; engine: string; colored?: boolean; colors?: number; ms?: number; error?: string; look?: Look }>,
     ) => {
       if (e.data.error && /fetch|wasm|import/i.test(e.data.error)) loadFailed();
       this.busy = false;
@@ -86,6 +88,7 @@ export class Scanner {
       this.stats.codes += e.data.texts.length;
       this.stats.engine = e.data.engine;
       this.stats.colored = !!e.data.colored;
+      this.stats.colors = e.data.colors ?? 0;
       this.stats.advice = e.data.look && this.adviser ? this.adviser.notice(e.data.look) : undefined;
       const dot = e.data.look ? dotSize(e.data.look) : 0;
       if (dot > 0) this.stats.dot = follow(this.stats.dot, dot);
@@ -96,6 +99,14 @@ export class Scanner {
   }
 
   private adviser?: Guide;
+
+  /**
+   * What the sender said about the colors of its codes (bit 0 red, 1 green, 2 blue; 0: black and white; -1: nothing).
+   * With colors declared, every picture is read color by color, whatever it looks like.
+   */
+  declareColors(colors: number): void {
+    this.worker.postMessage({ declared: colors });
+  }
 
   /** Whether to work out advice on holding the camera (`stats.advice`). */
   guide(on: boolean): void {

@@ -4,7 +4,7 @@
   import type { FrameBatch, ReceiverReport, SendStarted } from "../lib/engine-types";
   import { drawColorGrid, drawGrid, fitGrid } from "../lib/qrdraw";
   import { bytes, duration, RateMeter } from "../lib/format";
-  import { parseDeviceId, ready, verifyDeviceSignature } from "../lib/core";
+  import { colorsWorthShowing, parseDeviceId, ready, verifyDeviceSignature } from "../lib/core";
   import { rememberLink, trustedDevices } from "../lib/devices";
   import { KIND_SEEDED_OFFER, LINK_PREFIX, LanSender, canConnect, fingerprintHex, introductionMessage, type LinkState } from "../lib/lan";
   import { log, logEvery } from "../lib/log";
@@ -29,6 +29,9 @@
   let rows = $state(1);
   let error = $state("");
   let shown: FrameBatch | undefined;
+  /** The colors the codes being shown, and the ones waiting, were made for. */
+  let shownChannels: number[] = [];
+  let readyChannels: number[] = [];
   let perPass = $state(untrack(() => info.framesPerPass));
 
   // Two-way transfer (a preview feature): the stream asks the receiver for
@@ -213,6 +216,11 @@
           log("tx", "automatic speed", { fps, layout: layouts[level]?.join("×"), readShare: r.readShare ?? undefined });
         }
         readShare = r.readShare ?? undefined;
+        if (r.frames > readSoFar) {
+          readSoFar = r.frames;
+          readingAt = performance.now();
+        }
+        colorsRead(r.colors);
         heardAt = performance.now();
         arriving = arrival.update(heardAt, r.remainingBytes);
         quiet = false;
@@ -288,7 +296,7 @@
       codes: frames,
       pass: pass + 1,
       fps,
-      layout: `${cols}×${rows}${layers === 3 ? "×3" : ""}`,
+      layout: `${cols}×${rows}${layers > 1 ? `×${layers}` : ""}`,
       paused,
       receiverBytes: report ? report.totalBytes - report.remainingBytes : undefined,
       of: report?.totalBytes,
@@ -305,6 +313,7 @@
       idle: measured?.nothingToSend,
       cameraReadsPerS: eyeLatest?.rate,
     }));
+    colorsWatch();
     if (!report || finished) return;
     silentFor = performance.now() - heardAt;
     if (silentFor > FEEDBACK_LOST_MS) forget();
@@ -322,16 +331,111 @@
     return fitGrid(info.modules, info.quiet, canvas.clientWidth * dpr, canvas.clientHeight * dpr, MIN_MODULE_PX);
   }
 
-  // Color codes (a preview feature): three codes per cell.
-  const layers = featureOn("color") ? 3 : 1;
+  // Color codes (a preview feature): several codes per cell, one in each of
+  // the colors in use (0 red, 1 green, 2 blue). None: plain black and white.
+  // `colors`: what was decided on. `channels`: what is being shown, which is
+  // plain codes for as long as a receiver that should be heard is not.
+  let colors = $state<number[]>(featureOn("color") ? [0, 1, 2] : []);
+  let colorsHeld = $state(false);
+  const channels = $derived(colorsHeld ? [] : colors);
+  const layers = $derived(Math.max(1, channels.length));
+  // The receiver is told which colors are in use: it cannot always tell by
+  // looking (to a camera that does not keep them apart, color codes look
+  // black and white).
+  $effect(() => {
+    const mask = channels.reduce((m, c) => m | (1 << c), 0);
+    engine.sendColors(mask).catch(() => {});
+  });
+  // Colors are worth showing only as far as the receiver's camera tells them
+  // apart. Its feedback says what it makes of each (which it reads, which
+  // look alike to it: see `scan.worker.ts`); when that keeps saying the same
+  // thing, the colors it gains nothing by go: one it does not read, all but
+  // one of several it takes for the same. With fewer than two left, plain
+  // codes are read better.
+  const COLOR_NAMES = ["red", "green", "blue"];
+  const COLOR_REPORTS = 4;
+  /** After a change, what the receiver says is about the old colors for a while. */
+  const COLOR_SETTLE_MS = 3000;
+  let colorsProposed = 0;
+  let colorsAgreed = 0;
+  let colorsChangedAt = 0;
+  let colorsNote = $state("");
+  // Feedback says which colors a camera tells apart only if the camera reads
+  // something. One that reads nothing while colors are shown (three codes on
+  // top of each other, to a camera that sees them as one) never gets as far
+  // as showing its feedback. So where feedback is expected and none is
+  // heard, plain codes are shown until it is: a receiver that reads those
+  // answers, and then the colors get their turn. If the receiver then stops
+  // reading while it goes on being heard, the colors are what stopped it.
+  const COLOR_SILENCE_MS = 8000;
+  const COLOR_STUCK_MS = 6000;
+  /** When the receiver last reported more codes read than before, and how many. */
+  let readingAt = 0;
+  let readSoFar = -1;
+  function colorsWatch() {
+    if (colors.length < 2 || finished || linkUp) return;
+    const now = performance.now();
+    if (!(watching || hearing)) {
+      // Nobody is expected to answer: the colors stay as chosen.
+      if (colorsHeld) colorsHeld = false;
+      return;
+    }
+    const heardAgo = report ? now - heardAt : now - began;
+    if (!colorsHeld) {
+      if (heardAgo > COLOR_SILENCE_MS) {
+        colorsHeld = true;
+        colorsNote = "plain codes until the receiver is heard";
+        log("tx", "no feedback while colors are shown: plain codes until there is");
+        tune();
+      } else if (report && !report.complete && heardAgo < 2000 && now - Math.max(readingAt, colorsChangedAt) > COLOR_STUCK_MS) {
+        colors = [];
+        colorsNote = "colors off: the receiver reads nothing while they are shown";
+        log("tx", "the receiver is heard but reads nothing while colors are shown: plain codes from here on");
+        tune();
+      }
+    } else if (report && heardAgo < 1500) {
+      colorsHeld = false;
+      colorsNote = "";
+      colorsChangedAt = readingAt = now;
+      log("tx", "the receiver is heard: colors again");
+      tune();
+    }
+  }
+
+  function colorsRead(seen: number | undefined) {
+    if (channels.length < 2 || !seen || performance.now() - colorsChangedAt < COLOR_SETTLE_MS) return;
+    const shownNow = channels.reduce((mask, c) => mask | (1 << c), 0);
+    let keep: number;
+    try {
+      keep = colorsWorthShowing(shownNow, seen);
+    } catch {
+      return;
+    }
+    colorsAgreed = keep === colorsProposed ? colorsAgreed + 1 : 1;
+    colorsProposed = keep;
+    if (keep === shownNow || colorsAgreed < COLOR_REPORTS) return;
+    const kept = [0, 1, 2].filter((c) => keep & (1 << c));
+    colors = kept.length >= 2 ? kept : [];
+    colorsNote =
+      kept.length >= 2
+        ? `colors: ${kept.map((c) => COLOR_NAMES[c]).join(" and ")} only (all the receiver's camera tells apart)`
+        : "colors off: the receiver's camera does not tell them apart";
+    colorsAgreed = 0;
+    colorsChangedAt = performance.now();
+    log("tx", "colors reduced to what the receiver tells apart", { seen: seen.toString(2), now: kept.map((c) => COLOR_NAMES[c]).join("+") || "plain" });
+    tune();
+  }
 
   /** White space beside the codes (CSS pixels on each side): room for the camera picture while aiming. */
   let sideRoom = $state(0);
 
   function draw() {
     if (!shown) return;
-    const paint = layers === 3 ? drawColorGrid : drawGrid;
-    const scale = paint(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet);
+    // (In the colors the codes were made for, which may have changed since.)
+    const scale =
+      shownChannels.length > 0
+        ? drawColorGrid(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet, shownChannels)
+        : drawGrid(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet);
     const dpr = window.devicePixelRatio || 1;
     const used = (cols * (info.modules + info.quiet) + info.quiet) * scale;
     sideRoom = Math.max(0, (canvas.width - used) / 2 / dpr);
@@ -356,10 +460,12 @@
       if (fetching || stopped) return;
       fetching = true;
       const [c, r] = layout();
+      const colors = [...channels];
       engine
-        .sendFrames(c * r * layers)
+        .sendFrames(c * r * Math.max(1, colors.length))
         .then((batch) => {
           ready = batch;
+          readyChannels = colors;
           [cols, rows] = [c, r];
         })
         .catch((e) => (error = e instanceof Error ? e.message : String(e)))
@@ -369,6 +475,7 @@
     const tick = (now: number) => {
       if (!paused && !finished && now >= next && ready) {
         shown = ready;
+        shownChannels = readyChannels;
         ready = undefined;
         draw();
         frames = shown.frames;
@@ -483,12 +590,13 @@
           {#if quiet}
             <span data-testid="receiver-quiet">· not heard for {Math.round(silentFor / 1000)}s, sending on</span>
           {/if}
-          · screen {cols}×{rows}{layers === 3 ? " ×3 colors" : ""} ~{bytes(rate)}/s{autoFeature && readShare != null && !linkUp
+          · screen {cols}×{rows}{layers > 1 ? ` ×${layers} colors` : ""} ~{bytes(rate)}/s{autoFeature && readShare != null && !linkUp
             ? `, ${Math.round(readShare * 100)}% read`
             : ""}
+          {#if colorsNote}<span data-testid="colors-reduced">· {colorsNote}</span>{/if}
         {:else}
           {#if info.resumed}<span data-testid="resumed">Only what is missing ({info.resumed.parts} of {info.resumed.of} parts) ·</span>{/if}
-          Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows}{layers === 3 ? " ×3 colors" : ""} ·
+          Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows}{layers > 1 ? ` ×${layers} colors` : ""} ·
           ~{bytes(rate)}/s
           {info.encrypted ? "· encrypted" : "· not encrypted"}
         {/if}
