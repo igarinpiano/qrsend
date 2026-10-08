@@ -257,3 +257,56 @@ test("remembered devices: the second connection needs no answer code", async ({ 
     await senderBrowser.close();
   }
 });
+
+// Found on real devices: after a connection had dropped, the code for a new
+// one never appeared. A connection cut by a network that goes quiet is not
+// said goodbye to, so the receiver still believed it was connected when the
+// sender, having given up, offered anew.
+test("local network: a connection lost without a word is made again", async ({ playwright, baseURL }) => {
+  test.skip(!hasLanBrowser, "needs Google Chrome: the firewall keeps the bundled browser off the network");
+  const browser = await playwright.chromium.launch({
+    channel: lanBrowser,
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+  });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1100, height: 760 }, acceptDownloads: true });
+    const { cameraFrom, broadcast } = await import("./bridge");
+    const sender = await context.newPage();
+    await cameraFrom(sender, "to-sender");
+    await enablePreview(sender, /Local network boost/);
+    await sender.goto("./#/send");
+    const data = crypto.randomBytes(8_000_000);
+    await sender.locator('input[type="file"]').first().setInputFiles({ name: "again.bin", mimeType: "application/octet-stream", buffer: data });
+    await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    await sender.getByRole("button", { name: "Start sending" }).click();
+    await expect(sender.getByRole("button", { name: /offering LAN/ })).toBeVisible();
+
+    const receiver = await context.newPage();
+    await cameraFrom(receiver, "to-receiver");
+    // A network gone quiet: nothing this side says gets out, and it is not told when the other side hangs up.
+    await receiver.addInitScript(() => {
+      const state = window as unknown as { quiet: boolean };
+      state.quiet = true;
+      const send = RTCDataChannel.prototype.send;
+      RTCDataChannel.prototype.send = function (this: RTCDataChannel, data: never) {
+        if (!state.quiet) send.call(this, data);
+      } as typeof send;
+      Object.defineProperty(RTCDataChannel.prototype, "onclose", { set() {}, get: () => null });
+    });
+    await receiver.goto("./#/receive");
+    await broadcast(sender, "to-receiver", "canvas", 60);
+    await broadcast(receiver, "to-sender", '[data-testid="link-answer"]', 150);
+    await expect(receiver.getByTestId("link-connected")).toBeVisible({ timeout: 30_000 });
+    await expect(sender.getByTestId("link-up")).toBeVisible();
+    // The sender hears nothing back, gives the connection up and offers a new one.
+    await expect(sender.getByRole("button", { name: /offering LAN/ })).toBeVisible({ timeout: 30_000 });
+    await receiver.evaluate(() => ((window as unknown as { quiet: boolean }).quiet = false));
+    // The receiver, which never learned that the first one ended, answers the new offer all the same.
+    await expect(receiver.getByTestId("link-answer")).toBeVisible({ timeout: 20_000 });
+    await expect(sender.getByTestId("link-up")).toBeVisible({ timeout: 20_000 });
+    await expect(receiver.getByTestId("received-file")).toHaveText(["again.bin"], { timeout: 60_000 });
+    await expect(sender.getByText("The other device has everything.")).toBeVisible({ timeout: 30_000 });
+  } finally {
+    await browser.close();
+  }
+});

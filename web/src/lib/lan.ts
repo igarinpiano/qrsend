@@ -625,19 +625,27 @@ export class LanSender {
   }
 
   private close(): void {
-    const all = [this.channel, this.knownChannel, this.pc, this.knownPc];
+    const channels = [this.channel, this.knownChannel];
+    const connections = [this.pc, this.knownPc];
     this.pc = this.knownPc = undefined;
     this.channel = this.knownChannel = undefined;
     this.answered = this.peer = undefined;
     this.binary = false;
     this.wake?.();
-    for (const one of all) {
-      try {
-        one?.close();
-      } catch {
-        /* already closed */
+    const shut = (all: (RTCDataChannel | RTCPeerConnection | undefined)[]) => {
+      for (const one of all) {
+        try {
+          one?.close();
+        } catch {
+          /* already closed */
+        }
       }
-    }
+    };
+    // The channel first, the connection a moment later: closing both at once
+    // takes the connection down before the other side has been told, and it
+    // goes on believing it is connected.
+    shut(channels);
+    setTimeout(() => shut(connections), 500);
   }
 
   /** Ends the connection for good (the transfer is over). */
@@ -710,11 +718,22 @@ export class LanReceiver {
   }
 
   private listen(pc: RTCPeerConnection): void {
+    // A sender that goes away without a word (its page closed, the network
+    // gone) leaves the channel looking open; the connection itself tells.
+    pc.addEventListener("connectionstatechange", () => {
+      if (this.pc !== pc || (pc.connectionState !== "failed" && pc.connectionState !== "closed")) return;
+      const was = this.channel;
+      this.channel = undefined;
+      if (was) this.hooks.state("closed");
+    });
     pc.ondatachannel = (e) => {
       const channel = e.channel;
       this.channel = channel;
       channel.binaryType = "arraybuffer";
+      let greeted = false;
       const opened = () => {
+        if (greeted) return;
+        greeted = true;
         log("link", "answer: channel open");
         this.hooks.state("connected");
         channel.send(HELLO_BINARY);

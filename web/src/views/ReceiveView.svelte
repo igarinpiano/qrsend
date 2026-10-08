@@ -202,6 +202,24 @@
   let silent: LanReceiver | undefined;
   /** Whichever of the two is connected. */
   let linked: LanReceiver | undefined;
+  /** Number of the offer each attempt answers, and of the one the connection came from. */
+  let lanOffer: number | undefined;
+  let silentOffer: number | undefined;
+  let linkedOffer: number | undefined;
+
+  /**
+   * A sender offers a connection only while it has none. So an offer with another number than the one this
+   * connection came from means the sender has given that connection up, whatever it looks like from here (a
+   * connection cut by a network that went quiet is never said goodbye to).
+   */
+  function overIfOfferedAnew(id: number) {
+    if (!linked || linkedOffer === id) return;
+    log("rx", "the sender offers anew: the connection is over", { was: linkedOffer, now: id });
+    linked.stop();
+    linked = undefined;
+    linkState = "closed";
+    clearInterval(replyTimer);
+  }
   let linkCodes: string[] = [];
   let linkPacked: ArrayBuffer[] = [];
   /** Messages handed to the engine in one go: about 2 MiB of data. */
@@ -259,6 +277,7 @@
   // well; whichever connects first is used.)
   let knownTried: number | undefined;
   async function knownOffer(msg: LinkMessage) {
+    overIfOfferedAnew(msg.id);
     if (linkDeclined || linked || knownTried === msg.id) return;
     try {
       const mine = await lastingCertificate(false);
@@ -266,6 +285,7 @@
       knownTried = msg.id;
       log("rx", "offer to this device", { id: msg.id });
       silent ??= receiver();
+      silentOffer = msg.id;
       await silent.acceptKnown(msg, mine.certificate);
     } catch (e) {
       console.warn("offer to this device:", e);
@@ -294,6 +314,7 @@
         if (state === "connected") {
           mark("connected");
           linked = made;
+          linkedOffer = made === silent ? silentOffer : lanOffer;
           log("rx", "connected", { by: made === silent ? "offer to this device" : "answer code", lasting: made.lasting });
           for (const other of [lan, silent]) if (other !== made) other?.stop();
           introducedSelf = false;
@@ -319,6 +340,7 @@
       return;
     }
     mark("offer");
+    overIfOfferedAnew(msg.id);
     if (offer && offer.id === msg.id) return;
     offer = msg;
     connect();
@@ -341,9 +363,10 @@
     lan ??= receiver();
     try {
       linkState = "answering";
+      lanOffer = offer.id;
       const answer = await lan.accept(offer, async () => (await lastingCertificate(true))?.certificate);
       // Connected meanwhile, by the offer made to this device: nothing to show.
-      if (linked) return;
+      if (linked && linked !== lan) return;
       await ready();
       answerUrl = toDataUrl(renderText(answer), 5);
       mark("answer");
