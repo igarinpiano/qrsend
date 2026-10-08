@@ -324,11 +324,22 @@
   // Color codes (a preview feature): three codes per cell.
   const layers = featureOn("color") ? 3 : 1;
 
+  /** White space beside the codes (CSS pixels on each side): room for the camera picture while aiming. */
+  let sideRoom = $state(0);
+
   function draw() {
     if (!shown) return;
     const paint = layers === 3 ? drawColorGrid : drawGrid;
-    paint(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet);
+    const scale = paint(canvas, shown.data, info.modules, shown.count, cols, rows, info.quiet);
+    const dpr = window.devicePixelRatio || 1;
+    const used = (cols * (info.modules + info.quiet) + info.quiet) * scale;
+    sideRoom = Math.max(0, (canvas.width - used) / 2 / dpr);
   }
+
+  // Until the receiver has been seen (its answer or feedback code read),
+  // whoever holds it up needs to see what this camera sees: the picture is
+  // large then, beside the codes where there is room, and small afterwards.
+  const aiming = $derived(watching && !report && !linkUp);
 
   onMount(() => {
     let raf = 0;
@@ -508,7 +519,16 @@
     {/if}
     <div class="row">
       <!-- svelte-ignore a11y_media_has_caption -->
-      <video class="eye" class:on={watching} bind:this={eye} playsinline muted></video>
+      <video
+        class="eye"
+        class:on={watching}
+        class:aiming
+        class:beside={aiming && sideRoom >= 260}
+        bind:this={eye}
+        playsinline
+        muted
+        title="What this device's camera sees: hold the receiver's code into it"
+      ></video>
       {#if twoWayFeature}
         <button class:active={twoWay} aria-pressed={twoWay} onclick={() => listen(!twoWay)} title="Take feedback from the receiver (its screen through this camera, its speaker through this microphone)">
           Two-way{hearing ? " 🎤" : ""}{listenError ? ` (${listenError})` : twoWay && !report ? " …" : ""}{link === "offering" ? " · offering LAN" : ""}
@@ -589,6 +609,19 @@
   }
   .eye.on {
     display: block;
+  }
+  .eye.aiming {
+    height: 84px;
+  }
+  .eye.aiming.beside {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    height: auto;
+    width: 240px;
+    max-height: 40vh;
+    z-index: 101;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
   }
   .bar button.active {
     border-color: #38bdf8;

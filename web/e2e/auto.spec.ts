@@ -158,3 +158,66 @@ test("a receiver that turns up late still gets the file list and the offer soon"
     await browser.close();
   }
 });
+
+// A code the receiver shows to the sender's camera has to be easy to hold
+// into view on a phone: large, at the end of the screen where the other
+// camera most likely looks, movable to the other end, and full screen on a
+// tap. The sender shows what its camera sees large enough to aim by.
+test("codes shown to the other device: large, placeable, full screen", async ({ playwright, baseURL }) => {
+  const browser = await playwright.chromium.launch({
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+  });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 1280, height: 760 } });
+    const sender = await context.newPage();
+    await cameraFrom(sender, "to-sender");
+    await enablePreview(sender, /Local network boost/);
+    await sender.goto("./#/send");
+    await sender
+      .locator('input[type="file"]')
+      .first()
+      .setInputFiles({ name: "show.bin", mimeType: "application/octet-stream", buffer: crypto.randomBytes(900_000) });
+    await sender.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    await sender.getByRole("button", { name: "Start sending" }).click();
+    await expect(sender.getByRole("button", { name: /offering LAN/ })).toBeVisible();
+    // While nothing of the receiver has been seen, the sender's camera picture is large, beside the codes.
+    const eye = sender.locator("video.eye");
+    await expect(eye).toHaveClass(/aiming/);
+    await expect(eye).toHaveClass(/beside/);
+    expect((await eye.boundingBox())!.width).toBeGreaterThan(200);
+
+    const receiver = await context.newPage();
+    await receiver.setViewportSize({ width: 390, height: 760 });
+    await cameraFrom(receiver, "to-receiver");
+    await receiver.goto("./#/receive");
+    await broadcast(sender, "to-receiver", "canvas", 60);
+    const code = receiver.getByTestId("link-answer");
+    const camera = receiver.locator(".camera");
+    await expect(code).toBeVisible({ timeout: 30_000 });
+    const top = async (of: typeof code) => (await of.boundingBox())!.y;
+    // On an upright phone: at the top, nearly as wide as the screen, the camera picture small below it.
+    expect(await top(code)).toBeLessThan(await top(camera));
+    expect((await code.boundingBox())!.width).toBeGreaterThan(300);
+    expect((await camera.boundingBox())!.height).toBeLessThan(200);
+    // Moved to the other end, and remembered there.
+    await receiver.getByRole("button", { name: "Move to the other end" }).click();
+    await expect.poll(async () => (await top(code)) > (await top(camera))).toBe(true);
+    expect(await receiver.evaluate(() => localStorage.getItem("qrsend.codePlace"))).toBe("far");
+    await receiver.getByRole("button", { name: "Move to the other end" }).click();
+    await expect.poll(async () => (await top(code)) < (await top(camera))).toBe(true);
+    // Full screen on a tap of the code itself, and back.
+    await code.click();
+    await expect(receiver.getByRole("button", { name: "Close", exact: true })).toBeVisible();
+    expect((await code.boundingBox())!.width).toBeGreaterThan(360);
+    await code.click();
+    await expect(receiver.getByRole("button", { name: "Full screen", exact: true })).toBeVisible();
+    // Lying on its side: code and camera picture side by side.
+    await receiver.setViewportSize({ width: 760, height: 390 });
+    await expect
+      .poll(async () => Math.abs((await top(code)) - (await top(camera))))
+      .toBeLessThan(80);
+    expect((await code.boundingBox())!.x).toBeLessThan((await camera.boundingBox())!.x);
+  } finally {
+    await browser.close();
+  }
+});

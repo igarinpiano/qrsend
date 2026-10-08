@@ -10,12 +10,15 @@
     oncamera,
     active = true,
     allowFile = false,
+    compact = false,
   }: {
     ontexts: (texts: string[]) => void;
     /** What the camera makes of the codes: pictures read per second, camera pixels per dot. */
     oncamera?: (reads: number, dot: number) => void;
     active?: boolean;
     allowFile?: boolean;
+    /** Take little room: something else on the page matters more right now. */
+    compact?: boolean;
   } = $props();
 
   let video: HTMLVideoElement;
@@ -139,7 +142,7 @@
   });
 </script>
 
-<div class="camera">
+<div class="camera" class:compact>
   <!-- svelte-ignore a11y_media_has_caption -->
   <video bind:this={video} playsinline muted></video>
   {#if advice}
@@ -203,6 +206,11 @@
     aspect-ratio: 4 / 3;
     max-height: 60vh;
     margin-bottom: 8px;
+  }
+  .camera.compact {
+    aspect-ratio: auto;
+    height: 22vh;
+    min-height: 96px;
   }
   video {
     width: 100%;

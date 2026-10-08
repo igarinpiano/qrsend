@@ -27,6 +27,7 @@
   import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
   import Result from "./Result.svelte";
+  import Showcase from "./Showcase.svelte";
 
   let { params }: { params: URLSearchParams } = $props();
 
@@ -133,6 +134,41 @@
     feedbackUrl = toDataUrl(renderText(feedback), 6);
   }
 
+
+  // Where a code for the other device's camera goes. That camera most
+  // likely looks at the end of this screen where this device's own front
+  // camera is (two devices held face to face): the top when upright, the
+  // side the top was turned to when lying on its side. Whoever holds the
+  // device knows better and can move the code to the other end; the choice is
+  // remembered.
+  const PLACE_KEY = "qrsend.codePlace";
+  let codePlace = $state<"near" | "far">("near");
+  try {
+    if (localStorage.getItem(PLACE_KEY) === "far") codePlace = "far";
+  } catch {
+    /* no storage: the default */
+  }
+  /** A phone lying on its side: the page is laid out side by side. */
+  let sideways = $state(false);
+  /** Which side this device's top (and front camera) is turned to, when lying on its side. */
+  let topIsLeft = $state(true);
+  function orient() {
+    sideways = matchMedia("(orientation: landscape) and (max-height: 560px)").matches;
+    const type = screen.orientation?.type ?? "";
+    const angle = (window as Window & { orientation?: number }).orientation;
+    topIsLeft = !(type === "landscape-secondary" || angle === -90);
+  }
+  const codeFirst = $derived(sideways ? topIsLeft === (codePlace === "near") : codePlace === "near");
+  const codeEdge = $derived(sideways ? (codeFirst ? "left" : "right") : codeFirst ? "top" : "bottom");
+  function moveCode() {
+    codePlace = codePlace === "near" ? "far" : "near";
+    log("rx", "code moved", { to: codeEdge });
+    try {
+      localStorage.setItem(PLACE_KEY, codePlace);
+    } catch {
+      /* not remembered */
+    }
+  }
 
   const info = $derived(st?.info ?? undefined);
   const result = $derived(st?.result);
@@ -353,6 +389,9 @@
   }
 
   onMount(() => {
+    orient();
+    window.addEventListener("resize", orient);
+    window.addEventListener("orientationchange", orient);
     persist();
     engine
       .recvStart(params.get("session") ?? undefined)
@@ -362,6 +401,8 @@
         log("rx", "could not start", { error: failure.slice(0, 200) });
       });
     return () => {
+      window.removeEventListener("resize", orient);
+      window.removeEventListener("orientationchange", orient);
       clearTimeout(lingerTimer);
       clearInterval(replyTimer);
       lan?.stop();
@@ -433,6 +474,11 @@
     flush();
   }
 
+  /** The code to show the other device at the moment, if any. */
+  const showing = $derived(
+    answerUrl && !result ? "answer" : feedbackUrl && linkState !== "answering" ? "feedback" : undefined,
+  );
+
   const total = $derived(info?.total_bytes ?? 0);
   const left = $derived(info?.remaining_bytes ?? 0);
   const pct = $derived(total ? ((total - left) / total) * 100 : 0);
@@ -440,9 +486,39 @@
 
 <h2>Receive</h2>
 
-{#if watching}
-  <Camera {ontexts} oncamera={(reads, dot) => (camera = { reads, dot })} {active} allowFile={!result} />
-{/if}
+<div class="stage" class:sideways class:code-first={codeFirst}>
+  {#if watching}
+    <div class="eye">
+      <Camera
+        {ontexts}
+        oncamera={(reads, dot) => (camera = { reads, dot })}
+        {active}
+        allowFile={!result}
+        compact={!!showing && !sideways}
+      />
+    </div>
+  {/if}
+  {#if showing === "answer"}
+    <Showcase src={answerUrl} alt="Connection code for the sender" testid="link-answer" edge={codeEdge} onmove={moveCode}>
+      <p class="small muted">
+        The sender offers a direct connection over the local network, much faster than the camera. Show this code to the
+        sender’s camera to connect (tap it for full screen); after that the devices no longer need to see each other.
+      </p>
+      <button onclick={disconnect}>Use the camera only</button>
+    </Showcase>
+  {:else if showing === "feedback"}
+    <Showcase src={feedbackUrl} alt="Feedback code for the sender" testid="feedback" code={feedback} edge={codeEdge} onmove={moveCode}>
+      <p class="small muted">
+        {#if result}
+          Show this to the sender’s camera once more so it knows everything arrived.
+        {:else}
+          The sender asked for feedback. Keep this code in view of its camera: it then sends only what is missing and
+          stops when everything has arrived.
+        {/if}
+      </p>
+    </Showcase>
+  {/if}
+</div>
 
 {#if showStats && steps.first !== undefined}
   <p class="small muted" data-testid="rx-steps">
@@ -475,18 +551,6 @@
 {/if}
 <audio bind:this={speaker} data-testid="feedback-sound" data-code={soundCode}></audio>
 
-{#if answerUrl && !result}
-  <div class="card feedback">
-    <img src={answerUrl} alt="Connection code for the sender" data-testid="link-answer" />
-    <div class="stack">
-      <p class="small muted">
-        The sender offers a direct connection over the local network, much faster than the camera. Show this code to the
-        sender’s camera to connect; after that the devices no longer need to see each other.
-      </p>
-      <button onclick={disconnect}>Use the camera only</button>
-    </div>
-  </div>
-{/if}
 {#if linkState === "connected" && !result}
   <p class="small row" data-testid="link-connected">
     <span class="badge ok">Local network</span>
@@ -495,20 +559,6 @@
   </p>
 {:else if linkError}
   <p class="small muted">No direct connection ({linkError}); the camera carries on.</p>
-{/if}
-
-{#if feedbackUrl && linkState !== "answering"}
-  <div class="card feedback">
-    <img src={feedbackUrl} alt="Feedback code for the sender" data-testid="feedback" data-code={feedback} />
-    <p class="small muted">
-      {#if result}
-        Show this to the sender’s camera once more so it knows everything arrived.
-      {:else}
-        The sender asked for feedback. Keep this code in view of its camera: it then sends only what is missing and
-        stops when everything has arrived.
-      {/if}
-    </p>
-  </div>
 {/if}
 
 {#if error}
@@ -580,21 +630,24 @@
 {/if}
 
 <style>
-  .feedback {
+  /* The camera picture and a code for the other device, one after the other;
+     side by side on a phone lying on its side. Which comes first is decided
+     above (and can be changed by whoever holds the device). */
+  .stage {
     display: flex;
-    gap: 16px;
-    align-items: center;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 8px;
   }
-  .feedback img {
-    width: min(240px, 100%);
-    image-rendering: pixelated;
-    border-radius: 8px;
-    background: #fff;
+  .stage.code-first .eye {
+    order: 1;
   }
-  .feedback p {
+  .stage.sideways {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+  .stage.sideways > :global(*) {
     flex: 1;
-    min-width: 12em;
-    margin: 0;
+    min-width: 0;
   }
 </style>
