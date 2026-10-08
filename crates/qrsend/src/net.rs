@@ -119,7 +119,8 @@ pub enum LinkEvent {
     Down,
     Feedback(Feedback),
     /// The codes of an offer that replaces the one before it (a WebRTC
-    /// offer makes one connection, see [`crate::rtc`]).
+    /// offer makes one connection, see `crate::rtc`).
+    #[cfg_attr(not(feature = "webrtc"), allow(dead_code))]
     Offer(Vec<String>),
 }
 

@@ -13,7 +13,9 @@
 # - `features: --no-default-features` drops the window display (minifb). It is
 #   used where dlopen of X11/Wayland cannot work (static musl) or makes no
 #   sense (Android, BSDs, small boards); those builds show codes in the
-#   terminal or export them.
+#   terminal or export them. `--features webrtc` puts back the connection to
+#   browsers, which `--no-default-features` drops as well; NetBSD goes without
+#   it (the C library its DTLS part needs, aws-lc, does not link there).
 # - `optional: true` targets may fail without failing the release: they are
 #   best-effort platforms, and a missing binary just means no package for it.
 #
@@ -45,31 +47,31 @@ jobs:
           - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, cross: true, glibc: "2.28" }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true, glibc: "2.28" }
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: --no-default-features }
-          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: --no-default-features }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: --no-default-features --features webrtc }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true, features: --no-default-features --features webrtc }
           # ── optional: more Windows / macOS flavors ──────────────
           - { target: i686-pc-windows-msvc, os: windows-latest, optional: true }
           - { target: x86_64-pc-windows-gnu, os: windows-latest, optional: true }
           - { target: universal-apple-darwin, os: macos-latest, universal: true, optional: true }
           # ── optional: more Linux ─────────────────────────────────
           - { target: i686-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true }
-          - { target: i686-unknown-linux-musl, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: armv7-unknown-linux-gnueabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: armv7-unknown-linux-musleabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: arm-unknown-linux-gnueabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: arm-unknown-linux-musleabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: riscv64gc-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: powerpc64le-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: s390x-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
-          - { target: loongarch64-unknown-linux-gnu, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
+          - { target: i686-unknown-linux-musl, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
+          - { target: armv7-unknown-linux-gnueabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
+          - { target: armv7-unknown-linux-musleabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
+          - { target: arm-unknown-linux-gnueabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
+          - { target: arm-unknown-linux-musleabihf, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
+          - { target: riscv64gc-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
+          - { target: powerpc64le-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
+          - { target: s390x-unknown-linux-gnu, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
+          - { target: loongarch64-unknown-linux-gnu, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features --features webrtc }
           # ── optional: Android (Termux) and BSDs ──────────────────
-          - { target: aarch64-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
-          - { target: armv7-linux-androideabi, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
-          - { target: x86_64-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
-          - { target: i686-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
-          - { target: x86_64-unknown-freebsd, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: aarch64-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features --features webrtc }
+          - { target: armv7-linux-androideabi, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features --features webrtc }
+          - { target: x86_64-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features --features webrtc }
+          - { target: i686-linux-android, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features --features webrtc }
+          - { target: x86_64-unknown-freebsd, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
           - { target: x86_64-unknown-netbsd, os: ubuntu-latest, cross: git, optional: true, features: --no-default-features }
-          - { target: x86_64-unknown-illumos, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features }
+          - { target: x86_64-unknown-illumos, os: ubuntu-latest, cross: true, optional: true, features: --no-default-features --features webrtc }
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.optional || false }}
     defaults:

@@ -11,6 +11,7 @@ mod input;
 mod net;
 mod paths;
 mod recv;
+#[cfg(feature = "webrtc")]
 mod rtc;
 mod send;
 mod spool;

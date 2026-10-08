@@ -16,8 +16,10 @@ use qrsend_core::{base45, link};
 
 use crate::display::export::Canvas;
 use crate::display::{self, FrameStream, GridSpec};
+#[cfg(feature = "webrtc")]
+use crate::rtc;
 use crate::spool::{Content, Spool, SpoolOptions};
-use crate::{collect, identity, net, rtc, util};
+use crate::{collect, identity, net, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DisplayKind {
@@ -363,6 +365,7 @@ pub fn run(args: SendArgs) -> Result<()> {
             events_tx.clone(),
         );
         // And one to a receiving browser, which cannot use the above.
+        #[cfg(feature = "webrtc")]
         if let Err(e) = rtc::serve(
             id,
             args.lan_address.as_deref(),

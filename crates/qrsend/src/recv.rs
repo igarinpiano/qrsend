@@ -20,9 +20,11 @@ use qrsend_core::resume::ResumeCode;
 
 use crate::extract::{self, Conflict, ExtractOptions, Outcome};
 use crate::input::{Input, Picture, image_paths};
+#[cfg(feature = "webrtc")]
+use crate::rtc;
 use crate::send::parse_size;
 use crate::store::Store;
-use crate::{decode, identity, net, rtc, util};
+use crate::{decode, identity, net, util};
 
 #[derive(clap::Args)]
 pub struct RecvArgs {
@@ -624,7 +626,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 usual_offer.get_or_insert_with(Instant::now);
                 continue;
             }
-            let seeded = message.kind == link::KIND_SEEDED_OFFER;
+            let seeded = cfg!(feature = "webrtc") && message.kind == link::KIND_SEEDED_OFFER;
             if !(message.kind == link::KIND_TCP_OFFER || seeded)
                 || args.no_lan
                 || !ours
@@ -644,7 +646,10 @@ pub fn run(args: RecvArgs) -> Result<()> {
                     &pb,
                     "The sender (a browser) offers a network connection; connecting…",
                 );
-                link = Some(rtc::connect(message.payload));
+                #[cfg(feature = "webrtc")]
+                {
+                    link = Some(rtc::connect(message.payload));
+                }
             } else if let Ok(offer) = TcpOffer::from_bytes(&message.payload) {
                 tried_offer = Some((message.id, Instant::now()));
                 tries += 1;
