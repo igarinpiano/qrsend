@@ -22,6 +22,10 @@ pub const KIND_KNOWN_OFFER: u8 = 4;
 /// that cannot be shown an answer: both sides work the answer out from the
 /// offer (§12.4).
 pub const KIND_OPEN_OFFER: u8 = 5;
+/// A browser's offer to a receiver that cannot show it an answer (the
+/// command-line program): the receiver's certificate follows from a seed in
+/// the offer (§12.5, [`crate::linkcert`]).
+pub const KIND_SEEDED_OFFER: u8 = 6;
 
 const HEADER_LEN: usize = 8;
 const CHECK_LEN: usize = 2;

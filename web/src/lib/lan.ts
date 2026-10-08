@@ -7,7 +7,7 @@
 // and in far larger pieces than a code can hold), and the receiver's feedback
 // in the other direction. It is one more way for the data to travel, nothing
 // else: if it never comes up or breaks, the screen and the camera carry on.
-import { linkParse, linkSplit } from "./core";
+import { linkCertificateFingerprint, linkParse, linkSplit, ready } from "./core";
 import { log } from "./log";
 
 /** What kinds of addresses a description holds (the addresses themselves are nobody's business). */
@@ -36,6 +36,12 @@ const KIND_KNOWN_OFFER = 4;
  * camera on the receiver): 16 bytes of key, then the description. See `LanReceiver.acceptOpen`.
  */
 const KIND_OPEN_OFFER = 5;
+/**
+ * An offer to a receiver that cannot show an answer either (the command-line program, read by nobody's camera): 16
+ * bytes of seed, then the description. The receiver's certificate follows from the seed, so this side knows its
+ * fingerprint without being told (see `LanSender.start`).
+ */
+export const KIND_SEEDED_OFFER = 6;
 /** Starts the line with which a receiver shows that it read an open offer. */
 const PROOF = "K";
 /** In an offer: the sender remembers devices it trusts, to connect without an answer next time. */
@@ -311,6 +317,8 @@ export interface SenderHooks {
   state(state: LinkState): void;
   /** Codes of the offer to a known device (`null`: none any more). */
   offerKnown?(payload: Uint8Array | null, id: number): void;
+  /** Codes of the offer to a receiver that shows no answer (`null`: none any more). */
+  offerSeeded?(payload: Uint8Array | null, id: number): void;
   /** The receiver says who it is (see `introduction`); `certificate` is the fingerprint it connected with. */
   introduced?(introduction: string, certificate: Uint8Array): void;
 }
@@ -329,6 +337,9 @@ export class LanSender {
   /** The attempt toward a known device, until one of the two connects. */
   private knownPc?: RTCPeerConnection;
   private knownChannel?: RTCDataChannel;
+  /** The attempt toward a receiver that shows no answer, likewise. */
+  private seededPc?: RTCPeerConnection;
+  private seededChannel?: RTCDataChannel;
   /** Certificate fingerprint of whoever answered the usual offer. */
   private answered?: Uint8Array;
   private assembler = new LinkAssembler();
@@ -378,11 +389,13 @@ export class LanSender {
       const channel = pc.createDataChannel("qrsend");
       channel.bufferedAmountLowThreshold = BUFFER_HIGH / 4;
       channel.onopen = () => {
-        if (this.channel !== channel && this.knownChannel !== channel) return;
-        const others = [this.channel, this.knownChannel, this.pc, this.knownPc].filter((x) => x !== channel && x !== pc);
+        if (this.channel !== channel && this.knownChannel !== channel && this.seededChannel !== channel) return;
+        const all = [this.channel, this.knownChannel, this.seededChannel, this.pc, this.knownPc, this.seededPc];
+        const others = all.filter((x) => x !== channel && x !== pc);
         this.pc = pc;
         this.channel = channel;
         this.knownPc = this.knownChannel = undefined;
+        this.seededPc = this.seededChannel = undefined;
         for (const other of others) {
           try {
             other?.close();
@@ -394,6 +407,7 @@ export class LanSender {
         log("link", `${who}: channel open`);
         this.hooks.offer(null, id);
         this.hooks.offerKnown?.(null, id);
+        this.hooks.offerSeeded?.(null, id);
         this.hooks.state("connected");
         this.pump(channel);
       };
@@ -431,6 +445,7 @@ export class LanSender {
     this.hooks.offer(payload, id);
     this.hooks.state("offering");
 
+    await this.offerSeeded(attempt, id);
     const known = this.options.known;
     if (!known) return;
     try {
@@ -449,6 +464,34 @@ export class LanSender {
     } catch (e) {
       // The usual offer stands on its own.
       console.warn("offer to a known device:", e);
+    }
+  }
+
+  /**
+   * A third attempt, toward a receiver that cannot show an answer (the command-line program): its certificate follows
+   * from a seed in the offer, the rest is as for a known device.
+   */
+  private async offerSeeded(
+    attempt: (peer: () => Uint8Array | undefined, who: string) => { pc: RTCPeerConnection; channel: RTCDataChannel },
+    id: number,
+  ): Promise<void> {
+    if (!this.hooks.offerSeeded) return;
+    try {
+      await ready();
+      const seed = crypto.getRandomValues(new Uint8Array(16));
+      const fingerprint = linkCertificateFingerprint(seed) as Uint8Array;
+      const third = attempt(() => fingerprint, "offer to a command line");
+      this.seededPc = third.pc;
+      this.seededChannel = third.channel;
+      await third.pc.setLocalDescription(await third.pc.createOffer());
+      const offer = new Uint8Array([...seed, ...(await described(third.pc))]);
+      const { ufrag, pwd } = await answerCredentials(offer);
+      await third.pc.setRemoteDescription({ type: "answer", sdp: buildSdp({ ufrag, pwd, fingerprint, candidates: [] }, "answer") });
+      if (this.seededPc !== third.pc) return;
+      this.hooks.offerSeeded(offer, id);
+    } catch (e) {
+      // The usual offer stands on its own.
+      console.warn("offer to a command line:", e);
     }
   }
 
@@ -634,10 +677,10 @@ export class LanSender {
   }
 
   private close(): void {
-    const channels = [this.channel, this.knownChannel];
-    const connections = [this.pc, this.knownPc];
-    this.pc = this.knownPc = undefined;
-    this.channel = this.knownChannel = undefined;
+    const channels = [this.channel, this.knownChannel, this.seededChannel];
+    const connections = [this.pc, this.knownPc, this.seededPc];
+    this.pc = this.knownPc = this.seededPc = undefined;
+    this.channel = this.knownChannel = this.seededChannel = undefined;
     this.answered = this.peer = undefined;
     this.wake?.();
     const shut = (all: (RTCDataChannel | RTCPeerConnection | undefined)[]) => {
@@ -661,6 +704,7 @@ export class LanSender {
     this.stopped = true;
     this.hooks.offer(null, this.id);
     this.hooks.offerKnown?.(null, this.id);
+    this.hooks.offerSeeded?.(null, this.id);
     this.close();
   }
 }

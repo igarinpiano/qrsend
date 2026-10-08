@@ -89,12 +89,15 @@ test("web → CLI: encrypted for a paired device and signed by the browser's key
   expect(other.stderr).toContain("encrypted for another device");
 });
 
-// A browser offers its network connection to other browsers only (WebRTC);
-// the command-line receiver cannot take it. It says so, instead of leaving
-// the person to wonder why the network is not used, and reads the codes.
-test("web → CLI: a browser's offer to connect is declined in so many words", async ({ playwright, baseURL }) => {
+// A sending browser also makes an offer that needs no answer shown to its
+// camera: the receiver's certificate follows from a seed in the offer
+// (PROTOCOL §12.5). The CLI reads it off the pictures and connects to the
+// page, which is still there, sending.
+test("web → CLI: the CLI connects to the sending browser over the network", async ({ playwright, baseURL }) => {
   const browser = await playwright.chromium.launch({
-    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+    // (Both are on this machine: they meet at its loopback address, which a
+    // browser leaves out unless told otherwise.)
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--allow-loopback-in-peer-connection"],
   });
   try {
     const page = await (await browser.newContext({ baseURL, permissions: ["camera"] })).newPage();
@@ -102,9 +105,7 @@ test("web → CLI: a browser's offer to connect is declined in so many words", a
     await page.getByRole("checkbox", { name: /Local network boost/ }).check();
     await page.goto("./#/send");
     await page.getByRole("tab", { name: "Text" }).click();
-    // More than the pictures taken below can carry: the receiver is still
-    // reading when the offer comes by, however long the browser takes to
-    // make it.
+    // Far more than the pictures taken below can carry.
     const long = Array.from({ length: 60_000 }, () => Math.random().toString(36).slice(2)).join(" ");
     await page.getByPlaceholder("Paste or type anything…").fill(long);
     await page.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
@@ -114,9 +115,10 @@ test("web → CLI: a browser's offer to connect is declined in so many words", a
     const dir = path.join(WORK, "web-offer");
     fs.rmSync(dir, { recursive: true, force: true });
     expect(await captureFrames(page, dir, 60)).toBeGreaterThan(30);
-    const received = cliBoth(["recv", "--images", dir], "cli");
-    expect(received.status).toBe(2); // unfinished: the pictures ran out
-    expect(received.stderr).toContain("offers a network connection, but only to another browser");
+    const received = cliBoth(["recv", "--images", dir, "--stdout"], "cli");
+    expect(received.stderr).toContain("Receiving over the network");
+    expect(received.status).toBe(0);
+    expect(received.stdout).toContain(long);
   } finally {
     await browser.close();
   }

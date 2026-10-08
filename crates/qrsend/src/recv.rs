@@ -22,7 +22,7 @@ use crate::extract::{self, Conflict, ExtractOptions, Outcome};
 use crate::input::{Input, Picture, image_paths};
 use crate::send::parse_size;
 use crate::store::Store;
-use crate::{decode, identity, net, util};
+use crate::{decode, identity, net, rtc, util};
 
 #[derive(clap::Args)]
 pub struct RecvArgs {
@@ -425,6 +425,8 @@ pub fn run(args: RecvArgs) -> Result<()> {
     let mut tries = 0;
     let mut said_size = args.camera.is_none();
     let mut said_foreign_offer = false;
+    // When a browser's usual offer was first read.
+    let mut usual_offer: Option<Instant> = None;
     let mut said_color = false;
     let mut link_taken = 0u64;
     let mut link_reported = 0u64;
@@ -610,24 +612,20 @@ pub fn run(args: RecvArgs) -> Result<()> {
             let Some(message) = offers.add(&text) else {
                 continue;
             };
-            // A browser offers a connection of its own kind (WebRTC), which
-            // this program does not speak: say so once instead of leaving
-            // the person to wonder why the network is not used.
-            if message.kind != link::KIND_TCP_OFFER && message.kind != link::KIND_ANSWER {
-                if !said_foreign_offer {
-                    said_foreign_offer = true;
-                    say(
-                        &pb,
-                        "The sender (a browser) offers a network connection, but only to another browser. \
-                         Reading the codes only.",
-                    );
-                }
-                continue;
-            }
             let ours = rx
                 .params()
                 .is_some_and(|p| p.session_id == message.session_id);
-            if message.kind != link::KIND_TCP_OFFER
+            // A browser's usual offer wants an answer shown to its camera,
+            // which this program does not do: if that is all the sender
+            // offers, say so once instead of leaving the person to wonder
+            // why the network is not used. (A newer web app also makes an
+            // offer that needs no answer, taken up below.)
+            if message.kind == link::KIND_OFFER {
+                usual_offer.get_or_insert_with(Instant::now);
+                continue;
+            }
+            let seeded = message.kind == link::KIND_SEEDED_OFFER;
+            if !(message.kind == link::KIND_TCP_OFFER || seeded)
                 || args.no_lan
                 || !ours
                 || link.is_some()
@@ -636,7 +634,18 @@ pub fn run(args: RecvArgs) -> Result<()> {
             {
                 continue;
             }
-            if let Ok(offer) = TcpOffer::from_bytes(&message.payload) {
+            if seeded {
+                said_foreign_offer = true;
+                tried_offer = Some((message.id, Instant::now()));
+                tries += 1;
+                link_taken = 0;
+                link_reported = 0;
+                say(
+                    &pb,
+                    "The sender (a browser) offers a network connection; connecting…",
+                );
+                link = Some(rtc::connect(message.payload));
+            } else if let Ok(offer) = TcpOffer::from_bytes(&message.payload) {
                 tried_offer = Some((message.id, Instant::now()));
                 tries += 1;
                 link_taken = 0;
@@ -650,6 +659,16 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 );
                 link = Some(net::connect(offer, message.session_id));
             }
+        }
+        if !said_foreign_offer
+            && usual_offer.is_some_and(|at| at.elapsed() > Duration::from_secs(6))
+        {
+            said_foreign_offer = true;
+            say(
+                &pb,
+                "The sender (a browser) offers a network connection, but only to another browser. \
+                 Reading the codes only.",
+            );
         }
         // The sender goes by these reports: what has been taken in, and
         // what is still missing.

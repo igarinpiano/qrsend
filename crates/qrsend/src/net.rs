@@ -337,7 +337,7 @@ pub struct Link {
     /// Lines for the sender: "A<n>" and feedback codes.
     pub replies: Sender<String>,
     /// Closes once everything in `replies` went out.
-    written: Receiver<()>,
+    pub(crate) written: Receiver<()>,
 }
 
 impl Link {

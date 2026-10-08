@@ -149,6 +149,8 @@ may ask whether `qrsend` may accept incoming connections.)
 A receiving **web app** connects as well: `--lan` also offers the kind of
 connection a browser can make (WebRTC), and the browser takes it up by itself
 once its camera has read the code. Nothing has to be shown back to the sender.
+The other way round works the same: when the web app sends with *Local network
+boost* on, `qrsend recv` reads its offer and connects to the browser.
 
 ## Web app
 
@@ -238,8 +240,8 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] Auto-tuning speed and codes per picture from that feedback (web app, feature preview)
 - [x] More transports side by side: text over any byte channel (CLI), color codes, screen capture, local network (web app, feature preview)
 - [x] Sound as a back channel (web app, feature preview)
-- [x] A direct network connection between two CLIs, started by a code (`send --lan`), and from the CLI to a receiving browser
-- [ ] Two-way mode and sound in the CLI; a network connection between the CLI and a browser; auto-tuning the code size
+- [x] A direct network connection between two CLIs, started by a code (`send --lan`), and between the CLI and a browser in either direction
+- [ ] Two-way mode and sound in the CLI; auto-tuning the code size
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
 

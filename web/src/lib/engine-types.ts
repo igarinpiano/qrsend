@@ -178,7 +178,7 @@ export interface EngineApi {
    * An offer to connect another way, repeated in the stream until replaced (`null`: none). `known`: the offer to a
    * device connected to before (it travels beside the usual one).
    */
-  sendLinkOffer(payload: Uint8Array | null, id: number, known?: boolean): Promise<void>;
+  sendLinkOffer(payload: Uint8Array | null, id: number, known?: boolean | number): Promise<void>;
   /**
    * Whether the stream tells the receiver that this sender reads feedback codes, and whether it also listens for
    * them as sound.

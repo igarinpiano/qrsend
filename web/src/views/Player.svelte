@@ -6,7 +6,7 @@
   import { bytes, duration, RateMeter } from "../lib/format";
   import { parseDeviceId, ready, verifyDeviceSignature } from "../lib/core";
   import { rememberLink, trustedDevices } from "../lib/devices";
-  import { LINK_PREFIX, LanSender, canConnect, fingerprintHex, introductionMessage, type LinkState } from "../lib/lan";
+  import { KIND_SEEDED_OFFER, LINK_PREFIX, LanSender, canConnect, fingerprintHex, introductionMessage, type LinkState } from "../lib/lan";
   import { log, logEvery } from "../lib/log";
   import { featureOn } from "../lib/prefs";
   import { Scanner, type ScanStats } from "../lib/scanner";
@@ -96,6 +96,7 @@
       {
       offer: (payload, id) => void engine.sendLinkOffer(payload, id).catch(() => {}),
       offerKnown: (payload, id) => void engine.sendLinkOffer(payload, id, true).catch(() => {}),
+      offerSeeded: (payload, id) => void engine.sendLinkOffer(payload, id, KIND_SEEDED_OFFER).catch(() => {}),
       introduced: (introduction, certificate) => void introduced(introduction, certificate),
       pull: (count, binary, more) => engine.sendLink(count, binary, more),
       feedback: (code, taken) => hear(code, taken),

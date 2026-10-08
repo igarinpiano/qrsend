@@ -65,7 +65,8 @@ function parseRanges(text: string): number[] {
 
 interface SendState {
   /** Codes of the offers to connect being repeated in the stream: the usual one, and one to a known device. */
-  offers: { usual: string[]; known: string[] };
+  /** Codes of the offers being made, by kind of link message. */
+  offers: Map<number, string[]>;
   session: SendSession;
   /** Session id (hex). */
   id: string;
@@ -163,7 +164,7 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       req.density?.ec ?? "L",
       req.redundancy,
     );
-    sending = { session, id: info.session, body, offers: { usual: [], known: [] } };
+    sending = { session, id: info.session, body, offers: new Map() };
     let resumed: { parts: number; of: number } | undefined;
     if (req.resume?.trim()) {
       // (Throws when the code is for another transfer: nothing is sent then.)
@@ -215,13 +216,13 @@ function sendFrames(count: number): FrameBatch {
 
 const LINK_OFFER = 1;
 const LINK_KNOWN_OFFER = 4;
-
-function sendLinkOffer(payload: Uint8Array | null, id: number, known = false): void {
+/** `known`: an offer to a known device, or the kind of link message to send the offer as. */
+function sendLinkOffer(payload: Uint8Array | null, id: number, known: boolean | number = false): void {
   if (!sending) return;
   const { session, offers } = sending;
-  const kind = known ? LINK_KNOWN_OFFER : LINK_OFFER;
-  offers[known ? "known" : "usual"] = payload ? (linkSplit(sending.id, kind, id, payload, session.codeChars) as string[]) : [];
-  session.setLinkCodes([...offers.usual, ...offers.known]);
+  const kind = typeof known === "number" ? known : known ? LINK_KNOWN_OFFER : LINK_OFFER;
+  offers.set(kind, payload ? (linkSplit(sending.id, kind, id, payload, session.codeChars) as string[]) : []);
+  session.setLinkCodes([...offers.values()].flat());
 }
 
 function sendFeedback(text: string, linkTaken?: number): ReceiverReport | null {

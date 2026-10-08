@@ -16,18 +16,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use qrsend_core::direct::{self, DirectSender};
 use qrsend_core::feedback::{self, Feedback, SenderNotice};
-use qrsend_core::link;
 use qrsend_core::sender::{SegmentSource, SessionLayout};
+use qrsend_core::{link, linkcert};
 use sha2::{Digest, Sha256};
 use str0m::channel::{ChannelConfig, ChannelId};
-use str0m::config::Fingerprint;
+use str0m::config::{DtlsCert, Fingerprint};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, IceCreds, Input, Output, Rtc, RtcConfig};
 
-use crate::net::{LinkEvent, SYMBOL_SIZE, local_addresses};
+use crate::net::{Link, LinkEvent, SYMBOL_SIZE, local_addresses};
 
 /// The receiver's line that shows it read the offer (see [`proof`]).
 const PROOF: char = 'K';
@@ -92,7 +92,6 @@ impl Description {
         out
     }
 
-    #[cfg(test)]
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         /// Takes the next `n` bytes off the front.
         fn take<'d>(data: &mut &'d [u8], n: usize) -> Result<&'d [u8]> {
@@ -587,6 +586,294 @@ impl<'a, S: SegmentSource> Connection<'a, S> {
     }
 }
 
+// ---------------------------------------------------------------- receiver
+
+/// How long a connection may take to come about.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The addresses a name on the local network stands for (multicast DNS).
+/// Browsers put such names in place of their addresses unless the page may
+/// use the camera or microphone.
+fn resolve_local(name: &str, wait: Duration) -> Vec<IpAddr> {
+    let mut found = Vec::new();
+    let mut sockets = Vec::new();
+    for ip in local_addresses() {
+        let Ok(socket) = UdpSocket::bind((ip, 0)) else {
+            continue;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
+        // One question: the name's address, class IN, answer wanted to this
+        // socket ("unicast response").
+        let mut query = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in name.trim_end_matches('.').split('.') {
+            if label.is_empty() || label.len() > 63 {
+                return found;
+            }
+            query.push(label.len() as u8);
+            query.extend_from_slice(label.as_bytes());
+        }
+        let kind: u16 = if ip.is_ipv4() { 1 } else { 28 };
+        query.push(0);
+        query.extend_from_slice(&kind.to_be_bytes());
+        query.extend_from_slice(&0x8001u16.to_be_bytes());
+        let to: SocketAddr = if ip.is_ipv4() {
+            "224.0.0.251:5353".parse().unwrap()
+        } else {
+            "[ff02::fb]:5353".parse().unwrap()
+        };
+        if socket.send_to(&query, to).is_ok() {
+            sockets.push(socket);
+        }
+    }
+    let until = Instant::now() + wait;
+    let mut buf = [0u8; 1500];
+    while found.is_empty() && Instant::now() < until && !sockets.is_empty() {
+        for socket in &sockets {
+            if let Ok((n, _)) = socket.recv_from(&mut buf) {
+                found.extend(answers(&buf[..n]));
+            }
+        }
+    }
+    found
+}
+
+/// The addresses in the answers of a DNS message.
+fn answers(message: &[u8]) -> Vec<IpAddr> {
+    /// Skips a name (labels, or a pointer to one elsewhere).
+    fn name(message: &[u8], mut at: usize) -> Option<usize> {
+        loop {
+            let n = *message.get(at)? as usize;
+            if n == 0 {
+                return Some(at + 1);
+            }
+            if n & 0xc0 == 0xc0 {
+                return Some(at + 2);
+            }
+            at += 1 + n;
+        }
+    }
+    let mut found = Vec::new();
+    let read = |at: usize| -> Option<u16> {
+        Some(u16::from_be_bytes(
+            message.get(at..at + 2)?.try_into().ok()?,
+        ))
+    };
+    let mut parse = || -> Option<()> {
+        let (questions, records) = (read(4)?, read(6)?);
+        let mut at = 12;
+        for _ in 0..questions {
+            at = name(message, at)? + 4;
+        }
+        for _ in 0..records {
+            at = name(message, at)?;
+            let (kind, len) = (read(at)?, read(at + 8)? as usize);
+            let data = message.get(at + 10..at + 10 + len)?;
+            match (kind, len) {
+                (1, 4) => found.push(IpAddr::from(<[u8; 4]>::try_from(data).ok()?)),
+                (28, 16) => found.push(IpAddr::from(<[u8; 16]>::try_from(data).ok()?)),
+                _ => {}
+            }
+            at += 10 + len;
+        }
+        Some(())
+    };
+    let _ = parse();
+    found
+}
+
+/// Connects to a sending browser that offered a connection to a receiver
+/// which shows no answer (`payload` of a link message of kind 6), in the
+/// background. The certificate follows from the seed in the offer, so the
+/// browser already knows whom to expect; this side knocks at its addresses.
+pub fn connect(payload: Vec<u8>) -> Link {
+    let (message_tx, messages) = bounded::<Vec<u8>>(64);
+    let (replies, reply_rx) = unbounded::<String>();
+    let (written_tx, written) = bounded::<()>(0);
+    thread::spawn(move || {
+        let result = receive(&payload, message_tx, reply_rx);
+        if let Err(e) = result {
+            trace(|| format!("the connection failed: {e:#}"));
+        }
+        drop(written_tx);
+    });
+    Link {
+        messages,
+        replies,
+        written,
+    }
+}
+
+fn receive(payload: &[u8], messages: Sender<Vec<u8>>, replies: Receiver<String>) -> Result<()> {
+    let (seed, description) = payload
+        .split_at_checked(16)
+        .context("damaged connection offer")?;
+    let description = Description::from_bytes(description)?;
+    let mut remote = Vec::new();
+    for (address, port) in &description.candidates {
+        match address.parse::<IpAddr>() {
+            Ok(ip) => remote.push(SocketAddr::new(ip, *port)),
+            Err(_) if address.ends_with(".local") => {
+                let found = resolve_local(address, Duration::from_secs(2));
+                trace(|| {
+                    format!(
+                        "a name on the local network stands for {} address(es)",
+                        found.len()
+                    )
+                });
+                remote.extend(found.into_iter().map(|ip| SocketAddr::new(ip, *port)));
+            }
+            Err(_) => {}
+        }
+    }
+    if remote.is_empty() {
+        bail!("the offer holds no address that can be reached");
+    }
+    let mut local = local_addresses();
+    if remote.iter().any(|a| a.ip().is_loopback()) {
+        local.push(IpAddr::from([127, 0, 0, 1]));
+    }
+    let sockets = Sockets::open(&local)?;
+    let certificate = linkcert::certificate(seed);
+    let mut rtc = RtcConfig::new()
+        .set_dtls_cert(DtlsCert {
+            certificate: certificate.certificate,
+            private_key: certificate.private_key,
+        })
+        .set_local_ice_credentials(answer_credentials(payload))
+        .build(Instant::now());
+    for (address, _) in &sockets.list {
+        rtc.add_local_candidate(Candidate::host(*address, "udp")?);
+    }
+    for address in remote {
+        rtc.add_remote_candidate(Candidate::host(address, "udp")?);
+    }
+    let mut api = rtc.direct_api();
+    api.set_ice_controlling(false);
+    api.set_remote_ice_credentials(IceCreds {
+        ufrag: description.ufrag,
+        pass: description.pwd,
+    });
+    api.set_remote_fingerprint(Fingerprint {
+        hash_func: "sha-256".into(),
+        bytes: description.fingerprint.to_vec(),
+    });
+    // The answer the browser gave itself says this side takes the active part.
+    api.start_dtls(true)?;
+    api.start_sctp(true);
+
+    let started = Instant::now();
+    let mut channel: Option<ChannelId> = None;
+    let mut replies = Some(replies);
+    let mut waiting: VecDeque<String> = VecDeque::new();
+    // Once the caller has said all it has to say: when that was.
+    let mut closing: Option<Instant> = None;
+    loop {
+        if channel.is_none() && started.elapsed() > CONNECT_TIMEOUT {
+            bail!("no connection came about");
+        }
+        // What there is to say to the sender.
+        if let Some(rx) = &replies {
+            loop {
+                match rx.try_recv() {
+                    Ok(line) => waiting.push_back(line),
+                    Err(crossbeam_channel::TryRecvError::Empty) => break,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        replies = None;
+                        closing = Some(Instant::now());
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(mut c) = channel.and_then(|id| rtc.channel(id)) {
+            while let Some(line) = waiting.front() {
+                if !c.write(false, line.as_bytes())? {
+                    break;
+                }
+                waiting.pop_front();
+            }
+            if let Some(since) = closing
+                && ((waiting.is_empty() && c.buffered_amount() == 0)
+                    || since.elapsed() > Duration::from_secs(2))
+            {
+                break;
+            }
+        } else if closing.is_some() {
+            break;
+        }
+        let timeout = loop {
+            match rtc.poll_output()? {
+                Output::Timeout(t) => break t,
+                Output::Transmit(t) => sockets.send(t.source, t.destination, &t.contents),
+                Output::Event(e) => {
+                    trace(|| match &e {
+                        Event::ChannelData(d) => format!("data: {} B", d.data.len()),
+                        other => format!("{other:?}"),
+                    });
+                    match e {
+                        Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
+                            return Ok(());
+                        }
+                        Event::ChannelOpen(id, _) => {
+                            channel = Some(id);
+                            waiting.push_front(HELLO.to_string());
+                        }
+                        Event::ChannelClose(_) => return Ok(()),
+                        Event::ChannelData(data) if data.binary => {
+                            if messages.send(data.data).is_err() {
+                                return Ok(());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        };
+        if !rtc.is_alive() {
+            return Ok(());
+        }
+        let wait = timeout
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(20));
+        match sockets.incoming.recv_timeout(wait) {
+            Ok((to, from, data)) => {
+                if let Ok(contents) = data.as_slice().try_into() {
+                    let input = Input::Receive(
+                        Instant::now(),
+                        Receive {
+                            proto: Protocol::Udp,
+                            source: from,
+                            destination: to,
+                            contents,
+                        },
+                    );
+                    if rtc.accepts(&input) {
+                        rtc.handle_input(input)?;
+                    }
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                rtc.handle_input(Input::Timeout(Instant::now()))?;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+    // The last report is on its way: a moment for it to arrive.
+    let until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < until {
+        match rtc.poll_output()? {
+            Output::Transmit(t) => sockets.send(t.source, t.destination, &t.contents),
+            Output::Timeout(_) => {
+                thread::sleep(Duration::from_millis(10));
+                rtc.handle_input(Input::Timeout(Instant::now()))?;
+            }
+            Output::Event(_) => {}
+        }
+    }
+    rtc.disconnect();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +893,18 @@ mod tests {
         let mut flagged = bytes.clone();
         flagged.push(1);
         assert_eq!(Description::from_bytes(&flagged).unwrap(), d);
+    }
+
+    #[test]
+    fn addresses_in_a_dns_answer() {
+        // A response with the question echoed and one address record whose
+        // name points back at the question's.
+        let mut m = vec![0, 0, 0x84, 0, 0, 1, 0, 1, 0, 0, 0, 0];
+        m.extend_from_slice(b"\x04host\x05local\x00\x00\x01\x00\x01");
+        m.extend_from_slice(&[0xc0, 12, 0, 1, 0x80, 1, 0, 0, 0, 120, 0, 4, 192, 168, 1, 7]);
+        assert_eq!(answers(&m), ["192.168.1.7".parse::<IpAddr>().unwrap()]);
+        assert!(answers(&m[..m.len() - 2]).is_empty());
+        assert!(answers(&[]).is_empty());
     }
 
     #[test]

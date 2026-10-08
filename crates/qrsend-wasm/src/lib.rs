@@ -194,6 +194,16 @@ pub fn parse_device_id(id: &str) -> JsResult<JsValue> {
     to_js(&device_info(&DevicePublic::parse(id).map_err(js_err)?))
 }
 
+/// SHA-256 fingerprint of the DTLS certificate that follows from `seed`: the
+/// one a receiver that cannot show an answer connects with (see
+/// `qrsend_core::linkcert`).
+#[wasm_bindgen(js_name = linkCertificateFingerprint)]
+pub fn link_certificate_fingerprint(seed: &[u8]) -> Vec<u8> {
+    qrsend_core::linkcert::certificate(seed)
+        .fingerprint()
+        .to_vec()
+}
+
 /// Whether `signature` is the Ed25519 signature of the device with this ID
 /// over `message`.
 #[wasm_bindgen(js_name = verifyDeviceSignature)]
