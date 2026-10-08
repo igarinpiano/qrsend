@@ -22,8 +22,12 @@ export function cli(args: string[], device = "cli"): string {
 }
 
 /** Like `cli`, but also returns stderr (where the CLI reports the sender). */
-export function cliBoth(args: string[], device = "cli"): { stdout: string; stderr: string; status: number | null } {
-  const r = spawnSync(BIN, args, { cwd: WORK, env: env(device), encoding: "utf8" });
+export function cliBoth(
+  args: string[],
+  device = "cli",
+  more: NodeJS.ProcessEnv = {},
+): { stdout: string; stderr: string; status: number | null } {
+  const r = spawnSync(BIN, args, { cwd: WORK, env: { ...env(device), ...more }, encoding: "utf8" });
   return { stdout: r.stdout, stderr: r.stderr, status: r.status };
 }
 

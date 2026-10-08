@@ -10,9 +10,12 @@ import { fakeCamera } from "./video";
 
 test.skip(!hasCli, "qrsend CLI binary not built");
 
-// The two are on one machine here, so they meet at its loopback address,
-// which a browser leaves out unless told otherwise.
+// The two are on one machine here. On a Mac they meet at its loopback
+// address (the firewall cuts connections to an unsigned program at any
+// other), which a browser leaves out unless told otherwise. Elsewhere the
+// machine's own address on the network does, as between two machines.
 const loopback = ["--allow-loopback-in-peer-connection"];
+const address = process.platform === "darwin" ? ["--lan-address", "127.0.0.1"] : [];
 
 test("CLI → web: the browser connects to the sender, which is shown nothing", async ({ playwright, baseURL }) => {
   test.setTimeout(120_000);
@@ -26,8 +29,8 @@ test("CLI → web: the browser connects to the sender, which is shown nothing", 
   const video = path.join(dir, "codes.y4m");
   const sender = spawn(
     BIN,
-    ["send", "--plain", "big.bin", "--lan", "--lan-address", "127.0.0.1", "--export-video", video, "--frames", "40", "--fps", "8"],
-    { cwd: dir, env: env("cli-link") },
+    ["send", "--plain", "big.bin", "--lan", ...address, "--export-video", video, "--frames", "40", "--fps", "8"],
+    { cwd: dir, env: { ...env("cli-link"), QRSEND_TRACE: "1" } },
   );
   let said = "";
   sender.stderr.on("data", (d) => (said += d));
@@ -40,14 +43,17 @@ test("CLI → web: the browser connects to the sender, which is shown nothing", 
       const context = await browser.newContext({ baseURL, permissions: ["camera"], acceptDownloads: true });
       const page = await context.newPage();
       await page.goto("./#/receive");
-      if (process.env.QRSEND_LINK_TRACE) {
-        await page.waitForTimeout(20_000);
-        await page.getByRole("button", { name: "Copy log" }).click().catch(() => {});
-        console.log(await page.getByTestId("log-text").inputValue().catch(() => "no log"));
-        console.log("SENDER SAID", said);
-      }
       const since = Date.now();
-      await expect(page.getByTestId("received-file")).toHaveText(["big.bin"], { timeout: 90_000 });
+      await expect(page.getByTestId("received-file"))
+        .toHaveText(["big.bin"], { timeout: 90_000 })
+        .catch(async (e) => {
+          // What each side made of the attempt.
+          await page.getByRole("button", { name: "Copy log" }).click().catch(() => {});
+          const log = await page.getByTestId("log-text").inputValue().catch(() => "no log");
+          console.log(log.split("\n").filter((l) => / link | rx +(open offer|connected|step)/.test(l)).join("\n"));
+          console.log("the sender said:\n" + said.split("\n").filter((l) => !/ B from |BufferedAmount|data: /.test(l)).slice(0, 60).join("\n"));
+          throw e;
+        });
       if (process.env.QRSEND_LINK_MB) console.log(`TOOK ${megabytes} MiB in ${(Date.now() - since) / 1000} s (from opening the page)`);
       // The sender heard that everything arrived, and stops by itself.
       expect(await ended).toBe(0);

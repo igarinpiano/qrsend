@@ -43,7 +43,7 @@ impl Picture {
         let mut planes = [vec![0u8; w * h], vec![0u8; w * h], vec![0u8; w * h]];
         match self.color.as_ref()? {
             Color::Rgb(rgb) => {
-                for (i, px) in rgb.chunks_exact(3).enumerate() {
+                for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
                     planes[0][i] = px[0];
                     planes[1][i] = px[1];
                     planes[2][i] = px[2];

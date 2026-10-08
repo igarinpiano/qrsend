@@ -115,7 +115,14 @@ test("web → CLI: the CLI connects to the sending browser over the network", as
     const dir = path.join(WORK, "web-offer");
     fs.rmSync(dir, { recursive: true, force: true });
     expect(await captureFrames(page, dir, 60)).toBeGreaterThan(30);
-    const received = cliBoth(["recv", "--images", dir, "--stdout"], "cli");
+    const received = cliBoth(["recv", "--images", dir, "--stdout"], "cli", { QRSEND_TRACE: "1" });
+    if (!received.stderr.includes("Receiving over the network")) {
+      // What each side made of the attempt.
+      console.log(received.stderr.split("\n").filter((l) => !/ B from |BufferedAmount|data: /.test(l)).slice(0, 60).join("\n"));
+      await page.getByRole("button", { name: "Copy log" }).click().catch(() => {});
+      const log = await page.getByTestId("log-text").inputValue().catch(() => "no log");
+      console.log(log.split("\n").filter((l) => / link /.test(l)).join("\n"));
+    }
     expect(received.stderr).toContain("Receiving over the network");
     expect(received.status).toBe(0);
     expect(received.stdout).toContain(long);
