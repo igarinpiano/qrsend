@@ -4,7 +4,9 @@
   import type { FrameBatch, ReceiverReport, SendStarted } from "../lib/engine-types";
   import { drawColorGrid, drawGrid, fitGrid } from "../lib/qrdraw";
   import { bytes, duration, RateMeter } from "../lib/format";
-  import { LINK_PREFIX, LanSender, canConnect, type LinkState } from "../lib/lan";
+  import { parseDeviceId, ready, verifyDeviceSignature } from "../lib/core";
+  import { rememberLink, trustedDevices } from "../lib/devices";
+  import { LINK_PREFIX, LanSender, canConnect, fingerprintHex, introductionMessage, type LinkState } from "../lib/lan";
   import { featureOn } from "../lib/prefs";
   import { Scanner, type ScanStats } from "../lib/scanner";
   import { Ear, canListen } from "../lib/sound";
@@ -49,9 +51,50 @@
   const linkUp = $derived(link === "connected");
   let linkTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function startLink() {
-    lan ??= new LanSender(info.session, {
+  // Remember trusted devices (a preview feature, on top of the local
+  // network boost): a trusted device that has connected once is offered a
+  // connection that needs no answer code from then on.
+  const rememberFeature = lanFeature && featureOn("knownDevices");
+  /** Name of the trusted device this connection is with, once it has said (and proven) who it is. */
+  let remembered = $state("");
+
+  /** The device to offer an answerless connection: the one this transfer is for, or the one seen last. */
+  async function knownDevice(): Promise<Uint8Array | undefined> {
+    if (!rememberFeature) return undefined;
+    const linked = (await trustedDevices()).filter((d) => d.link);
+    const fitting = info.recipients.length ? linked.filter((d) => info.recipients.includes(d.id)) : linked;
+    const pick = fitting.sort((a, b) => b.link!.seen - a.link!.seen)[0];
+    const bytes = pick?.link!.certificate.match(/../g)?.map((b) => parseInt(b, 16));
+    return bytes?.length === 32 ? new Uint8Array(bytes) : undefined;
+  }
+
+  /**
+   * The receiver says which device it is. Believed only if it is signed by that device's key, names the
+   * certificate this very connection was made with, and the device is one this one trusts.
+   */
+  async function introduced(introduction: string, certificate: Uint8Array) {
+    try {
+      const said = JSON.parse(introduction) as { id: string; certificate: string; signature: string };
+      const used = fingerprintHex(certificate);
+      if (said.certificate !== used) return;
+      await ready();
+      const signature = Uint8Array.from(atob(said.signature), (c) => c.charCodeAt(0));
+      if (!verifyDeviceSignature(said.id, introductionMessage(used), signature)) return;
+      const device = parseDeviceId(said.id) as { fingerprint: string };
+      remembered = (await rememberLink(device.fingerprint, used)) ?? "";
+    } catch (e) {
+      console.warn("introduction:", e);
+    }
+  }
+
+  async function startLink() {
+    const known = await knownDevice().catch(() => undefined);
+    lan ??= new LanSender(
+      info.session,
+      {
       offer: (payload, id) => void engine.sendLinkOffer(payload, id).catch(() => {}),
+      offerKnown: (payload, id) => void engine.sendLinkOffer(payload, id, true).catch(() => {}),
+      introduced: (introduction, certificate) => void introduced(introduction, certificate),
       pull: (count, binary, more) => engine.sendLink(count, binary, more),
       feedback: (code, taken) => hear(code, taken),
       state: (state) => {
@@ -62,7 +105,9 @@
         // A lost connection: the screen takes over again, and a new offer goes out.
         if (state === "closed" && !finished) linkTimer = setTimeout(() => lan?.start().catch(() => {}), 2000);
       },
-    });
+      },
+      { remembers: rememberFeature, known },
+    );
     lan.start().catch(() => (link = "closed"));
   }
 
@@ -358,7 +403,9 @@
     <div class="info small">
       <strong>
         {info.summary}
-        {#if linkUp}<span class="channel" data-testid="link-up">+ local network</span>{/if}
+        {#if linkUp}
+          <span class="channel" data-testid="link-up">+ local network{remembered ? ` · ${remembered}` : ""}</span>
+        {/if}
       </strong>
       <span>
         {#if error}

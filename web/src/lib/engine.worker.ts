@@ -59,6 +59,8 @@ function parseRanges(text: string): number[] {
 // ------------------------------------------------------------------ sending
 
 interface SendState {
+  /** Codes of the offers to connect being repeated in the stream: the usual one, and one to a known device. */
+  offers: { usual: string[]; known: string[] };
   session: SendSession;
   /** Session id (hex). */
   id: string;
@@ -151,13 +153,14 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       req.density?.ec ?? "L",
       req.redundancy,
     );
-    sending = { session, id: info.session, body };
+    sending = { session, id: info.session, body, offers: { usual: [], known: [] } };
     const params = session.params() as { version: number; ec: string; modules: number; symbolSize: number };
     return {
       session: info.session,
       summary: info.summary,
       wireBytes: info.bodyLen + info.metaLen,
       encrypted: info.encrypted,
+      recipients: req.recipients,
       signed: !!me,
       framesPerPass: session.framesPerPass,
       ...params,
@@ -178,11 +181,14 @@ function sendFrames(count: number): FrameBatch {
 }
 
 const LINK_OFFER = 1;
+const LINK_KNOWN_OFFER = 4;
 
-function sendLinkOffer(payload: Uint8Array | null, id: number): void {
+function sendLinkOffer(payload: Uint8Array | null, id: number, known = false): void {
   if (!sending) return;
-  const { session } = sending;
-  session.setLinkCodes(payload ? (linkSplit(sending.id, LINK_OFFER, id, payload, session.codeChars) as string[]) : []);
+  const { session, offers } = sending;
+  const kind = known ? LINK_KNOWN_OFFER : LINK_OFFER;
+  offers[known ? "known" : "usual"] = payload ? (linkSplit(sending.id, kind, id, payload, session.codeChars) as string[]) : [];
+  session.setLinkCodes([...offers.usual, ...offers.known]);
 }
 
 function sendFeedback(text: string, linkTaken?: number): ReceiverReport | null {
@@ -547,7 +553,7 @@ const api: EngineApi = {
     return sending.session.nextLink(count, binary, more) as LinkBatch;
   },
   sendTextChannelUp: async (up) => sending?.session.setTextChannelUp(up),
-  sendLinkOffer: async (payload, id) => sendLinkOffer(payload, id),
+  sendLinkOffer: async (payload, id, known) => sendLinkOffer(payload, id, known),
   sendAskForFeedback: async (on, bySound) => sending?.session.askForFeedback(on, bySound),
   sendFeedback: async (text, linkTaken) => sendFeedback(text, linkTaken),
   sendReceiverSilent: async (forget) => sending?.session.receiverSilent(forget),

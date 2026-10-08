@@ -21,6 +21,8 @@ export interface SendStarted {
   summary: string;
   wireBytes: number;
   encrypted: boolean;
+  /** Device IDs the transfer is encrypted for (empty: for anyone). */
+  recipients: string[];
   signed: boolean;
   framesPerPass: number;
   version: number;
@@ -159,8 +161,11 @@ export interface EngineApi {
    * start from the end of the transfer, so the two channels bring different parts.
    */
   sendTextChannelUp(up: boolean): Promise<void>;
-  /** An offer to connect another way, repeated in the stream until replaced (`null`: none). */
-  sendLinkOffer(payload: Uint8Array | null, id: number): Promise<void>;
+  /**
+   * An offer to connect another way, repeated in the stream until replaced (`null`: none). `known`: the offer to a
+   * device connected to before (it travels beside the usual one).
+   */
+  sendLinkOffer(payload: Uint8Array | null, id: number, known?: boolean): Promise<void>;
   /**
    * Whether the stream tells the receiver that this sender reads feedback codes, and whether it also listens for
    * them as sound.

@@ -150,7 +150,15 @@
     <ul class="list">
       {#each devices as d (d.fingerprint)}
         <li class="row spread">
-          <span><strong>{d.name}</strong><br /><span class="mono small muted">{d.fingerprint}</span></span>
+          <span>
+            <strong>{d.name}</strong>
+            {#if d.link}
+              <span class="badge ok" title="Has connected over the local network before: with “Remember trusted devices”, it connects without showing its screen.">
+                connects directly
+              </span>
+            {/if}
+            <br /><span class="mono small muted">{d.fingerprint}</span>
+          </span>
           <button class="danger" onclick={async () => { await forget(d.fingerprint); await load(); }}>Remove</button>
         </li>
       {/each}

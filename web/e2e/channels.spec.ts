@@ -169,3 +169,91 @@ test("measurements appear only with their preview feature", async ({ playwright,
     await browser.close();
   }
 });
+
+// Two devices that trust each other connect once the usual way (the
+// receiver's answer code is shown to the sender's camera). From then on the
+// sender knows how to reach that receiver, and the receiver connects by
+// itself: the sender's camera sees nothing at all the second time.
+test("remembered devices: the second connection needs no answer code", async ({ playwright, baseURL }) => {
+  test.skip(!hasLanBrowser, "needs Google Chrome: the firewall keeps the bundled browser off the network");
+  test.setTimeout(240_000);
+  fs.mkdirSync(WORK, { recursive: true });
+  const codesVideo = path.join(WORK, "known-codes.y4m");
+  const answerVideo = path.join(WORK, "known-answer.y4m");
+  writeY4m(answerVideo, [blank()]);
+  writeY4m(codesVideo, [blank()]);
+  const first = path.join(WORK, "known-first.bin");
+  const second = path.join(WORK, "known-second.bin");
+  fs.writeFileSync(first, crypto.randomBytes(3_000_000));
+  fs.writeFileSync(second, crypto.randomBytes(5_000_000));
+
+  const senderBrowser = await playwright.chromium.launch({ channel: lanBrowser, args: fakeCamera(answerVideo) });
+  const receiverBrowser = await playwright.chromium.launch({ channel: lanBrowser, args: fakeCamera(codesVideo) });
+  try {
+    const sender = await (await senderBrowser.newContext({ baseURL, permissions: ["camera"] })).newPage();
+    const receiver = await (await receiverBrowser.newContext({ baseURL, permissions: ["camera"] })).newPage();
+
+    // Each gets an identity and trusts the other.
+    const identify = async (page: typeof sender, name: string) => {
+      await page.goto("./#/devices");
+      await page.getByLabel("Device name").fill(name);
+      await page.getByRole("button", { name: "Create device ID" }).click();
+      await page.getByText("Show ID as text").click();
+      return (await page.getByTestId("my-id").textContent())!;
+    };
+    const trust = async (page: typeof sender, id: string) => {
+      await page.getByPlaceholder("qrsend-id:1:age1…").fill(id);
+      await page.getByRole("button", { name: "Check" }).click();
+      await page.getByRole("button", { name: "Yes, trust it" }).click();
+    };
+    const senderId = await identify(sender, "Mac");
+    const receiverId = await identify(receiver, "Phone");
+    await trust(sender, receiverId);
+    await trust(receiver, senderId);
+    await expect(sender.getByText("connects directly")).toHaveCount(0);
+
+    await enablePreview(sender, /Local network boost/, /Remember trusted devices/);
+    /** Starts sending `file` to the phone and returns pictures of the first codes. */
+    const send = async (file: string) => {
+      await sender.goto("./#/send");
+      await sender.locator('input[type="file"]').first().setInputFiles(file);
+      await sender.getByRole("checkbox", { name: /Phone/ }).check();
+      await sender.getByLabel("Density").selectOption("low");
+      await sender.getByRole("button", { name: "Start sending" }).click();
+      await expect(sender.getByRole("button", { name: /offering LAN/ })).toBeVisible();
+      for (let i = 0; i < 4; i++) await sender.getByRole("button", { name: "Slower" }).click();
+      const frames = await capturePlayer(sender, 60);
+      expect(frames.length).toBeGreaterThan(30);
+      return frames;
+    };
+
+    // The first time: the usual way, with the answer code.
+    writeY4m(codesVideo, await send(first));
+    await sender.getByRole("button", { name: /Two-way/ }).click();
+    await receiver.goto("./#/receive");
+    await expect(receiver.getByTestId("link-answer")).toBeVisible({ timeout: 30_000 });
+    const answer = await captureImage(receiver, "link-answer");
+    writeY4m(answerVideo, [answer, answer, answer]);
+    await sender.getByRole("button", { name: /Two-way/ }).click();
+    await expect(receiver.getByTestId("received-file")).toHaveText(["known-first.bin"], { timeout: 90_000 });
+    // The receiver, seeing a sender it trusts, has said who it is; the sender remembers.
+    await expect(sender.getByTestId("link-up")).toContainText("Phone");
+    await expect(sender.getByText("The other device has everything.")).toBeVisible({ timeout: 30_000 });
+    await sender.getByRole("button", { name: "Done" }).first().click();
+    await sender.goto("./#/devices");
+    await expect(sender.getByText("connects directly")).toBeVisible();
+
+    // The second time: the sender's camera sees a blank wall throughout.
+    writeY4m(answerVideo, [blank()]);
+    writeY4m(codesVideo, await send(second));
+    await receiver.goto("./#/");
+    await receiver.goto("./#/receive");
+    await expect(receiver.getByTestId("link-connected")).toBeVisible({ timeout: 30_000 });
+    await expect(sender.getByTestId("link-up")).toBeVisible();
+    await expect(receiver.getByTestId("received-file")).toHaveText(["known-second.bin"], { timeout: 90_000 });
+    await expect(sender.getByText("The other device has everything.")).toBeVisible({ timeout: 30_000 });
+  } finally {
+    await receiverBrowser.close();
+    await senderBrowser.close();
+  }
+});

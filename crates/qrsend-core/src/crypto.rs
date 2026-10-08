@@ -6,7 +6,7 @@ use std::iter;
 use age::secrecy::ExposeSecret;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 use crate::manifest::{MetaSignature, signed_message};
 
@@ -94,6 +94,12 @@ pub fn fingerprint(recipient: &str, verifying: &[u8; 32]) -> String {
 impl DevicePublic {
     pub fn fingerprint(&self) -> String {
         fingerprint(&self.recipient.to_string(), &self.verifying.to_bytes())
+    }
+
+    /// Whether `signature` is this device's Ed25519 signature over
+    /// `message` (the counterpart of `DeviceIdentity::sign_bytes`).
+    pub fn verify_bytes(&self, message: &[u8], signature: &[u8]) -> bool {
+        Signature::from_slice(signature).is_ok_and(|s| self.verifying.verify(message, &s).is_ok())
     }
 
     /// `qrsend-id:1:<age recipient>:<ed25519 base64url>:<name>`
@@ -479,6 +485,22 @@ pub fn key_id(verifying: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_device_signature_is_checked_against_its_id() {
+        let me = DeviceIdentity::generate("me").unwrap();
+        let other = DeviceIdentity::generate("other").unwrap();
+        let signature = me.sign_bytes(b"this is my certificate");
+        let id = DevicePublic::parse(&me.public().to_id_string()).unwrap();
+        assert!(id.verify_bytes(b"this is my certificate", &signature));
+        assert!(!id.verify_bytes(b"this is another one", &signature));
+        assert!(
+            !other
+                .public()
+                .verify_bytes(b"this is my certificate", &signature)
+        );
+        assert!(!id.verify_bytes(b"this is my certificate", &signature[..63]));
+    }
 
     #[test]
     fn id_string_roundtrip() {

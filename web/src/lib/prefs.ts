@@ -62,6 +62,18 @@ export const PREVIEW_FEATURES = [
     ],
   },
   {
+    id: "knownDevices",
+    title: "Remember trusted devices",
+    side: "sending",
+    summary:
+      "With Local network boost: a device you trust (Devices page) that has connected once is connected to directly from then on, without holding its screen up to this device's camera again. The first time works as usual; when the receiver sees that the transfer is signed by a device it trusts in turn, it tells this device who it is, and this device remembers how to reach it. Next time the receiver connects by itself as soon as it has read the offer. A device that is not recognized, or cannot be reached this way, still gets the usual code to show. Both devices must trust each other.",
+    steps: [
+      "On both devices, add the other one under Devices (both directions).",
+      "Turn on Local network boost as well, send something to that device, and connect once the usual way (show its code to this device's camera).",
+      "From the next transfer on, the receiver connects by itself. The Devices page shows which devices are remembered.",
+    ],
+  },
+  {
     id: "color",
     title: "Color codes",
     side: "sending",

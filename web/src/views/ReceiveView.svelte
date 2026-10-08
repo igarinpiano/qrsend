@@ -5,7 +5,20 @@
   import { engine } from "../lib/engine";
   import type { RecvState } from "../lib/engine-types";
   import { bytes, duration, RateMeter } from "../lib/format";
-  import { LINK_PREFIX, LanReceiver, LinkAssembler, canConnect, isOffer, type LinkMessage } from "../lib/lan";
+  import { identityInfo, loadIdentity, sign } from "../lib/keys";
+  import {
+    LINK_PREFIX,
+    LanReceiver,
+    LinkAssembler,
+    canConnect,
+    fingerprintHex,
+    introductionLine,
+    introductionMessage,
+    isKnownOfferFor,
+    isOffer,
+    type LinkMessage,
+  } from "../lib/lan";
+  import { lastingCertificate } from "../lib/linkid";
   import { featureOn } from "../lib/prefs";
   import { recoverFromLoadFailure } from "../lib/update";
   import { toDataUrl } from "../lib/qrdraw";
@@ -144,7 +157,11 @@
   let linkState = $state<"none" | "answering" | "connected" | "closed">("none");
   let answerUrl = $state("");
   let linkError = $state("");
+  /** Answering the usual offer (with a code on this screen), and taking up an offer made to this device. */
   let lan: LanReceiver | undefined;
+  let silent: LanReceiver | undefined;
+  /** Whichever of the two is connected. */
+  let linked: LanReceiver | undefined;
   let linkCodes: string[] = [];
   let linkPacked: ArrayBuffer[] = [];
   /** Messages handed to the engine in one go: about 2 MiB of data. */
@@ -158,7 +175,8 @@
 
   /** Tells the sender how far we are: codes taken in ("A<n>") and the latest feedback. */
   function reply() {
-    if (!lan?.connected) return;
+    if (!linked?.connected) return;
+    if (linked.lasting && !introducedSelf && info?.sender_status === "trusted") introduce(linked);
     const lines: string[] = [];
     if (linkTaken > linkAcked) {
       linkAcked = linkTaken;
@@ -172,12 +190,91 @@
       feedbackSentAt = now;
       lines.push(st.feedback);
     }
-    if (lines.length) lan.send(lines.join("\n"));
+    if (lines.length) linked.send(lines.join("\n"));
+  }
+
+  // A sender that remembers the devices it trusts (its offer says so) is
+  // told which device this is, once the transfer has shown that the sender
+  // is a device this one trusts in turn: signed with this device's key, and
+  // naming the certificate this connection uses. Next time that sender can
+  // connect without this screen being shown to it.
+  let introducedSelf = false;
+  async function introduce(to: LanReceiver) {
+    introducedSelf = true;
+    try {
+      const me = await loadIdentity();
+      const mine = await lastingCertificate(false);
+      if (!me || !mine) return;
+      const certificate = fingerprintHex(mine.fingerprint);
+      const { signature } = await sign(me, introductionMessage(certificate));
+      to.send(introductionLine(identityInfo(me).id, certificate, btoa(String.fromCharCode(...signature))));
+    } catch (e) {
+      console.warn("introduction:", e);
+    }
+  }
+
+  // The offer made to this device in particular by a sender that remembers
+  // it: taken up without showing anything. (The usual offer is answered as
+  // well; whichever connects first is used.)
+  let knownTried: number | undefined;
+  async function knownOffer(msg: LinkMessage) {
+    if (linkDeclined || linked || knownTried === msg.id) return;
+    try {
+      const mine = await lastingCertificate(false);
+      if (!mine || !(await isKnownOfferFor(msg, mine.fingerprint)) || knownTried === msg.id) return;
+      knownTried = msg.id;
+      silent ??= receiver();
+      await silent.acceptKnown(msg, mine.certificate);
+    } catch (e) {
+      console.warn("offer to this device:", e);
+    }
+  }
+
+  /** A connection in the making; it reports here when it is up or gone. */
+  function receiver(): LanReceiver {
+    const made: LanReceiver = new LanReceiver({
+      codes: (codes) => {
+        linkCodes.push(...codes);
+        flush();
+      },
+      packed: (message) => {
+        linkPacked.push(message);
+        flush();
+      },
+      state: (state) => {
+        if (state === "closed") {
+          // An attempt that never connected changes nothing.
+          if (linked !== made) return;
+          linked = undefined;
+        }
+        linkState = state;
+        clearInterval(replyTimer);
+        if (state === "connected") {
+          mark("connected");
+          linked = made;
+          for (const other of [lan, silent]) if (other !== made) other?.stop();
+          introducedSelf = false;
+          // Counts start over with every connection (the sender's do), and
+          // the sender starts again from what is missing.
+          linkCodes = [];
+          linkPacked = [];
+          linkTaken = linkAcked = 0;
+          feedbackSent = "";
+          answerUrl = "";
+          replyTimer = setInterval(reply, REPLY_EVERY_MS);
+        }
+      },
+    });
+    return made;
   }
 
   function onLinkCode(code: string) {
     const msg = assembler.add(code);
-    if (!msg || !isOffer(msg) || !canConnect || msg.session !== info?.session) return;
+    if (!msg || !canConnect || msg.session !== info?.session) return;
+    if (!isOffer(msg)) {
+      void knownOffer(msg);
+      return;
+    }
     mark("offer");
     if (offer && offer.id === msg.id) return;
     offer = msg;
@@ -190,39 +287,19 @@
     linkState = "none";
     clearInterval(replyTimer);
     lan?.stop();
+    silent?.stop();
+    linked = undefined;
   }
 
   async function connect() {
     linkError = "";
     if (!offer || linkDeclined) return;
-    lan ??= new LanReceiver({
-      codes: (codes) => {
-        linkCodes.push(...codes);
-        flush();
-      },
-      packed: (message) => {
-        linkPacked.push(message);
-        flush();
-      },
-      state: (state) => {
-        linkState = state;
-        clearInterval(replyTimer);
-        if (state === "connected") {
-          mark("connected");
-          // Counts start over with every connection (the sender's do), and
-          // the sender starts again from what is missing.
-          linkCodes = [];
-          linkPacked = [];
-          linkTaken = linkAcked = 0;
-          feedbackSent = "";
-          answerUrl = "";
-          replyTimer = setInterval(reply, REPLY_EVERY_MS);
-        }
-      },
-    });
+    lan ??= receiver();
     try {
       linkState = "answering";
-      const answer = await lan.accept(offer);
+      const answer = await lan.accept(offer, async () => (await lastingCertificate(true))?.certificate);
+      // Connected meanwhile, by the offer made to this device: nothing to show.
+      if (linked) return;
       await ready();
       answerUrl = toDataUrl(renderText(answer), 5);
       mark("answer");
@@ -258,6 +335,7 @@
       clearTimeout(lingerTimer);
       clearInterval(replyTimer);
       lan?.stop();
+      silent?.stop();
       engine.recvStop().catch(() => {});
     };
   });

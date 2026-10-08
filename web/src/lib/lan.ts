@@ -12,9 +12,15 @@ import { linkParse, linkSplit } from "./core";
 export const LINK_PREFIX = "QSL1-";
 const KIND_OFFER = 1;
 const KIND_ANSWER = 2;
+/** An offer to one device the sender has connected to before: it needs no answer (see `LanSender.start`). */
+const KIND_KNOWN_OFFER = 4;
+/** In an offer: the sender remembers devices it trusts, to connect without an answer next time. */
+const FLAG_REMEMBERS = 1;
 const FEEDBACK_PREFIX = "QSF1-";
 /** The receiver's first line: it takes messages of packed binary records. */
 const HELLO_BINARY = "B1";
+/** Starts the line in which a receiver says who it is (see `introduction`). */
+const INTRODUCTION = "I";
 
 /** What two peers must know about each other to connect. */
 interface Description {
@@ -23,6 +29,8 @@ interface Description {
   /** SHA-256 fingerprint of the peer's DTLS certificate. */
   fingerprint: Uint8Array;
   candidates: { address: string; port: number }[];
+  /** Offers only (see `FLAG_REMEMBERS`). */
+  flags?: number;
 }
 
 const MAX_CANDIDATES = 4;
@@ -90,6 +98,8 @@ function pack(d: Description): Uint8Array {
     str(c.address);
     out.push(c.port >> 8, c.port & 0xff);
   }
+  // Left out when nothing is flagged: the message is then what it always was.
+  if (d.flags) out.push(d.flags);
   return new Uint8Array(out);
 }
 
@@ -115,7 +125,29 @@ function unpack(bytes: Uint8Array): Description {
   if (![ufrag, pwd, ...candidates.map((c) => c.address)].every((s) => plain.test(s))) {
     throw new Error("the connection offer is damaged");
   }
-  return { ufrag, pwd, fingerprint, candidates };
+  // (Anything after the flags belongs to a later revision.)
+  return { ufrag, pwd, fingerprint, candidates, flags: at < bytes.length ? bytes[at] : 0 };
+}
+
+const hex = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+async function sha256(context: string, bytes: Uint8Array): Promise<Uint8Array> {
+  const data = new Uint8Array([...text.encode(context), ...bytes]);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+}
+
+/** How an offer to a known device names it: the start of a hash of its certificate's fingerprint. */
+export async function knownTag(fingerprint: Uint8Array): Promise<Uint8Array> {
+  return (await sha256("qrsend known device\n", fingerprint)).slice(0, 8);
+}
+
+/**
+ * The credentials a known device answers an offer with. Both sides work them out from the offer, so the answer need
+ * not travel. (They keep strangers' packets apart, no more: who the other side is, is settled by the certificates.)
+ */
+async function answerCredentials(offer: Uint8Array): Promise<{ ufrag: string; pwd: string }> {
+  const h = hex(await sha256("qrsend known answer\n", offer));
+  return { ufrag: h.slice(0, 8), pwd: h.slice(8, 40) };
 }
 
 /** After the first local address is known, others get this long to follow. */
@@ -130,7 +162,7 @@ const ADDRESSES_TIMEOUT_MS = 3000;
  * seconds more (it also looks for kinds of addresses not used here), and both devices wait for it in turn, so the
  * wait ends a moment after the first usable address instead.
  */
-async function described(pc: RTCPeerConnection): Promise<Uint8Array> {
+async function described(pc: RTCPeerConnection, flags = 0): Promise<Uint8Array> {
   if (pc.iceGatheringState !== "complete") {
     await new Promise<void>((resolve) => {
       let settle: ReturnType<typeof setTimeout> | undefined;
@@ -155,7 +187,7 @@ async function described(pc: RTCPeerConnection): Promise<Uint8Array> {
   const d = parseSdp(pc.localDescription?.sdp ?? "");
   if (!d.ufrag || d.fingerprint.length !== 32) throw new Error("this browser gave no usable connection details");
   if (d.candidates.length === 0) throw new Error("no local network address");
-  return pack(d);
+  return pack({ ...d, flags });
 }
 
 export interface LinkMessage {
@@ -252,11 +284,28 @@ export interface SenderHooks {
   /** A feedback code the receiver sent through the connection, having taken in `taken` records by then. */
   feedback(code: string, taken: number): void;
   state(state: LinkState): void;
+  /** Codes of the offer to a known device (`null`: none any more). */
+  offerKnown?(payload: Uint8Array | null, id: number): void;
+  /** The receiver says who it is (see `introduction`); `certificate` is the fingerprint it connected with. */
+  introduced?(introduction: string, certificate: Uint8Array): void;
+}
+
+/** What a sender does besides offering a connection the usual way. */
+export interface SenderOptions {
+  /** Tell receivers that this sender remembers devices it trusts. */
+  remembers?: boolean;
+  /** Certificate fingerprint of a device connected to before: it is offered a connection that needs no answer. */
+  known?: Uint8Array;
 }
 
 export class LanSender {
   private pc?: RTCPeerConnection;
   private channel?: RTCDataChannel;
+  /** The attempt toward a known device, until one of the two connects. */
+  private knownPc?: RTCPeerConnection;
+  private knownChannel?: RTCDataChannel;
+  /** Certificate fingerprint of whoever answered the usual offer. */
+  private answered?: Uint8Array;
   private assembler = new LinkAssembler();
   private id = Math.floor(Math.random() * 256);
   private sent = 0;
@@ -281,50 +330,103 @@ export class LanSender {
   constructor(
     private session: string,
     private hooks: SenderHooks,
+    private options: SenderOptions = {},
   ) {}
 
-  /** Starts offering a connection (again). */
+  /**
+   * Starts offering a connection (again).
+   *
+   * The usual offer is for anyone, and needs the receiver's answer (a code on its screen, read by this device's
+   * camera). A device connected to before can be spared that: what an answer says is its certificate (known from
+   * last time), credentials (worked out from the offer by both sides) and its addresses (learned when it knocks). So
+   * it gets an offer of its own, to which this side has already written the answer. Whichever connects first carries
+   * the transfer; the other attempt ends.
+   */
   async start(): Promise<void> {
     this.close();
     if (this.stopped) return;
     this.id = (this.id + 1) % 256;
     const id = this.id;
-    const pc = new RTCPeerConnection({ iceServers: [] });
-    this.pc = pc;
-    const channel = pc.createDataChannel("qrsend");
-    this.channel = channel;
-    channel.bufferedAmountLowThreshold = BUFFER_HIGH / 4;
-    channel.onopen = () => {
-      if (this.channel !== channel) return;
-      this.hooks.offer(null, id);
-      this.hooks.state("connected");
-      this.pump(channel);
-    };
-    channel.onbufferedamountlow = () => this.wake?.();
-    channel.onmessage = (e) => {
-      for (const line of String(e.data).split("\n")) {
-        if (line.startsWith("A")) {
-          this.confirmed(Number(line.slice(1)) || 0);
-        } else if (line.startsWith(FEEDBACK_PREFIX)) {
-          this.hooks.feedback(line, this.acked);
-          this.wake?.();
-        } else if (line === HELLO_BINARY) {
-          this.binary = true;
-          this.wake?.();
+    const attempt = (peer: () => Uint8Array | undefined) => {
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      const channel = pc.createDataChannel("qrsend");
+      channel.bufferedAmountLowThreshold = BUFFER_HIGH / 4;
+      channel.onopen = () => {
+        if (this.channel !== channel && this.knownChannel !== channel) return;
+        const others = [this.channel, this.knownChannel, this.pc, this.knownPc].filter((x) => x !== channel && x !== pc);
+        this.pc = pc;
+        this.channel = channel;
+        this.knownPc = this.knownChannel = undefined;
+        for (const other of others) {
+          try {
+            other?.close();
+          } catch {
+            /* already closed */
+          }
         }
-      }
+        this.peer = peer();
+        this.hooks.offer(null, id);
+        this.hooks.offerKnown?.(null, id);
+        this.hooks.state("connected");
+        this.pump(channel);
+      };
+      channel.onbufferedamountlow = () => this.wake?.();
+      channel.onmessage = (e) => {
+        for (const line of String(e.data).split("\n")) {
+          if (line.startsWith("A")) {
+            this.confirmed(Number(line.slice(1)) || 0);
+          } else if (line.startsWith(FEEDBACK_PREFIX)) {
+            this.hooks.feedback(line, this.acked);
+            this.wake?.();
+          } else if (line === HELLO_BINARY) {
+            this.binary = true;
+            this.wake?.();
+          } else if (line.startsWith(INTRODUCTION) && this.peer) {
+            this.hooks.introduced?.(line.slice(INTRODUCTION.length), this.peer);
+          }
+        }
+      };
+      // (An attempt that is not, or no longer, the one in use just ends.)
+      const lost = () => this.giveUp(channel);
+      channel.onclose = lost;
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "failed" || pc.connectionState === "closed") lost();
+      };
+      return { pc, channel };
     };
-    const lost = () => this.giveUp(channel);
-    channel.onclose = lost;
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") lost();
-    };
+
+    const { pc, channel } = attempt(() => this.answered);
+    this.pc = pc;
+    this.channel = channel;
     await pc.setLocalDescription(await pc.createOffer());
-    const payload = await described(pc);
+    const payload = await described(pc, this.options.remembers ? FLAG_REMEMBERS : 0);
     if (this.pc !== pc) return;
     this.hooks.offer(payload, id);
     this.hooks.state("offering");
+
+    const known = this.options.known;
+    if (!known) return;
+    try {
+      const second = attempt(() => known);
+      this.knownPc = second.pc;
+      this.knownChannel = second.channel;
+      await second.pc.setLocalDescription(await second.pc.createOffer());
+      const offer = new Uint8Array([...(await knownTag(known)), ...(await described(second.pc))]);
+      const { ufrag, pwd } = await answerCredentials(offer);
+      await second.pc.setRemoteDescription({
+        type: "answer",
+        sdp: buildSdp({ ufrag, pwd, fingerprint: known, candidates: [] }, "answer"),
+      });
+      if (this.knownPc !== second.pc) return;
+      this.hooks.offerKnown?.(offer, id);
+    } catch (e) {
+      // The usual offer stands on its own.
+      console.warn("offer to a known device:", e);
+    }
   }
+
+  /** Certificate fingerprint of the device connected to. */
+  private peer?: Uint8Array;
 
   /** A link code the camera read off the receiver's screen. */
   async answer(code: string): Promise<void> {
@@ -332,7 +434,9 @@ export class LanSender {
     const pc = this.pc;
     if (!msg || !pc || msg.kind !== KIND_ANSWER || msg.session !== this.session || msg.id !== this.id) return;
     if (pc.signalingState !== "have-local-offer") return;
-    await pc.setRemoteDescription({ type: "answer", sdp: buildSdp(unpack(msg.payload), "answer") });
+    const description = unpack(msg.payload);
+    this.answered = description.fingerprint;
+    await pc.setRemoteDescription({ type: "answer", sdp: buildSdp(description, "answer") });
   }
 
   private get window(): number {
@@ -499,16 +603,18 @@ export class LanSender {
   }
 
   private close(): void {
-    const { pc, channel } = this;
-    this.pc = undefined;
-    this.channel = undefined;
+    const all = [this.channel, this.knownChannel, this.pc, this.knownPc];
+    this.pc = this.knownPc = undefined;
+    this.channel = this.knownChannel = undefined;
+    this.answered = this.peer = undefined;
     this.binary = false;
     this.wake?.();
-    try {
-      channel?.close();
-      pc?.close();
-    } catch {
-      /* already closed */
+    for (const one of all) {
+      try {
+        one?.close();
+      } catch {
+        /* already closed */
+      }
     }
   }
 
@@ -516,6 +622,7 @@ export class LanSender {
   stop(): void {
     this.stopped = true;
     this.hooks.offer(null, this.id);
+    this.hooks.offerKnown?.(null, this.id);
     this.close();
   }
 }
@@ -531,6 +638,8 @@ export interface ReceiverHooks {
 export class LanReceiver {
   private pc?: RTCPeerConnection;
   private channel?: RTCDataChannel;
+  /** The connection uses this device's lasting certificate (so the sender may remember it). */
+  lasting = false;
 
   constructor(private hooks: ReceiverHooks) {}
 
@@ -538,11 +647,45 @@ export class LanReceiver {
     return this.channel?.readyState === "open";
   }
 
-  /** Accepts an offer; returns the answer as a code to show the sender. */
-  async accept(offer: LinkMessage): Promise<string> {
+  private open(certificate?: RTCCertificate): RTCPeerConnection {
     this.stop();
-    const pc = new RTCPeerConnection({ iceServers: [] });
+    this.lasting = !!certificate;
+    const pc = new RTCPeerConnection({ iceServers: [], certificates: certificate ? [certificate] : undefined });
     this.pc = pc;
+    this.listen(pc);
+    return pc;
+  }
+
+  /**
+   * Accepts an offer; returns the answer as a code to show the sender. For a sender that remembers devices,
+   * `lasting` supplies this device's lasting certificate.
+   */
+  async accept(offer: LinkMessage, lasting?: () => Promise<RTCCertificate | undefined>): Promise<string> {
+    const description = unpack(offer.payload);
+    const certificate = (description.flags ?? 0) & FLAG_REMEMBERS ? await lasting?.() : undefined;
+    const pc = this.open(certificate);
+    await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(description, "offer") });
+    await pc.setLocalDescription(await pc.createAnswer());
+    const payload = await described(pc);
+    const codes = linkSplit(offer.session, KIND_ANSWER, offer.id, payload, 2000) as string[];
+    return codes[0];
+  }
+
+  /**
+   * Takes up an offer made to this device in particular (it has connected to that sender before). Nothing is shown:
+   * the sender already has the answer, for which this side uses its lasting certificate and the credentials both work
+   * out from the offer, and then knocks at the sender's addresses.
+   */
+  async acceptKnown(offer: LinkMessage, certificate: RTCCertificate): Promise<void> {
+    const pc = this.open(certificate);
+    await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(unpack(offer.payload.subarray(8)), "offer") });
+    const { ufrag, pwd } = await answerCredentials(offer.payload);
+    const answer = await pc.createAnswer();
+    const sdp = (answer.sdp ?? "").replace(/a=ice-ufrag:.*/g, `a=ice-ufrag:${ufrag}`).replace(/a=ice-pwd:.*/g, `a=ice-pwd:${pwd}`);
+    await pc.setLocalDescription({ type: "answer", sdp });
+  }
+
+  private listen(pc: RTCPeerConnection): void {
     pc.ondatachannel = (e) => {
       const channel = e.channel;
       this.channel = channel;
@@ -563,11 +706,6 @@ export class LanReceiver {
       };
       if (channel.readyState === "open") opened();
     };
-    await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(unpack(offer.payload), "offer") });
-    await pc.setLocalDescription(await pc.createAnswer());
-    const payload = await described(pc);
-    const codes = linkSplit(offer.session, KIND_ANSWER, offer.id, payload, 2000) as string[];
-    return codes[0];
   }
 
   /**
@@ -592,4 +730,20 @@ export class LanReceiver {
 }
 
 export const isOffer = (m: LinkMessage) => m.kind === KIND_OFFER;
+/** Whether this is an offer to the device with this certificate fingerprint in particular. */
+export async function isKnownOfferFor(m: LinkMessage, fingerprint: Uint8Array): Promise<boolean> {
+  if (m.kind !== KIND_KNOWN_OFFER || m.payload.length < 8) return false;
+  const tag = await knownTag(fingerprint);
+  return tag.every((b, i) => b === m.payload[i]);
+}
+export const KNOWN_OFFER = KIND_KNOWN_OFFER;
+
+/** The line in which a receiver says who it is: its device ID, its certificate, and its signature over both. */
+export const introductionLine = (id: string, certificate: string, signature: string) =>
+  INTRODUCTION + JSON.stringify({ id, certificate, signature });
+
+/** What an introduction is signed over. */
+export const introductionMessage = (certificate: string) => text.encode(`qrsend link v1\n${certificate}`);
+
+export { hex as fingerprintHex };
 export const canConnect = typeof RTCPeerConnection === "function";

@@ -173,6 +173,9 @@ loaded (PWA).
     then used at once — megabytes per second instead of kilobytes — and the
     screen carries on alone if the connection drops. The sender finds the
     pace the connection can take as it goes.
+  - *Remember trusted devices*: a device you trust that has connected over
+    the local network once is connected to directly from then on — its
+    screen no longer has to be shown to the sender's camera.
   - *Color codes*: three codes in one, as the red, green and blue parts of
     the picture — up to three times the data per frame. Receivers recognize
     them on their own.

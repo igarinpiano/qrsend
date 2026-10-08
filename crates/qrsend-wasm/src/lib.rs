@@ -194,6 +194,13 @@ pub fn parse_device_id(id: &str) -> JsResult<JsValue> {
     to_js(&device_info(&DevicePublic::parse(id).map_err(js_err)?))
 }
 
+/// Whether `signature` is the Ed25519 signature of the device with this ID
+/// over `message`.
+#[wasm_bindgen(js_name = verifyDeviceSignature)]
+pub fn verify_device_signature(device_id: &str, message: &[u8], signature: &[u8]) -> bool {
+    DevicePublic::parse(device_id).is_ok_and(|d| d.verify_bytes(message, signature))
+}
+
 /// `{ name, fingerprint, id }` of a device given its raw public keys
 /// (identities whose private keys live in WebCrypto).
 #[wasm_bindgen(js_name = deviceInfo)]
