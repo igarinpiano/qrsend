@@ -24,9 +24,9 @@
   import { recoverFromLoadFailure } from "../lib/update";
   import { toDataUrl } from "../lib/qrdraw";
   import { feedbackWav } from "../lib/sound";
-  import { copyText } from "../lib/save";
   import Camera from "./Camera.svelte";
   import Result from "./Result.svelte";
+  import ResumeCode from "./ResumeCode.svelte";
   import Showcase from "./Showcase.svelte";
 
   let { params }: { params: URLSearchParams } = $props();
@@ -168,6 +168,12 @@
     } catch {
       /* not remembered */
     }
+  }
+
+  /** Lets go of the transfer this page is on and takes whatever is shown now (what was received stays in the inbox). */
+  function receiveOther() {
+    log("rx", "switching to the transfer being shown");
+    location.hash = `#/receive?new=${Date.now()}`;
   }
 
   const info = $derived(st?.info ?? undefined);
@@ -585,6 +591,23 @@
   <p class="small muted">No direct connection ({linkError}); the camera carries on.</p>
 {/if}
 
+{#if st?.foreign && !result && !error}
+  <div class="card stack" data-testid="other-transfer">
+    <p>
+      <strong>The sender is showing another transfer</strong> ({st.foreign}), not the one this page is waiting for
+      ({info?.summary ?? info?.session ?? "…"}). Its codes are passed over.
+    </p>
+    <p class="small muted">
+      An unfinished transfer continues when the sender sends the very same data again, unchanged: start it again on the
+      sender, and this page carries on where it stopped. (Not if it was encrypted for a device: that is encrypted anew
+      every time, so it has to be received from the start.)
+    </p>
+    <div class="row">
+      <button class="primary" onclick={receiveOther}>Receive the other transfer instead</button>
+    </div>
+  </div>
+{/if}
+
 {#if error}
   <p class="error" role="alert">{error}</p>
 {/if}
@@ -624,6 +647,9 @@
         {#if total}
           {pct.toFixed(0)}% · {bytes(total - left)} of {bytes(total)} · {(info.total_codes ?? 0) - (info.remaining_codes ?? 0)} of {info.total_codes}
           codes, {info.remaining_codes} to go
+        {:else if info.total}
+          <!-- Continued from the inbox, before the first code is read again. -->
+          {info.done} of {info.total} parts are here. Waiting for the sender’s codes…
         {/if}
       </span>
       <span>
@@ -632,12 +658,8 @@
     </div>
     {#if st?.resumeCode}
       <details>
-        <summary class="small">Missing pieces? Resume code</summary>
-        <p class="small">Run this on the sending computer to resend only what is missing:</p>
-        <p class="row">
-          <code>qrsend send --resume {st.resumeCode}</code>
-          <button onclick={() => copyText(st!.resumeCode!)}>Copy</button>
-        </p>
+        <summary class="small">Stopped halfway? How to continue</summary>
+        <ResumeCode code={st.resumeCode} />
         <p class="small muted">Progress is saved — you can leave and continue later from the Inbox.</p>
       </details>
     {/if}
@@ -649,6 +671,11 @@
 {/if}
 
 {#if result}
+  {#if st?.already}
+    <p class="small muted" data-testid="already-received">
+      <span class="badge ok">Already received</span> This transfer arrived in full before: this is the copy from your Inbox.
+    </p>
+  {/if}
   <Result {result} />
   <p class="small muted">Kept in your <a href="#/inbox">Inbox</a> until you delete it.</p>
 {/if}

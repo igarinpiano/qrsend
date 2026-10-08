@@ -107,7 +107,11 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
     } else {
       const total = req.items.reduce((sum, i) => sum + (i.file?.size ?? 0), 0);
       let done = 0;
-      for (const item of req.items) {
+      // Always in the same order, however the files were picked: the same
+      // data then packs to the same bytes, which is what lets a transfer be
+      // continued by sending it again.
+      const items = [...req.items].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      for (const item of items) {
         if (!item.file) {
           job.addDir(item.path);
           continue;
@@ -223,9 +227,15 @@ interface RecvSession {
   body?: RandomFile;
   done: Set<number>;
   unverified: number[];
+  /** Codes kept of segments still incomplete: one file per segment, a code per line. */
+  parts: Map<number, { file: RandomFile; size: number }>;
   lastSave: number;
   /** When the first code of the session was read (for the diagnostic log). */
   lockedAt?: number;
+  /** Another transfer seen in place of this one, and how far this one was then (see `RecvState.foreign`). */
+  foreign?: string;
+  foreignAt?: number;
+  already?: boolean;
   notice?: string;
   error?: string;
   result?: RecvResult;
@@ -242,7 +252,58 @@ async function recvStop(): Promise<void> {
   receiving = undefined;
   if (s.record && !s.record.extracted) await saveRecord(s, true);
   s.body?.close();
+  for (const part of s.parts.values()) part.file.close();
   s.r.free();
+}
+
+// A segment is a megabyte, and several are collected at once: through a
+// camera that takes minutes, and a transfer stopped before then would have
+// nothing complete to continue from. So the codes of segments still
+// incomplete are kept as they arrive (a file per segment, a code per line,
+// dropped when the segment completes) and read back in when the transfer is
+// continued. Only codes of a size a QR code holds: what a network connection
+// brings completes a segment in a moment.
+const KEPT_CODE_MAX = 4400;
+const lines = new TextEncoder();
+
+async function keepCode(s: RecvSession, segment: number, text: string): Promise<void> {
+  if (!s.record || s.done.has(segment) || text.length > KEPT_CODE_MAX) return;
+  let part = s.parts.get(segment);
+  if (!part) {
+    const file = await (await fileStore()).open(dir(s.record.session, `part-${segment}`));
+    part = { file, size: file.size() };
+    s.parts.set(segment, part);
+  }
+  const line = lines.encode(`${text}\n`);
+  part.file.write(part.size, line);
+  part.size += line.length;
+}
+
+async function dropKept(s: RecvSession, segment: number): Promise<void> {
+  const part = s.parts.get(segment);
+  if (!part || !s.record) return;
+  s.parts.delete(segment);
+  part.file.close();
+  await (await fileStore()).remove(dir(s.record.session, `part-${segment}`));
+}
+
+/** Takes up the codes kept of incomplete segments again. */
+async function restoreKept(s: RecvSession, rec: SessionRecord): Promise<void> {
+  const store = await fileStore();
+  let codes = 0;
+  for (const segment of rec.partial ?? []) {
+    if (s.done.has(segment)) continue;
+    const file = await store.open(dir(rec.session, `part-${segment}`));
+    const size = file.size();
+    s.parts.set(segment, { file, size });
+    // (A last line cut short by a crash fails its checksum and is passed over.)
+    for (const text of new TextDecoder().decode(file.read(0, size)).split("\n")) {
+      if (!text) continue;
+      s.r.push(text);
+      codes++;
+    }
+  }
+  if (codes) logLine("rx", "codes of unfinished parts taken up again", { codes, parts: s.parts.size });
 }
 
 async function saveRecord(s: RecvSession, force = false): Promise<void> {
@@ -255,6 +316,7 @@ async function saveRecord(s: RecvSession, force = false): Promise<void> {
     const info = s.r.info() as RecvInfo;
     rec.done = ranges([...s.done]);
     rec.unverified = [...s.unverified];
+    rec.partial = [...s.parts.keys()];
     rec.doneCount = s.done.size;
     rec.summary = info.summary ?? rec.summary;
     rec.resumeCode = s.r.resumeCode() ?? undefined;
@@ -273,6 +335,8 @@ function state(s: RecvSession): RecvState {
     result: s.result,
     persistent,
     feedbackBySound: s.r.feedbackBySound,
+    foreign: s.foreign,
+    already: s.already,
     // "Complete" only once everything is verified and unpacked.
     feedback: s.r.feedback(!!s.result) ?? undefined,
   };
@@ -422,6 +486,7 @@ async function resume(s: RecvSession, rec: SessionRecord): Promise<void> {
     const meta = await readWhole(store, dir(rec.session, "meta"));
     if (await openMeta(s, meta)) verifyPending(s);
   }
+  await restoreKept(s, rec);
 }
 
 async function finishIfComplete(s: RecvSession): Promise<void> {
@@ -442,7 +507,7 @@ async function recvStart(session?: string): Promise<RecvState> {
   await recvStop();
   const store = await fileStore();
   persistent = store.persistent;
-  const s: RecvSession = { r: new Receive(session), done: new Set(), unverified: [], lastSave: 0 };
+  const s: RecvSession = { r: new Receive(session), done: new Set(), unverified: [], parts: new Map(), lastSave: 0 };
   receiving = s;
   await attachIdentity(s);
   if (session) {
@@ -460,7 +525,7 @@ async function recvStart(session?: string): Promise<RecvState> {
   return state(s);
 }
 
-type Pushed = { locked?: string; foreign?: string; rejected: number[]; records: number };
+type Pushed = { locked?: string; foreign?: string; rejected: number[]; records: number; kept?: number | null };
 
 async function recvPush(
   texts: string[],
@@ -480,20 +545,45 @@ async function recvPush(
   const store = await fileStore();
   let taken = 0;
   const note = (res: Pushed) => {
-    if (res.foreign) s.notice = `Ignoring codes of another transfer (${res.foreign}).`;
+    if (res.foreign) {
+      s.foreign = res.foreign;
+      s.foreignAt = s.r.useful;
+      logLine("rx", "another transfer is being shown", { waitingFor: s.record?.session, shown: res.foreign });
+    }
     if (res.rejected.length) s.notice = `${res.rejected.length} segment(s) failed verification and will be received again.`;
   };
-  for (const text of texts) note(s.r.push(text) as Pushed);
+  const kept: [number, string][] = [];
+  const rejected: number[] = [];
+  for (const text of texts) {
+    const res = s.r.push(text) as Pushed;
+    note(res);
+    if (res.kept != null) kept.push([res.kept, text]);
+    rejected.push(...res.rejected);
+  }
   for (const message of packed) {
     const res = s.r.pushPacked(new Uint8Array(message)) as Pushed;
     taken += res.records;
     note(res);
+  }
+  // Codes of this receiver's own transfer again: the other one is gone.
+  if (s.foreign && s.r.useful > (s.foreignAt ?? 0)) {
+    s.foreign = undefined;
+    logLine("rx", "this transfer is being shown again");
   }
   const done = async (): Promise<RecvState> => ({ ...state(s), taken });
   if (!s.record) {
     const p = s.r.params() as { session: string; flags: number; segShift: number; segCount: number } | null;
     if (!p) return done();
     const saved = await db.get<SessionRecord>("sessions", p.session);
+    if (saved?.extracted && saved.segCount === p.segCount && saved.flags === p.flags) {
+      // Received in full before (the same data sent again is the same
+      // transfer): there is nothing to receive, the copy is in the inbox.
+      s.record = saved;
+      s.result = await resultFromRecord(saved);
+      s.already = true;
+      logLine("rx", "this transfer was received before: showing the copy from the inbox");
+      return done();
+    }
     if (saved && !saved.extracted && saved.segCount === p.segCount && saved.flags === p.flags) {
       // Seen before: continue where it stopped.
       await resume(s, saved);
@@ -524,6 +614,9 @@ async function recvPush(
   const rec = s.record!;
   const segSize = 2 ** rec.segShift;
   let important = false;
+  for (const [segment, text] of kept) await keepCode(s, segment, text);
+  // What failed verification is collected anew: the codes kept of it are no use.
+  for (const segment of rejected) await dropKept(s, segment);
   for (const { index, data } of s.r.takeCompleted() as { index: number; data: Uint8Array }[]) {
     if (s.done.has(index)) continue;
     if (index === 0) {
@@ -545,6 +638,7 @@ async function recvPush(
       s.done.add(index);
       if (!s.r.hasManifest()) s.unverified.push(index);
     }
+    await dropKept(s, index);
   }
   await saveRecord(s, important || s.r.isComplete());
   await finishIfComplete(s);

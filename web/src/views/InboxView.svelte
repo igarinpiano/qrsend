@@ -4,8 +4,8 @@
   import { engine } from "../lib/engine";
   import type { RecvResult, SessionRecord } from "../lib/engine-types";
   import { bytes } from "../lib/format";
-  import { copyText } from "../lib/save";
   import Result from "./Result.svelte";
+  import ResumeCode from "./ResumeCode.svelte";
 
   let sessions = $state<SessionRecord[]>([]);
   let storage = $state<{ usage: number; quota: number } | undefined>();
@@ -28,11 +28,8 @@
     }
   }
 
-  async function resume(s: SessionRecord) {
-    if (!s.resumeCode) return;
-    await copyText(`qrsend send --resume ${s.resumeCode}`);
-    message = "Resume command copied.";
-  }
+  /** The unfinished transfer whose resume code is on show. */
+  let resuming = $state("");
 
   async function remove(s: SessionRecord) {
     if (!confirm(`Delete ${s.summary ?? s.session}?`)) return;
@@ -63,10 +60,17 @@
             <button class="primary" onclick={() => open(s)}>Open</button>
           {:else}
             <a class="button primary" href="#/receive?session={s.session}">Continue</a>
-            {#if s.resumeCode}<button onclick={() => resume(s)}>Copy resume command</button>{/if}
+            {#if s.resumeCode}
+              <button aria-expanded={resuming === s.session} onclick={() => (resuming = resuming === s.session ? "" : s.session)}>
+                How to continue
+              </button>
+            {/if}
           {/if}
           <button class="danger" onclick={() => remove(s)}>Delete</button>
         </div>
+        {#if resuming === s.session && s.resumeCode}
+          <ResumeCode code={s.resumeCode} />
+        {/if}
       </li>
     {/each}
   </ul>

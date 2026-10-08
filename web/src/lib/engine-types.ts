@@ -122,6 +122,13 @@ export interface RecvState {
   feedback?: string;
   /** Records in the binary messages of this push. */
   taken?: number;
+  /**
+   * Another transfer (its session id) is being shown instead of the one this receiver is on: its codes are passed
+   * over. Cleared when codes of this receiver's own transfer arrive again.
+   */
+  foreign?: string;
+  /** The transfer shown was received in full before: `result` is the copy from the inbox. */
+  already?: boolean;
 }
 
 export interface SessionRecord {
@@ -135,6 +142,8 @@ export interface SessionRecord {
   done: string;
   /** Body segments stored before the manifest was known. */
   unverified: number[];
+  /** Segments of which some codes are kept (in `part-<n>` files), to be taken up again when continuing. */
+  partial?: number[];
   doneCount: number;
   total: number;
   complete: boolean;

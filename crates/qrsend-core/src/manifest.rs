@@ -244,6 +244,25 @@ fn validate(m: &Manifest) -> Result<(), MetaError> {
     }
 }
 
+/// A session id that follows from what is sent: the same data, packed the
+/// same way and described by the same manifest, gives the same id (and so
+/// the same frames) every time.
+///
+/// A sender that stops and later sends the same data again then continues
+/// the same session: a receiver that kept what it had needs only the rest,
+/// with nothing for the sender to remember and no channel back to it. Only
+/// for transfers whose bytes repeat, i.e. unencrypted ones (encryption uses
+/// fresh keys every time). The manifest's own `session` field is left out of
+/// the calculation; everything else in it counts, so a renamed file or
+/// another sender name is another session.
+pub fn content_session_id(manifest: &Manifest) -> u32 {
+    let mut blank = manifest.clone();
+    blank.session = String::new();
+    let json = serde_json::to_vec(&blank).expect("a manifest serializes");
+    let hash = blake3::derive_key("qrsend session id from content v1", &json);
+    u32::from_le_bytes(hash[..4].try_into().unwrap()).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +300,30 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn the_same_content_is_the_same_session() {
+        let m = sample();
+        let id = content_session_id(&m);
+        assert_ne!(id, 0);
+        assert_eq!(content_session_id(&sample()), id);
+        // Whatever the manifest's own session field says.
+        let relabeled = Manifest {
+            session: session_hex(id),
+            ..sample()
+        };
+        assert_eq!(content_session_id(&relabeled), id);
+        // Anything else that differs makes another session.
+        let mut renamed = sample();
+        renamed.entries[1].path = "d/b.txt".into();
+        assert_ne!(content_session_id(&renamed), id);
+        let mut other_body = sample();
+        other_body.body.blake3 = "01".into();
+        assert_ne!(content_session_id(&other_body), id);
+        let mut other_sender = sample();
+        other_sender.sender_name = None;
+        assert_ne!(content_session_id(&other_sender), id);
     }
 
     #[test]

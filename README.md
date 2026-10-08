@@ -153,6 +153,10 @@ loaded (PWA).
 - The device's private keys are WebCrypto keys that cannot be exported — not
   even by the page itself.
 - Up to 8×8 codes at once, or as many as fit the screen.
+- A transfer that stopped halfway continues when the sender simply sends the
+  same data again (unencrypted transfers): it is the same transfer, bit for
+  bit, and the receiver keeps what it had — also of the part it was in the
+  middle of. The inbox shows the resume code for the command-line sender.
 - “Copy log” at the bottom of every page copies a diagnostic log for bug
   reports: what happened when (steps, timings, counts, connection states) —
   never file names, contents, device IDs or network addresses.

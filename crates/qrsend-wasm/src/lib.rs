@@ -24,7 +24,7 @@ use qrsend_core::frame::{self, FLAG_ENCRYPTED, Frame, META_INDEX};
 use qrsend_core::link::{self, LinkPart};
 use qrsend_core::manifest::{
     Body, Entry, EntryType, Kind, MANIFEST_VERSION, Manifest, MetaEnvelope, MetaSignature,
-    session_hex, signed_message,
+    content_session_id, session_hex, signed_message,
 };
 use qrsend_core::payload::{
     BodyDigest, BodyHasher, PackOptions, Packed, Packer, UnpackSink, segment_hash,
@@ -496,11 +496,21 @@ impl SendJob {
             }
         };
         let digest = sink.finish().map_err(js_err)?;
-        let manifest = Manifest {
+        // An unencrypted transfer gets a session id that follows from its
+        // content, so that sending the same data again continues the same
+        // session (see `content_session_id`). For that, nothing in the
+        // manifest may depend on when it is made: its date is that of the
+        // newest file. An encrypted transfer is other bytes every time.
+        let repeatable = self.recipients.is_empty();
+        let newest = packed.entries.iter().filter_map(|e| e.mtime).max();
+        let mut manifest = Manifest {
             qrsend: MANIFEST_VERSION,
             session: session_hex(self.session_id),
             kind: packed.kind,
-            created: (js_sys::Date::now() / 1000.0) as i64,
+            created: match repeatable {
+                true => newest.unwrap_or(0),
+                false => (js_sys::Date::now() / 1000.0) as i64,
+            },
             sender_name: self.sender_name.clone(),
             body: Body {
                 length: digest.length,
@@ -511,6 +521,10 @@ impl SendJob {
             },
             entries: packed.entries,
         };
+        if repeatable {
+            self.session_id = content_session_id(&manifest);
+            manifest.session = session_hex(self.session_id);
+        }
         let envelope = MetaEnvelope::from_manifest(&manifest).map_err(js_err)?;
         let message = signed_message(self.session_id, &envelope.manifest_z);
         self.sealed = Some((manifest, envelope));
@@ -975,6 +989,13 @@ impl Receive {
     }
 
     fn push_frame(&mut self, frame: Frame, out: &mut PushResult) {
+        let index = frame.header.seg_index;
+        let useful = self.rx.stats().1;
+        self.push_events(frame, out);
+        out.kept = (self.rx.stats().1 > useful && !self.rx.is_done(index)).then_some(index);
+    }
+
+    fn push_events(&mut self, frame: Frame, out: &mut PushResult) {
         for ev in self.rx.push(frame) {
             match ev {
                 Event::Locked(p) => out.locked = Some(session_hex(p.session_id)),
@@ -1163,6 +1184,9 @@ struct PushResult {
     rejected: Vec<u32>,
     /// Records in the message (`pushPacked`).
     records: u32,
+    /// The segment this code brought something new for, if that segment is
+    /// still incomplete (`push` only): worth keeping for a later continuation.
+    kept: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -1367,6 +1391,12 @@ impl Receive {
                 JsValue::from(o)
             })
             .collect()
+    }
+
+    /// Frames of this transfer that brought something new, so far.
+    #[wasm_bindgen(getter)]
+    pub fn useful(&self) -> f64 {
+        self.rx.stats().1 as f64
     }
 
     #[wasm_bindgen(js_name = hasManifest)]
