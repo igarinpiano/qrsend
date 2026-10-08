@@ -19,7 +19,13 @@ pub enum Input {
     Images(Vec<PathBuf>),
     Video(PathBuf),
     /// A live camera, captured through ffmpeg (device name/index as ffmpeg expects it).
-    Camera(String),
+    Camera {
+        device: String,
+        /// Picture size and pictures per second to ask the camera for
+        /// (otherwise whatever it gives by default, which is often small).
+        size: Option<(usize, usize)>,
+        fps: Option<f64>,
+    },
 }
 
 /// The platform's default camera for `--camera` without a value.
@@ -34,26 +40,34 @@ pub fn default_camera() -> &'static str {
 }
 
 /// ffmpeg input arguments for a camera on this platform.
-fn camera_input(device: &str) -> Result<Vec<String>> {
-    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-    Ok(if cfg!(target_os = "macos") {
-        let mut v = s(&["-f", "avfoundation", "-framerate", "30", "-i"]);
-        v.push(format!("{device}:none"));
-        v
+fn camera_input(
+    device: &str,
+    size: Option<(usize, usize)>,
+    fps: Option<f64>,
+) -> Result<Vec<String>> {
+    let (format, source) = if cfg!(target_os = "macos") {
+        ("avfoundation", format!("{device}:none"))
     } else if cfg!(windows) {
         if device.is_empty() {
             bail!(
                 "name the camera: --camera \"<device name>\" (list them with `ffmpeg -list_devices true -f dshow -i dummy`)"
             );
         }
-        let mut v = s(&["-f", "dshow", "-i"]);
-        v.push(format!("video={device}"));
-        v
+        ("dshow", format!("video={device}"))
     } else {
-        let mut v = s(&["-f", "v4l2", "-i"]);
-        v.push(device.to_string());
-        v
-    })
+        ("v4l2", device.to_string())
+    };
+    let mut v = vec!["-f".to_string(), format.to_string()];
+    // (macOS refuses to open a camera without a frame rate it supports.)
+    let fps = fps.or(cfg!(target_os = "macos").then_some(30.0));
+    if let Some(fps) = fps {
+        v.extend(["-framerate".to_string(), format!("{fps}")]);
+    }
+    if let Some((w, h)) = size {
+        v.extend(["-video_size".to_string(), format!("{w}x{h}")]);
+    }
+    v.extend(["-i".to_string(), source]);
+    Ok(v)
 }
 
 fn is_image(p: &Path) -> bool {
@@ -130,9 +144,11 @@ impl Input {
                     result
                 }
             }
-            Input::Camera(device) => {
-                let mut child =
-                    spawn_ffmpeg(camera_input(&device)?, &format!("camera {device:?}"))?;
+            Input::Camera { device, size, fps } => {
+                let mut child = spawn_ffmpeg(
+                    camera_input(&device, size, fps)?,
+                    &format!("camera {device:?}"),
+                )?;
                 let stdout = child.stdout.take().unwrap();
                 let result = read_y4m(BufReader::with_capacity(1 << 20, stdout), &tx, false);
                 let _ = child.kill();
@@ -214,5 +230,32 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>, dedupe: bool) -> Resul
         {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_arguments() {
+        if cfg!(windows) {
+            assert!(camera_input("", None, None).is_err());
+        }
+        let args = camera_input("cam", Some((1280, 720)), Some(15.0)).unwrap();
+        let at = |flag: &str| args.iter().position(|a| a == flag);
+        // What is asked of the camera comes before the camera itself.
+        let input = at("-i").unwrap();
+        assert_eq!(args[at("-video_size").unwrap() + 1], "1280x720");
+        assert_eq!(args[at("-framerate").unwrap() + 1], "15");
+        assert!(at("-video_size").unwrap() < input && at("-framerate").unwrap() < input);
+        assert!(args[input + 1].contains("cam"));
+        // Nothing is asked for unless given (but macOS needs a frame rate).
+        let plain = camera_input("cam", None, None).unwrap();
+        assert!(!plain.contains(&"-video_size".to_string()));
+        assert_eq!(
+            plain.contains(&"-framerate".to_string()),
+            cfg!(target_os = "macos")
+        );
     }
 }

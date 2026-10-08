@@ -782,6 +782,8 @@ export async function isKnownOfferFor(m: LinkMessage, fingerprint: Uint8Array): 
   return tag.every((b, i) => b === m.payload[i]);
 }
 export const KNOWN_OFFER = KIND_KNOWN_OFFER;
+/** A command-line sender's offer (a TCP address to connect to): nothing a browser can take. */
+export const isTcpOffer = (m: LinkMessage) => m.kind === 3;
 
 /** The line in which a receiver says who it is: its device ID, its certificate, and its signature over both. */
 export const introductionLine = (id: string, certificate: string, signature: string) =>

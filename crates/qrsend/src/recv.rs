@@ -20,6 +20,7 @@ use qrsend_core::resume::ResumeCode;
 
 use crate::extract::{self, Conflict, ExtractOptions, Outcome};
 use crate::input::{Input, LumaFrame, image_paths};
+use crate::send::parse_size;
 use crate::store::Store;
 use crate::{decode, identity, net, util};
 
@@ -33,6 +34,14 @@ pub struct RecvArgs {
     /// Linux, the device name on Windows
     #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["images", "video"])]
     pub camera: Option<String>,
+    /// Picture size to ask the camera for, e.g. 1280x720. Without it the
+    /// camera's default is used, which is often small (640x480 on Linux):
+    /// dense codes need more
+    #[arg(long, value_name = "WxH", requires = "camera", value_parser = parse_size)]
+    pub camera_size: Option<(usize, usize)>,
+    /// Pictures per second to ask the camera for
+    #[arg(long, value_name = "N", requires = "camera")]
+    pub camera_fps: Option<f64>,
     /// Read frames from a video (.y4m natively; other formats through ffmpeg)
     #[arg(long, value_name = "FILE")]
     pub video: Option<PathBuf>,
@@ -328,7 +337,11 @@ pub fn run(args: RecvArgs) -> Result<()> {
         eprintln!(
             "Scanning camera {dev:?} — point it at the sender's screen (Ctrl-C to stop; progress is saved)."
         );
-        Some(Input::Camera(dev))
+        Some(Input::Camera {
+            device: dev,
+            size: args.camera_size,
+            fps: args.camera_fps,
+        })
     } else if let Some(v) = &args.video {
         Some(Input::Video(v.clone()))
     } else if !args.images.is_empty() {
@@ -363,13 +376,17 @@ pub fn run(args: RecvArgs) -> Result<()> {
         (None, None) => unreachable!("an input was chosen above"),
     };
     let lattice = Arc::new(std::sync::Mutex::new(decode::Lattice::default()));
+    // The size of the pictures being read, once the first one is in.
+    let picture = Arc::new(std::sync::OnceLock::<(usize, usize)>::new());
     for _ in 0..threads {
         let (frx, ttx, stop, lattice) = (frx.clone(), ttx.clone(), stop.clone(), lattice.clone());
+        let picture = picture.clone();
         thread::spawn(move || {
             while let Ok(f) = frx.recv() {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
+                let _ = picture.set((f.width, f.height));
                 let texts = decode::detect_cached(&f, &lattice);
                 if ttx.send(texts).is_err() {
                     break;
@@ -405,6 +422,8 @@ pub fn run(args: RecvArgs) -> Result<()> {
     // Not forever, though: the two may simply not be on one network.
     const TRIES: u32 = 3;
     let mut tries = 0;
+    let mut said_size = args.camera.is_none();
+    let mut said_foreign_offer = false;
     let mut link_taken = 0u64;
     let mut link_reported = 0u64;
     let mut last_report = Instant::now();
@@ -566,10 +585,39 @@ pub fn run(args: RecvArgs) -> Result<()> {
             }
             pb.set_message(line);
         }
+        if !said_size && let Some(&(w, h)) = picture.get() {
+            said_size = true;
+            let small = w * h < 1280 * 720 && args.camera_size.is_none();
+            say(
+                &pb,
+                format!(
+                    "The camera gives {w}×{h} pictures.{}",
+                    if small {
+                        " Dense codes need more: try --camera-size 1280x720."
+                    } else {
+                        ""
+                    }
+                ),
+            );
+        }
         for text in offered {
             let Some(message) = offers.add(&text) else {
                 continue;
             };
+            // A browser offers a connection of its own kind (WebRTC), which
+            // this program does not speak: say so once instead of leaving
+            // the person to wonder why the network is not used.
+            if message.kind != link::KIND_TCP_OFFER && message.kind != link::KIND_ANSWER {
+                if !said_foreign_offer {
+                    said_foreign_offer = true;
+                    say(
+                        &pb,
+                        "The sender (a browser) offers a network connection, but only to another browser. \
+                         Reading the codes only.",
+                    );
+                }
+                continue;
+            }
             let ours = rx
                 .params()
                 .is_some_and(|p| p.session_id == message.session_id);

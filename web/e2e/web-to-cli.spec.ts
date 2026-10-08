@@ -88,3 +88,32 @@ test("web → CLI: encrypted for a paired device and signed by the browser's key
   expect(other.status).not.toBe(0);
   expect(other.stderr).toContain("encrypted for another device");
 });
+
+// A browser offers its network connection to other browsers only (WebRTC);
+// the command-line receiver cannot take it. It says so, instead of leaving
+// the person to wonder why the network is not used, and reads the codes.
+test("web → CLI: a browser's offer to connect is declined in so many words", async ({ playwright, baseURL }) => {
+  const browser = await playwright.chromium.launch({
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+  });
+  try {
+    const page = await (await browser.newContext({ baseURL, permissions: ["camera"] })).newPage();
+    await page.goto("./#/preview");
+    await page.getByRole("checkbox", { name: /Local network boost/ }).check();
+    await page.goto("./#/send");
+    await page.getByRole("tab", { name: "Text" }).click();
+    await page.getByPlaceholder("Paste or type anything…").fill("Over the codes, then");
+    await page.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    await page.getByRole("button", { name: "Start sending" }).click();
+    await expect(page.getByRole("button", { name: /offering LAN/ })).toBeVisible();
+    for (let i = 0; i < 4; i++) await page.getByRole("button", { name: "Slower" }).click();
+    const dir = path.join(WORK, "web-offer");
+    fs.rmSync(dir, { recursive: true, force: true });
+    expect(await captureFrames(page, dir, 30)).toBeGreaterThan(12);
+    const received = cliBoth(["recv", "--images", dir], "cli");
+    expect(received.stdout).toContain("Over the codes, then");
+    expect(received.stderr).toContain("offers a network connection, but only to another browser");
+  } finally {
+    await browser.close();
+  }
+});

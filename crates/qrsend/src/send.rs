@@ -160,7 +160,7 @@ fn parse_density(s: &str) -> Result<DensityArg, String> {
         .map_err(|_| format!("unknown density {s:?} (use auto, low, normal, high or max)"))
 }
 
-fn parse_size(s: &str) -> Result<(usize, usize), String> {
+pub(crate) fn parse_size(s: &str) -> Result<(usize, usize), String> {
     let bad = || format!("invalid size {s:?} (use WIDTHxHEIGHT, e.g. 1920x1080)");
     let (w, h) = s.split_once(['x', 'X', '×']).ok_or_else(bad)?;
     let (w, h): (usize, usize) = (w.parse().map_err(|_| bad())?, h.parse().map_err(|_| bad())?);

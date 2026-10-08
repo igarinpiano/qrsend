@@ -16,6 +16,7 @@
     introductionMessage,
     isKnownOfferFor,
     isOffer,
+    isTcpOffer,
     type LinkMessage,
   } from "../lib/lan";
   import { lastingCertificate } from "../lib/linkid";
@@ -282,6 +283,8 @@
   // it: taken up without showing anything. (The usual offer is answered as
   // well; whichever connects first is used.)
   let knownTried: number | undefined;
+  /** A command-line sender offered its kind of connection, which a browser cannot take. */
+  let tcpOffered = $state(false);
   async function knownOffer(msg: LinkMessage) {
     overIfOfferedAnew(msg.id);
     if (linkDeclined || linked || knownTried === msg.id) return;
@@ -341,6 +344,11 @@
   function onLinkCode(code: string) {
     const msg = assembler.add(code);
     if (!msg || !canConnect || msg.session !== info?.session) return;
+    if (isTcpOffer(msg)) {
+      if (!tcpOffered) log("rx", "the sender offers a connection only the command line can take");
+      tcpOffered = true;
+      return;
+    }
     if (!isOffer(msg)) {
       void knownOffer(msg);
       return;
@@ -589,6 +597,11 @@
   </p>
 {:else if linkError}
   <p class="small muted">No direct connection ({linkError}); the camera carries on.</p>
+{:else if tcpOffered && !result}
+  <p class="small muted" data-testid="tcp-offer">
+    The sender (a command-line program) offers a network connection, but only to another command-line receiver
+    (<code>qrsend recv</code>). The camera carries on.
+  </p>
 {/if}
 
 {#if st?.foreign && !result && !error}

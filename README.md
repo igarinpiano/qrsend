@@ -76,9 +76,17 @@ Receive with a webcam, from a recording of the sender's screen, or from image fi
 
 ```bash
 qrsend recv --camera -o ~/Downloads                # live, through ffmpeg
+qrsend recv --camera --camera-size 1280x720        # ask the camera for larger pictures
 qrsend recv --video recording.mp4 -o ~/Downloads   # needs ffmpeg for non-.y4m videos
 qrsend recv --images frames/
 ```
+
+A webcam often hands out small pictures unless asked (640×480 is a common
+default on Linux), which is too little for dense codes: `recv` prints the size
+it gets, and `--camera-size` / `--camera-fps` ask for more. The command-line
+receiver reads black-and-white codes only (not the web app's *Color codes*),
+and a network connection is made between two command-line programs or between
+two browsers, not yet between one of each.
 
 If something is still missing, `recv` prints a resume code. Run on the sender:
 
