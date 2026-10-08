@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ADVICE } from "../lib/guide";
+  import { log, logEvery } from "../lib/log";
   import { featureOn } from "../lib/prefs";
   import { Scanner, type ScanStats } from "../lib/scanner";
 
@@ -34,8 +35,10 @@
       await scanner!.start(cameraId || undefined);
       started = true;
       cameras = await Scanner.cameras();
+      log("camera", "started", { cameras: cameras.length, chosen: cameraId ? "picked" : "default" });
     } catch (e) {
       started = false;
+      log("camera", "failed", { error: e instanceof Error ? `${e.name}: ${e.message}`.slice(0, 160) : String(e) });
       error =
         e instanceof DOMException && e.name === "NotAllowedError"
           ? "Camera access was denied. Allow it in the browser settings and try again."
@@ -100,6 +103,19 @@
       (t) => ontexts(t),
       (s) => {
         stats = s;
+        logEvery("camera", 2000, "camera", "reading", () => ({
+          source: onScreen ? "screen" : fileProgress ? "file" : "camera",
+          picture: `${s.width}×${s.height}`,
+          decoder: s.engine,
+          pictures: s.frames,
+          readsPerS: s.rate,
+          msWithCodes: s.msWithCodes,
+          msWithout: s.msWithout,
+          codes: s.codes,
+          color: !!s.colored,
+          dotPx: s.dot,
+          advice: s.advice,
+        }));
         // Only a camera's numbers say something about the camera.
         if (!onScreen && !fileProgress) oncamera?.(s.rate, s.dot);
       },

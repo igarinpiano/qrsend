@@ -5,6 +5,7 @@
   import DevicesView from "./views/DevicesView.svelte";
   import InboxView from "./views/InboxView.svelte";
   import PreviewView from "./views/PreviewView.svelte";
+  import { log, logLines, logText } from "./lib/log";
   import { reloadForUpdate } from "./lib/update";
 
   function parse() {
@@ -13,6 +14,24 @@
   }
 
   let route = $state(parse());
+  $effect(() => log("app", "page", { path: route.path }));
+
+  // The diagnostic log, for pasting into a bug report. Where the clipboard
+  // is out of reach, it is shown instead, to be selected by hand.
+  let logCopied = $state("");
+  let logShown = $state("");
+  async function copyLog() {
+    const text = logText();
+    try {
+      await navigator.clipboard.writeText(text);
+      logCopied = `Copied (${logLines()} lines)`;
+      logShown = "";
+    } catch {
+      logCopied = "Select and copy it below";
+      logShown = text;
+    }
+    setTimeout(() => (logCopied = ""), 4000);
+  }
 
   $effect(() => {
     const onHash = () => (route = parse());
@@ -87,8 +106,14 @@
 <footer class="small muted">
   <p>
     <a href="https://github.com/igarinpiano/qrsend">QRSend</a> is open source (Apache-2.0). Nothing you send or receive
-    leaves your devices. <a href="#/preview">Feature preview</a>
+    leaves your devices. <a href="#/preview">Feature preview</a> ·
+    <button class="link" onclick={copyLog} data-testid="copy-log" title="What happened when, without file names, contents, IDs or addresses: for a bug report">
+      {logCopied || "Copy log"}
+    </button>
   </p>
+  {#if logShown}
+    <textarea class="log" readonly rows="8" data-testid="log-text" onfocus={(e) => e.currentTarget.select()}>{logShown}</textarea>
+  {/if}
   <p>QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.</p>
 </footer>
 
@@ -151,6 +176,11 @@
   }
   footer p {
     margin: 0 0 4px;
+  }
+  .log {
+    width: 100%;
+    font-family: ui-monospace, monospace;
+    font-size: 0.75rem;
   }
   nav a.active {
     color: var(--text);

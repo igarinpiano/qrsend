@@ -177,3 +177,40 @@ test("web: receives from a video file", async ({ playwright, baseURL }) => {
     await expect(page.getByTestId("received-text")).toHaveText(FAKE_TEXT, { timeout: 90_000 });
   });
 });
+
+test("the diagnostic log tells how a transfer went, not what was in it", async ({ playwright, baseURL }) => {
+  const browser = await playwright.chromium.launch({
+    args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", `--use-file-for-fake-video-capture=${filesVideo}`],
+  });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera", "clipboard-read", "clipboard-write"] });
+    const page = await context.newPage();
+    await page.goto("./#/receive");
+    await expect(page.getByTestId("received-file")).toHaveText(["notes/a.txt", "notes/b.md"], { timeout: 60_000 });
+    await page.getByTestId("copy-log").click();
+    await expect(page.getByTestId("copy-log")).toContainText("Copied");
+    const text = await page.evaluate(() => navigator.clipboard.readText());
+    // Which build, which browser, and the steps with their timings.
+    expect(text).toMatch(/^QRSend \d+\.\d+\.\d+ \(built /);
+    expect(text).toContain("browser: ");
+    expect(text).toMatch(/camera +started/);
+    expect(text).toMatch(/camera +reading +source=camera picture=\d+×\d+ decoder=\w+/);
+    expect(text).toMatch(/rx +transfer found +segments=\d+/);
+    expect(text).toMatch(/rx +file list +bytes=\d+/);
+    expect(text).toMatch(/rx +unpacked +ms=\d+ kind=files/);
+    expect(text).toMatch(/rx +done/);
+    // Nothing of what was transferred.
+    expect(text).not.toContain("a.txt");
+    expect(text).not.toContain("notes");
+    expect(text).not.toContain("qrsend-id");
+    // A reload does not lose it: the session before is still there.
+    await page.reload();
+    await page.getByTestId("copy-log").click();
+    await expect(page.getByTestId("copy-log")).toContainText("Copied");
+    const again = await page.evaluate(() => navigator.clipboard.readText());
+    expect(again).toContain("the session before this one");
+    expect(again).toMatch(/rx +done/);
+  } finally {
+    await browser.close();
+  }
+});

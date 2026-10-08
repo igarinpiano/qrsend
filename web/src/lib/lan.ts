@@ -8,6 +8,23 @@
 // in the other direction. It is one more way for the data to travel, nothing
 // else: if it never comes up or breaks, the screen and the camera carry on.
 import { linkParse, linkSplit } from "./core";
+import { log } from "./log";
+
+/** What kinds of addresses a description holds (the addresses themselves are nobody's business). */
+function kinds(candidates: { address: string }[]): string {
+  const kind = (a: string) => (a.endsWith(".local") ? "name" : a.includes(":") ? "v6" : "v4");
+  return candidates.map((c) => kind(c.address)).join(",") || "none";
+}
+
+/** Logs how a connection in the making gets on. */
+function watch(pc: RTCPeerConnection, who: string): void {
+  const since = performance.now();
+  const say = (what: string, state: string) => log("link", `${who}: ${what} ${state}`, { s: (performance.now() - since) / 1000 });
+  pc.addEventListener("icegatheringstatechange", () => say("looking for addresses:", pc.iceGatheringState));
+  pc.addEventListener("iceconnectionstatechange", () => say("path:", pc.iceConnectionState));
+  pc.addEventListener("connectionstatechange", () => say("connection:", pc.connectionState));
+  pc.addEventListener("icecandidateerror", (e) => say("address error:", String((e as RTCPeerConnectionIceErrorEvent).errorCode)));
+}
 
 export const LINK_PREFIX = "QSL1-";
 const KIND_OFFER = 1;
@@ -186,6 +203,7 @@ async function described(pc: RTCPeerConnection, flags = 0): Promise<Uint8Array> 
   }
   const d = parseSdp(pc.localDescription?.sdp ?? "");
   if (!d.ufrag || d.fingerprint.length !== 32) throw new Error("this browser gave no usable connection details");
+  log("link", "own description ready", { addresses: kinds(d.candidates), lookedFor: pc.iceGatheringState });
   if (d.candidates.length === 0) throw new Error("no local network address");
   return pack({ ...d, flags });
 }
@@ -347,8 +365,9 @@ export class LanSender {
     if (this.stopped) return;
     this.id = (this.id + 1) % 256;
     const id = this.id;
-    const attempt = (peer: () => Uint8Array | undefined) => {
+    const attempt = (peer: () => Uint8Array | undefined, who: string) => {
       const pc = new RTCPeerConnection({ iceServers: [] });
+      watch(pc, who);
       const channel = pc.createDataChannel("qrsend");
       channel.bufferedAmountLowThreshold = BUFFER_HIGH / 4;
       channel.onopen = () => {
@@ -365,6 +384,7 @@ export class LanSender {
           }
         }
         this.peer = peer();
+        log("link", `${who}: channel open`);
         this.hooks.offer(null, id);
         this.hooks.offerKnown?.(null, id);
         this.hooks.state("connected");
@@ -395,7 +415,7 @@ export class LanSender {
       return { pc, channel };
     };
 
-    const { pc, channel } = attempt(() => this.answered);
+    const { pc, channel } = attempt(() => this.answered, "offer");
     this.pc = pc;
     this.channel = channel;
     await pc.setLocalDescription(await pc.createOffer());
@@ -407,7 +427,7 @@ export class LanSender {
     const known = this.options.known;
     if (!known) return;
     try {
-      const second = attempt(() => known);
+      const second = attempt(() => known, "offer to known device");
       this.knownPc = second.pc;
       this.knownChannel = second.channel;
       await second.pc.setLocalDescription(await second.pc.createOffer());
@@ -435,6 +455,7 @@ export class LanSender {
     if (!msg || !pc || msg.kind !== KIND_ANSWER || msg.session !== this.session || msg.id !== this.id) return;
     if (pc.signalingState !== "have-local-offer") return;
     const description = unpack(msg.payload);
+    log("link", "answer read", { addresses: kinds(description.candidates) });
     this.answered = description.fingerprint;
     await pc.setRemoteDescription({ type: "answer", sdp: buildSdp(description, "answer") });
   }
@@ -598,6 +619,7 @@ export class LanSender {
   /** The connection is of no use any more: drop it and say so. */
   private giveUp(channel: RTCDataChannel): void {
     if (this.channel !== channel) return;
+    log("link", "connection given up", { sent: this.sent, confirmed: this.acked });
     this.close();
     this.hooks.state("closed");
   }
@@ -651,6 +673,7 @@ export class LanReceiver {
     this.stop();
     this.lasting = !!certificate;
     const pc = new RTCPeerConnection({ iceServers: [], certificates: certificate ? [certificate] : undefined });
+    watch(pc, "answer");
     this.pc = pc;
     this.listen(pc);
     return pc;
@@ -663,6 +686,7 @@ export class LanReceiver {
   async accept(offer: LinkMessage, lasting?: () => Promise<RTCCertificate | undefined>): Promise<string> {
     const description = unpack(offer.payload);
     const certificate = (description.flags ?? 0) & FLAG_REMEMBERS ? await lasting?.() : undefined;
+    log("link", "offer taken up", { id: offer.id, addresses: kinds(description.candidates), senderRemembers: !!description.flags });
     const pc = this.open(certificate);
     await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(description, "offer") });
     await pc.setLocalDescription(await pc.createAnswer());
@@ -691,6 +715,7 @@ export class LanReceiver {
       this.channel = channel;
       channel.binaryType = "arraybuffer";
       const opened = () => {
+        log("link", "answer: channel open");
         this.hooks.state("connected");
         channel.send(HELLO_BINARY);
       };

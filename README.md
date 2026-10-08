@@ -153,6 +153,9 @@ loaded (PWA).
 - The device's private keys are WebCrypto keys that cannot be exported — not
   even by the page itself.
 - Up to 8×8 codes at once, or as many as fit the screen.
+- “Copy log” at the bottom of every page copies a diagnostic log for bug
+  reports: what happened when (steps, timings, counts, connection states) —
+  never file names, contents, device IDs or network addresses.
 - **Feature preview** (footer link): new ways of sending that are still being
   worked on. Each is off until the sender turns it on; otherwise everything
   works as before.

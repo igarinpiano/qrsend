@@ -7,6 +7,7 @@
   import { parseDeviceId, ready, verifyDeviceSignature } from "../lib/core";
   import { rememberLink, trustedDevices } from "../lib/devices";
   import { LINK_PREFIX, LanSender, canConnect, fingerprintHex, introductionMessage, type LinkState } from "../lib/lan";
+  import { log, logEvery } from "../lib/log";
   import { featureOn } from "../lib/prefs";
   import { Scanner, type ScanStats } from "../lib/scanner";
   import { Ear, canListen } from "../lib/sound";
@@ -82,6 +83,7 @@
       if (!verifyDeviceSignature(said.id, introductionMessage(used), signature)) return;
       const device = parseDeviceId(said.id) as { fingerprint: string };
       remembered = (await rememberLink(device.fingerprint, used)) ?? "";
+      log("tx", remembered ? "receiver is a trusted device: remembered" : "receiver introduced itself but is not trusted");
     } catch (e) {
       console.warn("introduction:", e);
     }
@@ -120,12 +122,16 @@
   // Measurements (a preview feature): what this side spends its time on.
   const showStats = featureOn("stats");
   let eyeStats = $state<ScanStats | undefined>();
+  /** The same, kept for the diagnostic log whether shown or not. */
+  let eyeLatest: ScanStats | undefined;
   // When each step toward a network connection happened (seconds since sending began).
   type LinkStep = "offered" | "answer" | "connected";
   const began = performance.now();
   let linkSteps = $state<Partial<Record<LinkStep, number>>>({});
   function markLink(step: LinkStep) {
-    if (showStats && linkSteps[step] === undefined) linkSteps[step] = (performance.now() - began) / 1000;
+    if (linkSteps[step] !== undefined) return;
+    linkSteps[step] = (performance.now() - began) / 1000;
+    log("tx", `connection: ${step}`, { sinceStart: linkSteps[step] });
   }
   const afterLink = (at: number | undefined) => (at === undefined ? "not yet" : `after ${at.toFixed(1)} s`);
   let linkStats = $state<LanSender["measurements"] | undefined>();
@@ -197,10 +203,13 @@
       .sendFeedback(text, linkTaken)
       .then((r) => {
         if (!r) return;
+        if (!report) log("tx", "first feedback", { by: linkTaken !== undefined ? "connection" : "camera or sound" });
+        if (r.complete && !report?.complete) log("tx", "receiver has everything", { sinceStart: (performance.now() - began) / 1000 });
         report = r;
         if (r.fps != null && r.level != null) {
           fps = Math.round(r.fps * 10) / 10;
           level = Math.min(r.level, layouts.length - 1);
+          log("tx", "automatic speed", { fps, layout: layouts[level]?.join("×"), readShare: r.readShare ?? undefined });
         }
         readShare = r.readShare ?? undefined;
         heardAt = performance.now();
@@ -227,7 +236,10 @@
       problems.push(e instanceof DOMException && e.name === "NotAllowedError" ? `${what} access denied` : `no ${what}`);
     if (cameraFeature) {
       try {
-        scanner ??= new Scanner(eye, onTexts, showStats ? (s) => (eyeStats = s) : undefined);
+        scanner ??= new Scanner(eye, onTexts, (s) => {
+          eyeLatest = s;
+          if (showStats) eyeStats = s;
+        });
         await scanner.start(undefined, "user");
         watching = true;
       } catch (e) {
@@ -247,6 +259,7 @@
     }
     listenError = problems.join(", ");
     if (!watching && !hearing) twoWay = false;
+    log("tx", "listening for feedback", { camera: watching, microphone: hearing, problems: listenError || undefined });
     engine.sendAskForFeedback(twoWay || linkUp, hearing).catch(() => {});
   }
 
@@ -261,18 +274,42 @@
 
   function forget() {
     if (!report || finished) return;
+    log("tx", "receiver not heard for long: sending everything again");
     report = undefined;
     quiet = false;
     engine.sendReceiverSilent(true).catch(() => {});
   }
 
   function watch() {
-    if (showStats) linkStats = linkUp ? lan?.measurements : undefined;
+    const measured = linkUp ? lan?.measurements : undefined;
+    if (showStats) linkStats = measured;
+    logEvery("tx", 2000, "tx", "progress", () => ({
+      codes: frames,
+      pass: pass + 1,
+      fps,
+      layout: `${cols}×${rows}${layers === 3 ? "×3" : ""}`,
+      paused,
+      receiverBytes: report ? report.totalBytes - report.remainingBytes : undefined,
+      of: report?.totalBytes,
+      arrivingPerS: report ? Math.round(arriving) : undefined,
+      feedbackAgoS: report ? (performance.now() - heardAt) / 1000 : undefined,
+      link,
+      pace: measured ? measured.rate * 4096 : undefined,
+      sent: measured?.sent,
+      onTheirWay: measured?.onTheirWay,
+      waitReceiver: measured?.waitingForReceiver,
+      waitNetwork: measured?.waitingForNetwork,
+      holdingBack: measured?.holdingBack,
+      preparing: measured?.preparing,
+      idle: measured?.nothingToSend,
+      cameraReadsPerS: eyeLatest?.rate,
+    }));
     if (!report || finished) return;
     silentFor = performance.now() - heardAt;
     if (silentFor > FEEDBACK_LOST_MS) forget();
     else if (silentFor > FEEDBACK_QUIET_MS && !quiet) {
       quiet = true;
+      log("tx", "receiver not heard for a moment: no longer waiting for it");
       engine.sendReceiverSilent(false).catch(() => {});
     }
   }
@@ -330,6 +367,21 @@
       if (!ready && !paused && !finished) fetchNext();
       raf = requestAnimationFrame(tick);
     };
+    log("tx", "player", {
+      qrDots: info.modules,
+      bytesPerCode: info.symbolSize,
+      wireBytes: info.wireBytes,
+      codesPerPass: info.framesPerPass,
+      fps,
+      grid: grid || "fill",
+      layers,
+      encrypted: info.encrypted,
+      canvas: `${Math.round(canvas.clientWidth * (window.devicePixelRatio || 1))}×${Math.round(canvas.clientHeight * (window.devicePixelRatio || 1))}`,
+      twoWay: twoWayFeature,
+      lan: lanFeature,
+      remember: rememberFeature,
+      auto: autoFeature,
+    });
     fetchNext();
     raf = requestAnimationFrame(tick);
     if (twoWayFeature) listen(true);
@@ -372,6 +424,7 @@
     tune();
   }
   function stop() {
+    log("tx", "player closed", { finished, codes: frames });
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     onclose();
   }

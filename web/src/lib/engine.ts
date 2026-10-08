@@ -2,6 +2,7 @@
 // state, storage and extraction all run there, off the UI thread).
 import EngineWorker from "./engine.worker?worker";
 import type { EngineApi, EngineEvent } from "./engine-types";
+import { log } from "./log";
 import { RELOAD_HINT, recoverFromLoadFailure } from "./update";
 
 /** Errors that mean a file of the app could not be fetched (rather than something about the transfer). */
@@ -24,6 +25,10 @@ function start(): Worker {
   const w = new EngineWorker();
   w.onmessage = (e: MessageEvent) => {
     const msg = e.data;
+    if (msg.event === "log") {
+      log(msg.area, msg.what, msg.data);
+      return;
+    }
     if (msg.event) {
       listeners.forEach((l) => l(msg as EngineEvent));
       return;
@@ -32,6 +37,7 @@ function start(): Worker {
     if (!p) return;
     pending.delete(msg.id);
     if (msg.error !== undefined) {
+      log("engine", "failed", { message: String(msg.error).slice(0, 200) });
       const err = new Error(msg.error);
       if (LOAD_FAILURE.test(msg.error)) loadFailure(err).then(p.reject);
       else p.reject(err);
@@ -41,6 +47,7 @@ function start(): Worker {
     // Most often the worker's own script could not be fetched. Start a new
     // worker on the next call instead of talking to a dead one.
     if (worker === w) worker = undefined;
+    log("engine", "worker error", { message: (e.message || "").slice(0, 200) });
     const waiting = [...pending.values()];
     pending.clear();
     loadFailure(new Error(e.message || "the background engine could not be started")).then((err) =>

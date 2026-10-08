@@ -19,6 +19,7 @@
     type LinkMessage,
   } from "../lib/lan";
   import { lastingCertificate } from "../lib/linkid";
+  import { log, logEvery } from "../lib/log";
   import { featureOn } from "../lib/prefs";
   import { recoverFromLoadFailure } from "../lib/update";
   import { toDataUrl } from "../lib/qrdraw";
@@ -50,7 +51,9 @@
   let steps = $state<Partial<Record<Step, number>>>({});
   let seen = $state({ codes: 0, notices: 0, offers: 0 });
   function mark(step: Step) {
-    if (showStats && steps[step] === undefined) steps[step] = performance.now();
+    if (steps[step] !== undefined) return;
+    steps[step] = performance.now();
+    log("rx", `step: ${step}`, { sinceFirstCode: step === "first" ? undefined : (steps[step]! - (steps.first ?? steps[step]!)) / 1000 });
   }
   const after = (at: number | undefined) =>
     at === undefined || steps.first === undefined ? "not yet" : `after ${((at - steps.first) / 1000).toFixed(1)} s`;
@@ -115,6 +118,7 @@
   let completeSaid = 0;
 
   function allowSound() {
+    log("rx", "sound allowed");
     soundChoice = "yes";
     // Started by this tap, so the browser lets the page play from now on.
     sound(true);
@@ -201,6 +205,7 @@
   let introducedSelf = false;
   async function introduce(to: LanReceiver) {
     introducedSelf = true;
+    log("rx", "introducing this device to a trusted sender");
     try {
       const me = await loadIdentity();
       const mine = await lastingCertificate(false);
@@ -223,6 +228,7 @@
       const mine = await lastingCertificate(false);
       if (!mine || !(await isKnownOfferFor(msg, mine.fingerprint)) || knownTried === msg.id) return;
       knownTried = msg.id;
+      log("rx", "offer to this device", { id: msg.id });
       silent ??= receiver();
       await silent.acceptKnown(msg, mine.certificate);
     } catch (e) {
@@ -252,6 +258,7 @@
         if (state === "connected") {
           mark("connected");
           linked = made;
+          log("rx", "connected", { by: made === silent ? "offer to this device" : "answer code", lasting: made.lasting });
           for (const other of [lan, silent]) if (other !== made) other?.stop();
           introducedSelf = false;
           // Counts start over with every connection (the sender's do), and
@@ -282,6 +289,7 @@
   }
 
   function disconnect() {
+    log("rx", "disconnected by hand");
     linkDeclined = true;
     answerUrl = "";
     linkState = "none";
@@ -306,6 +314,7 @@
     } catch (e) {
       linkState = "closed";
       linkError = e instanceof Error ? e.message : String(e);
+      log("rx", "answering failed", { error: linkError.slice(0, 200) });
     }
   }
 
@@ -315,8 +324,26 @@
       lingerTimer = setTimeout(() => (lingering = false), LINGER_MS);
     }
     if (next.result && next.feedback) lingering = false;
+    if (next.error && next.error !== st?.error) log("rx", "error", { message: next.error.slice(0, 200) });
+    if (next.feedback && !st?.feedback) log("rx", "sender asked for feedback", { bySound: next.feedbackBySound });
+    if (next.result && !st?.result) log("rx", "done", { kind: next.result.kind });
     st = next;
     if (next.info?.summary) mark("list");
+    logEvery("rx", 2000, "rx", "progress", () => ({
+      bytes: next.info?.total_bytes != null ? next.info.total_bytes - (next.info.remaining_bytes ?? 0) : undefined,
+      of: next.info?.total_bytes,
+      codes: next.info?.total_codes != null ? next.info.total_codes - (next.info.remaining_codes ?? 0) : undefined,
+      ofCodes: next.info?.total_codes,
+      fileList: next.info?.summary ? "here" : `${next.info?.list_have ?? 0}/${next.info?.list_need ?? "?"}`,
+      perS: Math.round(rate),
+      read: seen.codes,
+      notices: seen.notices,
+      offers: seen.offers,
+      link: linkState,
+      linkWaiting: linkCodes.length + linkPacked.length * 16,
+      msPerBatch: intake.msPerBatch,
+      linkPerS: Math.round(intake.linkRate),
+    }));
     showFeedback(next);
     if (next.feedbackBySound) sound(!!next.result && completeSaid === 0);
     // The sender should hear at once that everything has arrived.
@@ -330,7 +357,10 @@
     engine
       .recvStart(params.get("session") ?? undefined)
       .then(apply)
-      .catch((e) => (failure = e instanceof Error ? e.message : String(e)));
+      .catch((e) => {
+        failure = e instanceof Error ? e.message : String(e);
+        log("rx", "could not start", { error: failure.slice(0, 200) });
+      });
     return () => {
       clearTimeout(lingerTimer);
       clearInterval(replyTimer);
@@ -358,7 +388,7 @@
         const next = await engine.recvPush(batch, packed, camera);
         linkTaken += fromLink.length + (next.taken ?? 0);
         apply(next);
-        if (showStats) {
+        {
           const now = performance.now();
           const ease = (average: number, value: number) => (average === 0 ? value : average + (value - average) / 20);
           // Codes are Base45 text: three characters carry two bytes.
@@ -376,6 +406,7 @@
       }
     } catch (e) {
       failure = e instanceof Error ? e.message : String(e);
+      log("rx", "failed", { error: failure.slice(0, 200) });
     } finally {
       pushing = false;
     }
@@ -383,12 +414,10 @@
 
   function ontexts(texts: string[]) {
     if (!st || error) return;
-    if (showStats) {
-      mark("first");
-      seen.codes += texts.length;
-      seen.notices += texts.filter((t) => t.startsWith("QSC1-")).length;
-      seen.offers += texts.filter((t) => t.startsWith(LINK_PREFIX)).length;
-    }
+    mark("first");
+    seen.codes += texts.length;
+    seen.notices += texts.filter((t) => t.startsWith("QSC1-")).length;
+    seen.offers += texts.filter((t) => t.startsWith(LINK_PREFIX)).length;
     if (result) {
       // Everything is here, but a sender that asks for feedback only now
       // (a short transfer can be over before its first notice) must still be

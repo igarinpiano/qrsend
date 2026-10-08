@@ -201,4 +201,7 @@ export interface EngineApi {
   outBlob(session: string): Promise<Blob>;
 }
 
-export type EngineEvent = { event: "send-progress"; done: number; total: number };
+export type EngineEvent =
+  | { event: "send-progress"; done: number; total: number }
+  /** Something for the diagnostic log (see `log.ts`). */
+  | { event: "log"; area: string; what: string; data?: Record<string, string | number | boolean | null | undefined> };

@@ -36,6 +36,11 @@ function emit(event: EngineEvent): void {
   self.postMessage(event);
 }
 
+/** A line for the diagnostic log (no file names, no contents). */
+function logLine(area: string, what: string, data?: Record<string, string | number | boolean | null | undefined>): void {
+  emit({ event: "log", area, what, data });
+}
+
 function ranges(indices: number[]): string {
   const sorted = [...indices].sort((a, b) => a - b);
   const out: string[] = [];
@@ -83,6 +88,7 @@ async function sendStop(): Promise<void> {
 async function sendStart(req: SendRequest): Promise<SendStarted> {
   await ready();
   await sendStop();
+  const packingSince = performance.now();
   const store = await fileStore();
   await store.remove(SEND_DIR);
   const body = await store.open(SEND_BODY);
@@ -155,6 +161,18 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
     );
     sending = { session, id: info.session, body, offers: { usual: [], known: [] } };
     const params = session.params() as { version: number; ec: string; modules: number; symbolSize: number };
+    logLine("tx", "packed", {
+      ms: Math.round(performance.now() - packingSince),
+      wireBytes: info.bodyLen + info.metaLen,
+      fileListBytes: info.metaLen,
+      qr: `v${params.version}-${params.ec}`,
+      bytesPerCode: params.symbolSize,
+      codesPerPass: session.framesPerPass,
+      encrypted: info.encrypted,
+      signed: !!me,
+      recipients: req.recipients.length,
+      storage: store.persistent ? "opfs" : "memory",
+    });
     return {
       session: info.session,
       summary: info.summary,
@@ -206,6 +224,8 @@ interface RecvSession {
   done: Set<number>;
   unverified: number[];
   lastSave: number;
+  /** When the first code of the session was read (for the diagnostic log). */
+  lockedAt?: number;
   notice?: string;
   error?: string;
   result?: RecvResult;
@@ -406,7 +426,14 @@ async function resume(s: RecvSession, rec: SessionRecord): Promise<void> {
 
 async function finishIfComplete(s: RecvSession): Promise<void> {
   if (!s.result && !s.error && s.r.isComplete() && s.unverified.length === 0) {
+    const since = performance.now();
+    logLine("rx", "all here", { s: s.lockedAt ? (since - s.lockedAt) / 1000 : undefined });
     s.result = await extract(s);
+    logLine("rx", s.result ? "unpacked" : "unpacking failed", {
+      ms: Math.round(performance.now() - since),
+      kind: s.result?.kind,
+      error: s.error?.slice(0, 200),
+    });
   }
 }
 
@@ -486,6 +513,13 @@ async function recvPush(
       };
       s.body = await store.open(dir(p.session, "body"));
     }
+    s.lockedAt = performance.now();
+    logLine("rx", saved && s.record === saved ? "transfer seen before, continuing" : "transfer found", {
+      segments: p.segCount,
+      encrypted: !!(p.flags & FLAG_ENCRYPTED),
+      alreadyHere: s.done.size,
+      storage: store.persistent ? "opfs" : "memory",
+    });
   }
   const rec = s.record!;
   const segSize = 2 ** rec.segShift;
@@ -498,7 +532,13 @@ async function recvPush(
       meta.close();
       s.done.add(0);
       important = true;
-      if (!(await openMeta(s, data))) break;
+      const opened = await openMeta(s, data);
+      logLine("rx", opened ? "file list" : "file list unusable", {
+        bytes: data.length,
+        s: s.lockedAt ? (performance.now() - s.lockedAt) / 1000 : undefined,
+        error: opened ? undefined : s.error?.slice(0, 200),
+      });
+      if (!opened) break;
       verifyPending(s);
     } else {
       s.body!.write((index - 1) * segSize, data);

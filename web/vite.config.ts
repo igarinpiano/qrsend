@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { VitePWA } from "vite-plugin-pwa";
+import pkg from "./package.json" with { type: "json" };
 
 export default defineConfig({
   // Relative base: works on GitHub Pages project sites and from any folder.
@@ -36,6 +37,11 @@ export default defineConfig({
       },
     }),
   ],
+  // For the diagnostic log: which build a report comes from.
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString().slice(0, 16) + "Z"),
+  },
   worker: { format: "es" },
   build: { target: "es2022", assetsInlineLimit: 0 },
 });
