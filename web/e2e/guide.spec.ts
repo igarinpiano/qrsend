@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import crypto from "node:crypto";
-import { Guide, modulesFor, type Box, type Look } from "../src/lib/guide";
+import { ADVICE, Guide, modulesFor, type Box, type Look } from "../src/lib/guide";
 import { broadcast, cameraFrom } from "./bridge";
 import { enablePreview } from "./video";
 
@@ -37,13 +37,18 @@ test("advice: closer, back, fewer, or nothing when all is well", () => {
   expect(settle(new Guide(), look(grid))).toBe("fewer");
 });
 
-test("advice: a blurred picture is told from one that merely shows no codes", () => {
+test("advice: when codes are no longer read, it does not claim to know why", () => {
   const guide = new Guide();
-  settle(guide, look([code(400, 100, 500)], 1000));
-  // No codes, as sharp as before: the camera points elsewhere. Not blur.
+  // Before any code was read there is nothing to say, sharp or not.
   expect(settle(guide, look([], 900))).toBeUndefined();
-  // No codes and far less detail than when codes were read: blur.
+  expect(settle(guide, look([], 50))).toBeUndefined();
+  settle(guide, look([code(400, 100, 500)], 1000));
+  // No codes now, the picture as sharp as before: they are not (fully) in it.
+  expect(settle(guide, look([], 900))).toBe("lost");
+  expect(ADVICE.lost).toMatch(/fully in the picture/);
+  // No codes and far less detail: blurred, or pointing somewhere else. The advice names both.
   expect(settle(guide, look([], 150))).toBe("blurred");
+  expect(ADVICE.blurred).toMatch(/out of the picture, or it is blurred/);
   // Reading again: the advice goes away.
   expect(settle(guide, look([code(400, 100, 500)], 950))).toBeUndefined();
 });

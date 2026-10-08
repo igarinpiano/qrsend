@@ -532,6 +532,8 @@ export class LanSender {
 
   /** Sends codes as fast as the receiver takes them in. */
   private async pump(channel: RTCDataChannel): Promise<void> {
+    // (Asked anew of every receiver; kept after the end for the measurements.)
+    this.binary = false;
     this.sent = 0;
     this.acked = 0;
     this.rate = RATE_START;
@@ -630,7 +632,6 @@ export class LanSender {
     this.pc = this.knownPc = undefined;
     this.channel = this.knownChannel = undefined;
     this.answered = this.peer = undefined;
-    this.binary = false;
     this.wake?.();
     const shut = (all: (RTCDataChannel | RTCPeerConnection | undefined)[]) => {
       for (const one of all) {

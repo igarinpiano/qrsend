@@ -518,6 +518,7 @@
         {active}
         allowFile={!result}
         compact={!!showing && !sideways}
+        advise={!showing && linkState !== "connected"}
       />
     </div>
   {/if}

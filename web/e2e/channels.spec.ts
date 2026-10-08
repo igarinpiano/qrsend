@@ -301,9 +301,10 @@ test("local network: a connection lost without a word is made again", async ({ p
     // The sender hears nothing back, gives the connection up and offers a new one.
     await expect(sender.getByRole("button", { name: /offering LAN/ })).toBeVisible({ timeout: 30_000 });
     await receiver.evaluate(() => ((window as unknown as { quiet: boolean }).quiet = false));
-    // The receiver, which never learned that the first one ended, answers the new offer all the same.
-    await expect(receiver.getByTestId("link-answer")).toBeVisible({ timeout: 20_000 });
-    await expect(sender.getByTestId("link-up")).toBeVisible({ timeout: 20_000 });
+    // The receiver, which never learned that the first one ended, answers the new offer all the same. (Its code
+    // is on the screen only for the moment the sender needs to read it: what shows that it was, is the connection.)
+    await expect(sender.getByTestId("link-up")).toBeVisible({ timeout: 30_000 });
+    // By codes alone this would take ten minutes.
     await expect(receiver.getByTestId("received-file")).toHaveText(["again.bin"], { timeout: 60_000 });
     await expect(sender.getByText("The other device has everything.")).toBeVisible({ timeout: 30_000 });
   } finally {

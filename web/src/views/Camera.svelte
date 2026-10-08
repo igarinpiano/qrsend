@@ -11,6 +11,7 @@
     active = true,
     allowFile = false,
     compact = false,
+    advise = true,
   }: {
     ontexts: (texts: string[]) => void;
     /** What the camera makes of the codes: pictures read per second, camera pixels per dot. */
@@ -19,6 +20,8 @@
     allowFile?: boolean;
     /** Take little room: something else on the page matters more right now. */
     compact?: boolean;
+    /** Whether advice on holding the camera is wanted (not while the camera has nothing it must see). */
+    advise?: boolean;
   } = $props();
 
   let video: HTMLVideoElement;
@@ -57,7 +60,7 @@
   // Receiving from the screen (a preview feature, and only where the browser can capture one).
   const screenOffered = featureOn("screenCapture") && Scanner.canCaptureScreen;
   let onScreen = $state(false);
-  const advice = $derived(guideFeature && started && !onScreen && !fileProgress ? stats?.advice : undefined);
+  const advice = $derived(guideFeature && advise && started && !onScreen && !fileProgress ? stats?.advice : undefined);
 
   async function useScreen() {
     if (!scanner) return;

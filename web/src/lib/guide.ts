@@ -24,13 +24,18 @@ export interface Look {
   sharp: number;
 }
 
-export type Advice = "closer" | "back" | "fewer" | "blurred";
+export type Advice = "closer" | "back" | "fewer" | "blurred" | "lost";
 
 export const ADVICE: Record<Advice, string> = {
   closer: "Move closer: the codes are small in the picture.",
   back: "Move back a little: the codes reach the edge of the picture.",
   fewer: "The codes are very small for this camera. Fewer codes at once on the sender would read better.",
-  blurred: "The picture is blurred. Hold still, or change the distance until it is sharp.",
+  // Nothing is read and the picture has little detail: blurred, or pointing
+  // somewhere else (a wall has little detail too). The picture alone cannot
+  // tell which, so the advice names both.
+  blurred: "Cannot read the codes: they are out of the picture, or it is blurred. Aim at them and hold still.",
+  // Nothing is read though the picture is sharp.
+  lost: "Cannot read the codes. Check that they are fully in the picture.",
 };
 
 // Characters a code holds at most, by version (1–40), at the lowest error
@@ -70,13 +75,13 @@ export function dotSize(look: Look): number {
 }
 
 export class Guide {
-  private scores: Record<Advice, number> = { closer: 0, back: 0, fewer: 0, blurred: 0 };
+  private scores: Record<Advice, number> = { closer: 0, back: 0, fewer: 0, blurred: 0, lost: 0 };
   private shown: Advice | undefined;
   private sharpest = 0;
 
   /** Takes one picture into account; returns the advice to show, if any. */
   notice(look: Look): Advice | undefined {
-    const now: Record<Advice, boolean> = { closer: false, back: false, fewer: false, blurred: false };
+    const now: Record<Advice, boolean> = { closer: false, back: false, fewer: false, blurred: false, lost: false };
     if (look.boxes.length) {
       // Whatever was read was sharp enough to read.
       this.sharpest = Math.max(this.sharpest * 0.995, look.sharp);
@@ -92,10 +97,10 @@ export class Guide {
       now.closer = !atEdge && dot < SMALL_DOT_PX && span < ROOM;
       now.fewer = !atEdge && dot < SMALL_DOT_PX && span >= ROOM;
     } else if (this.sharpest > 0) {
+      // Codes were read before and are not now. (Before the first code there
+      // is nothing to say: the camera may not be pointed at anything yet.)
       now.blurred = look.sharp < this.sharpest * BLURRED;
-    } else {
-      // Nothing read yet: all there is to compare with is the picture so far.
-      this.sharpest = Math.max(this.sharpest, look.sharp);
+      now.lost = !now.blurred;
     }
     for (const key of Object.keys(now) as Advice[]) {
       this.scores[key] += ((now[key] ? 1 : 0) - this.scores[key]) * FOLLOW;
