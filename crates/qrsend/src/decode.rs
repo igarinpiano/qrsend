@@ -9,12 +9,13 @@
 //! decoded on its own, which is far more reliable.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use qrsend_core::frame::Frame;
 use qrsend_core::qr::{self, Luma, QUIET};
 use rxing::{BarcodeFormat, DecodeHints};
 
-use crate::input::LumaFrame;
+use crate::input::{LumaFrame, Picture};
 
 type Quad = [(f64, f64); 4];
 
@@ -202,6 +203,84 @@ pub fn detect_cached(f: &LumaFrame, cache: &std::sync::Mutex<Lattice>) -> Vec<St
         };
     }
     texts
+}
+
+/// Whether the stream being read stacks three codes in red, green and blue
+/// (color codes, PROTOCOL §2.3). The sender does not say: the pictures do.
+#[derive(Default)]
+pub struct ColorWatch {
+    on: AtomicBool,
+    /// Pictures looked at so far.
+    seen: AtomicU32,
+    /// Pictures in a row whose three colors all held the same codes.
+    alike: AtomicU32,
+}
+
+/// How often a picture read in black and white is also taken apart into its
+/// colors, to notice a stream of color codes.
+const COLOR_PROBE_EVERY: u32 = 12;
+/// This many pictures in a row with the same codes in every color: the
+/// stream is black and white (again).
+const COLOR_OFF_AFTER: u32 = 24;
+
+impl ColorWatch {
+    pub fn in_color(&self) -> bool {
+        self.on.load(Ordering::Relaxed)
+    }
+}
+
+/// [`detect_cached`] for a picture that may hold color codes: read in black
+/// and white as long as that is all there is, and color by color once the
+/// colors turn out to carry different codes.
+pub fn detect_picture(
+    p: &Picture,
+    cache: &std::sync::Mutex<Lattice>,
+    watch: &ColorWatch,
+) -> Vec<String> {
+    let in_color = watch.in_color();
+    let n = watch.seen.fetch_add(1, Ordering::Relaxed);
+    let mut plain = Vec::new();
+    if !in_color {
+        plain = detect_cached(&p.luma, cache);
+        // Brightness is mostly green: a color code often reads as its green
+        // layer alone, so codes being found does not settle it.
+        let probe =
+            n.is_multiple_of(COLOR_PROBE_EVERY) || (plain.is_empty() && n.is_multiple_of(3));
+        if !probe {
+            return plain;
+        }
+    }
+    let Some(channels) = p.channels() else {
+        return if in_color {
+            detect_cached(&p.luma, cache)
+        } else {
+            plain
+        };
+    };
+    let each: Vec<Vec<String>> = channels.iter().map(|c| detect_cached(c, cache)).collect();
+    let mut all = plain.clone();
+    for t in each.iter().flatten() {
+        if !all.contains(t) {
+            all.push(t.clone());
+        }
+    }
+    let frames = |texts: &[String]| texts.iter().filter(|t| is_frame(t)).count();
+    let alike = each
+        .iter()
+        .all(|c| c.len() == each[0].len() && c.iter().all(|t| each[0].contains(t)));
+    if in_color {
+        if alike && frames(&each[0]) > 0 {
+            if watch.alike.fetch_add(1, Ordering::Relaxed) + 1 >= COLOR_OFF_AFTER {
+                watch.on.store(false, Ordering::Relaxed);
+            }
+        } else if !alike {
+            watch.alike.store(0, Ordering::Relaxed);
+        }
+    } else if !alike && frames(&all) > frames(&plain) {
+        watch.alike.store(0, Ordering::Relaxed);
+        watch.on.store(true, Ordering::Relaxed);
+    }
+    all
 }
 
 /// Finds QRSend frames in a picture; other QR codes are returned too when the

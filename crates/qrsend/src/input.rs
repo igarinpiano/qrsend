@@ -15,6 +15,65 @@ pub struct LumaFrame {
     pub pixels: Vec<u8>,
 }
 
+/// The color of a picture, kept the way the source gave it and taken apart
+/// only when asked.
+pub enum Color {
+    /// Red, green and blue of each pixel in turn.
+    Rgb(Vec<u8>),
+    /// The two chroma planes of a YUV picture, each `cw` × `ch`.
+    Yuv {
+        u: Vec<u8>,
+        v: Vec<u8>,
+        cw: usize,
+        ch: usize,
+    },
+}
+
+/// One picture from the input: its brightness and, when it has any, its color.
+pub struct Picture {
+    pub luma: LumaFrame,
+    pub color: Option<Color>,
+}
+
+impl Picture {
+    /// The red, green and blue of the picture as three pictures of their
+    /// own: color codes carry one code in each (PROTOCOL §2.3).
+    pub fn channels(&self) -> Option<[LumaFrame; 3]> {
+        let (w, h) = (self.luma.width, self.luma.height);
+        let mut planes = [vec![0u8; w * h], vec![0u8; w * h], vec![0u8; w * h]];
+        match self.color.as_ref()? {
+            Color::Rgb(rgb) => {
+                for (i, px) in rgb.chunks_exact(3).enumerate() {
+                    planes[0][i] = px[0];
+                    planes[1][i] = px[1];
+                    planes[2][i] = px[2];
+                }
+            }
+            Color::Yuv { u, v, cw, ch } => {
+                let clamp = |x: i32| (x >> 10).clamp(0, 255) as u8;
+                for y in 0..h {
+                    let crow = (y * ch / h) * cw;
+                    for x in 0..w {
+                        let i = y * w + x;
+                        let c = crow + x * cw / w;
+                        // BT.601, limited range, in 1/1024.
+                        let l = 1192 * (self.luma.pixels[i] as i32 - 16) + 512;
+                        let (cb, cr) = (u[c] as i32 - 128, v[c] as i32 - 128);
+                        planes[0][i] = clamp(l + 1634 * cr);
+                        planes[1][i] = clamp(l - 401 * cb - 832 * cr);
+                        planes[2][i] = clamp(l + 2066 * cb);
+                    }
+                }
+            }
+        }
+        Some(planes.map(|pixels| LumaFrame {
+            width: w,
+            height: h,
+            pixels,
+        }))
+    }
+}
+
 pub enum Input {
     Images(Vec<PathBuf>),
     Video(PathBuf),
@@ -105,17 +164,24 @@ pub fn image_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 impl Input {
     /// Produces frames into `tx` until the input is exhausted or the
     /// receiver hangs up. Runs on its own thread.
-    pub fn produce(self, tx: Sender<LumaFrame>) -> Result<()> {
+    pub fn produce(self, tx: Sender<Picture>) -> Result<()> {
         match self {
             Input::Images(paths) => {
                 for p in paths {
-                    let img = image::open(&p)
-                        .with_context(|| format!("cannot read {}", p.display()))?
-                        .into_luma8();
-                    let frame = LumaFrame {
-                        width: img.width() as usize,
-                        height: img.height() as usize,
-                        pixels: img.into_raw(),
+                    let img =
+                        image::open(&p).with_context(|| format!("cannot read {}", p.display()))?;
+                    let color = img
+                        .color()
+                        .has_color()
+                        .then(|| Color::Rgb(img.to_rgb8().into_raw()));
+                    let img = img.into_luma8();
+                    let frame = Picture {
+                        luma: LumaFrame {
+                            width: img.width() as usize,
+                            height: img.height() as usize,
+                            pixels: img.into_raw(),
+                        },
+                        color,
                     };
                     if tx.send(frame).is_err() {
                         break;
@@ -163,7 +229,7 @@ fn spawn_ffmpeg(input: Vec<String>, what: &str) -> Result<Child> {
     Command::new("ffmpeg")
         .args(["-nostdin", "-loglevel", "error"])
         .args(&input)
-        .args(["-f", "yuv4mpegpipe", "-pix_fmt", "gray", "-strict", "-1", "-"])
+        .args(["-f", "yuv4mpegpipe", "-pix_fmt", "yuv444p", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -180,8 +246,8 @@ fn header_value<'a>(fields: &'a [&'a str], tag: char) -> Option<&'a str> {
     fields.iter().find_map(|f| f.strip_prefix(tag))
 }
 
-/// Minimal YUV4MPEG2 reader; only the luma plane is kept.
-fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>, dedupe: bool) -> Result<()> {
+/// Minimal YUV4MPEG2 reader (8 bits per sample).
+fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<Picture>, dedupe: bool) -> Result<()> {
     let mut line = String::new();
     r.read_line(&mut line)?;
     let fields: Vec<&str> = line.split_whitespace().collect();
@@ -191,14 +257,24 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>, dedupe: bool) -> Resul
     let w: usize = header_value(&fields, 'W').context("Y4M width")?.parse()?;
     let h: usize = header_value(&fields, 'H').context("Y4M height")?.parse()?;
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    // The size of each of the two chroma planes.
     let chroma = match header_value(&fields, 'C').unwrap_or("420jpeg") {
-        c if c.starts_with("mono") => 0,
-        c if c.starts_with("420") => 2 * cw * ch,
-        c if c.starts_with("422") => 2 * cw * h,
-        c if c.starts_with("444") => 2 * w * h,
+        "mono" => None,
+        // 420p10, 444p12, mono16…
+        c if c.starts_with("mono")
+            || c.get(3..)
+                .and_then(|rest| rest.strip_prefix('p'))
+                .is_some_and(|bits| {
+                    !bits.is_empty() && bits.bytes().all(|b| b.is_ascii_digit())
+                }) =>
+        {
+            bail!("unsupported Y4M color space C{c} (more than 8 bits per sample)")
+        }
+        c if c.starts_with("420") => Some((cw, ch)),
+        c if c.starts_with("422") => Some((cw, h)),
+        c if c.starts_with("444") => Some((w, h)),
         c => bail!("unsupported Y4M color space C{c}"),
     };
-    let mut skip = vec![0u8; chroma];
     let mut last = None;
     loop {
         let mut frame_line = Vec::new();
@@ -210,7 +286,15 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>, dedupe: bool) -> Resul
         }
         let mut pixels = vec![0u8; w * h];
         r.read_exact(&mut pixels)?;
-        r.read_exact(&mut skip)?;
+        let color = match chroma {
+            Some((cw, ch)) => {
+                let (mut u, mut v) = (vec![0u8; cw * ch], vec![0u8; cw * ch]);
+                r.read_exact(&mut u)?;
+                r.read_exact(&mut v)?;
+                Some(Color::Yuv { u, v, cw, ch })
+            }
+            None => None,
+        };
         // Recordings repeat frames while the sender holds a code; decoding
         // an identical picture again cannot yield anything new.
         if dedupe {
@@ -220,14 +304,12 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>, dedupe: bool) -> Resul
             }
             last = Some(hash);
         }
-        if tx
-            .send(LumaFrame {
-                width: w,
-                height: h,
-                pixels,
-            })
-            .is_err()
-        {
+        let luma = LumaFrame {
+            width: w,
+            height: h,
+            pixels,
+        };
+        if tx.send(Picture { luma, color }).is_err() {
             return Ok(());
         }
     }
@@ -236,6 +318,44 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<LumaFrame>, dedupe: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colors_come_apart() {
+        // Two pixels, red and cyan, as RGB and as YUV (BT.601, limited range).
+        let luma = |pixels: Vec<u8>| LumaFrame {
+            width: 2,
+            height: 1,
+            pixels,
+        };
+        let rgb = Picture {
+            luma: luma(vec![76, 179]),
+            color: Some(Color::Rgb(vec![255, 0, 0, 0, 255, 255])),
+        };
+        let planes = rgb.channels().unwrap();
+        assert_eq!(planes[0].pixels, [255, 0]);
+        assert_eq!(planes[1].pixels, [0, 255]);
+        assert_eq!(planes[2].pixels, [0, 255]);
+        let yuv = Picture {
+            luma: luma(vec![81, 170]),
+            color: Some(Color::Yuv {
+                u: vec![90, 166],
+                v: vec![240, 16],
+                cw: 2,
+                ch: 1,
+            }),
+        };
+        let planes = yuv.channels().unwrap();
+        let near = |a: u8, b: u8| a.abs_diff(b) <= 3;
+        for (plane, want) in planes.iter().zip([[255, 0], [0, 255], [0, 255]]) {
+            assert!(near(plane.pixels[0], want[0]) && near(plane.pixels[1], want[1]));
+        }
+        // No color, nothing to take apart.
+        let gray = Picture {
+            luma: luma(vec![0, 255]),
+            color: None,
+        };
+        assert!(gray.channels().is_none());
+    }
 
     #[test]
     fn camera_arguments() {

@@ -19,7 +19,7 @@ use qrsend_core::receiver::{Event, Receiver, SessionParams};
 use qrsend_core::resume::ResumeCode;
 
 use crate::extract::{self, Conflict, ExtractOptions, Outcome};
-use crate::input::{Input, LumaFrame, image_paths};
+use crate::input::{Input, Picture, image_paths};
 use crate::send::parse_size;
 use crate::store::Store;
 use crate::{decode, identity, net, util};
@@ -364,7 +364,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
         let _ = ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst));
     }
 
-    let (ftx, frx) = bounded::<LumaFrame>(threads * 2);
+    let (ftx, frx) = bounded::<Picture>(threads * 2);
     let (ttx, trx) = unbounded::<Vec<String>>();
     let producer = match (input, args.text.clone()) {
         (Some(input), _) => thread::spawn(move || input.produce(ftx)),
@@ -378,16 +378,17 @@ pub fn run(args: RecvArgs) -> Result<()> {
     let lattice = Arc::new(std::sync::Mutex::new(decode::Lattice::default()));
     // The size of the pictures being read, once the first one is in.
     let picture = Arc::new(std::sync::OnceLock::<(usize, usize)>::new());
+    let colors = Arc::new(decode::ColorWatch::default());
     for _ in 0..threads {
         let (frx, ttx, stop, lattice) = (frx.clone(), ttx.clone(), stop.clone(), lattice.clone());
-        let picture = picture.clone();
+        let (picture, colors) = (picture.clone(), colors.clone());
         thread::spawn(move || {
             while let Ok(f) = frx.recv() {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let _ = picture.set((f.width, f.height));
-                let texts = decode::detect_cached(&f, &lattice);
+                let _ = picture.set((f.luma.width, f.luma.height));
+                let texts = decode::detect_picture(&f, &lattice, &colors);
                 if ttx.send(texts).is_err() {
                     break;
                 }
@@ -424,6 +425,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
     let mut tries = 0;
     let mut said_size = args.camera.is_none();
     let mut said_foreign_offer = false;
+    let mut said_color = false;
     let mut link_taken = 0u64;
     let mut link_reported = 0u64;
     let mut last_report = Instant::now();
@@ -585,6 +587,10 @@ pub fn run(args: RecvArgs) -> Result<()> {
             }
             pb.set_message(line);
         }
+        if !said_color && colors.in_color() {
+            said_color = true;
+            say(&pb, "Color codes: reading red, green and blue apart.");
+        }
         if !said_size && let Some(&(w, h)) = picture.get() {
             said_size = true;
             let small = w * h < 1280 * 720 && args.camera_size.is_none();
@@ -664,6 +670,10 @@ pub fn run(args: RecvArgs) -> Result<()> {
     }
     stop.store(true, Ordering::SeqCst);
     pb.finish_and_clear();
+    // A short transfer can be over before the loop above comes round to it.
+    if !said_color && colors.in_color() {
+        eprintln!("Color codes: reading red, green and blue apart.");
+    }
 
     let Some(mut s) = session else {
         // Surface input errors (unreadable file, missing ffmpeg) first.

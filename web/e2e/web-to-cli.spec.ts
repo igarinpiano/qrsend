@@ -121,3 +121,31 @@ test("web → CLI: a browser's offer to connect is declined in so many words", a
     await browser.close();
   }
 });
+
+// Color codes stack three codes in red, green and blue. Nothing tells the
+// receiver: the CLI notices that the colors carry different codes.
+test("web → CLI: color codes are told apart", async ({ page }) => {
+  await page.goto("./#/preview");
+  await page.getByRole("checkbox", { name: /Color codes/ }).check();
+  await page.goto("./#/send");
+  await page.getByRole("tab", { name: "Text" }).click();
+  const long = Array.from({ length: 1500 }, () => Math.random().toString(36).slice(2)).join(" ");
+  await page.getByPlaceholder("Paste or type anything…").fill(long);
+  await page.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+  await page.getByRole("button", { name: "Start sending" }).click();
+  for (let i = 0; i < 4; i++) await page.getByRole("button", { name: "Slower" }).click();
+  const dir = path.join(WORK, "web-color");
+  fs.rmSync(dir, { recursive: true, force: true });
+  expect(await captureFrames(page, dir, 40)).toBeGreaterThan(20);
+  // A few pictures are enough to notice (and too few to finish, so the
+  // receiver is still there to say so).
+  const few = path.join(WORK, "web-color-few");
+  fs.rmSync(few, { recursive: true, force: true });
+  fs.mkdirSync(few);
+  for (const f of fs.readdirSync(dir).sort().slice(0, 6)) fs.copyFileSync(path.join(dir, f), path.join(few, f));
+  const start = cliBoth(["recv", "--images", few], "cli");
+  expect(start.status).toBe(2);
+  expect(start.stderr).toContain("Color codes: reading red, green and blue apart");
+  const received = cliBoth(["recv", "--images", dir, "--stdout"], "cli");
+  expect(received.stdout).toContain(long);
+});
