@@ -94,7 +94,8 @@ jobs:
       - run: npm run check
       - run: npm run build
       - name: Build the CLI for interop tests
-        run: cargo build --release -p qrsend --no-default-features
+        # (No window display is needed here; the connection to browsers is.)
+        run: cargo build --release -p qrsend --no-default-features --features webrtc
       - name: Install ffmpeg (video file test)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: npx playwright install --with-deps chromium webkit
