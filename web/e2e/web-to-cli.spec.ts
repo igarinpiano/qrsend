@@ -102,16 +102,20 @@ test("web → CLI: a browser's offer to connect is declined in so many words", a
     await page.getByRole("checkbox", { name: /Local network boost/ }).check();
     await page.goto("./#/send");
     await page.getByRole("tab", { name: "Text" }).click();
-    await page.getByPlaceholder("Paste or type anything…").fill("Over the codes, then");
+    // More than the pictures taken below can carry: the receiver is still
+    // reading when the offer comes by, however long the browser takes to
+    // make it.
+    const long = Array.from({ length: 60_000 }, () => Math.random().toString(36).slice(2)).join(" ");
+    await page.getByPlaceholder("Paste or type anything…").fill(long);
     await page.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
     await page.getByRole("button", { name: "Start sending" }).click();
     await expect(page.getByRole("button", { name: /offering LAN/ })).toBeVisible();
     for (let i = 0; i < 4; i++) await page.getByRole("button", { name: "Slower" }).click();
     const dir = path.join(WORK, "web-offer");
     fs.rmSync(dir, { recursive: true, force: true });
-    expect(await captureFrames(page, dir, 30)).toBeGreaterThan(12);
+    expect(await captureFrames(page, dir, 60)).toBeGreaterThan(30);
     const received = cliBoth(["recv", "--images", dir], "cli");
-    expect(received.stdout).toContain("Over the codes, then");
+    expect(received.status).toBe(2); // unfinished: the pictures ran out
     expect(received.stderr).toContain("offers a network connection, but only to another browser");
   } finally {
     await browser.close();
