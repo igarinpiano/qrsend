@@ -20,19 +20,22 @@
 {#each features as feature (feature.id)}
   <div class="card stack">
     {#if feature.choices}
-      <!-- The system's own menu: it is what people know on their device. -->
-      <label class="feature">
+      <!-- The system's own menu: it is what people know on their device. The
+           name comes first and keeps its room; the menu is as wide as its
+           longest choice, never wider than the card, and moves below the name
+           where the two do not fit side by side. -->
+      <div class="feature choice">
+        <span class="name">
+          <strong>{feature.title}</strong>
+          <span class="small muted">when {feature.side}</span>
+        </span>
         <select aria-label={feature.title} value={chosen[feature.id]} onchange={(e) => choose(feature.id, e.currentTarget.value)}>
           <option value="">Off</option>
           {#each feature.choices as choice (choice.value)}
             <option value={choice.value}>{choice.label}</option>
           {/each}
         </select>
-        <span>
-          <strong>{feature.title}</strong>
-          <span class="small muted">when {feature.side}</span>
-        </span>
-      </label>
+      </div>
     {:else}
       <label class="feature">
         <input type="checkbox" checked={chosen[feature.id] !== ""} onchange={(e) => choose(feature.id, e.currentTarget.checked ? "1" : "")} />
@@ -66,8 +69,27 @@
     width: 1.2em;
     height: 1.2em;
   }
-  .feature select {
-    flex: none;
+  /* (Whatever is beside the control may shrink and wrap; it never pushes
+     anything out of the card.) */
+  .feature > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .choice {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+  .choice .name {
+    flex: 1 1 12em;
+  }
+  .choice select {
+    /* Not the full width form fields have elsewhere. */
+    flex: 0 1 auto;
+    width: auto;
+    max-width: 100%;
+    min-width: 0;
+    /* (Tall enough for a finger.) */
+    min-height: 44px;
     font: inherit;
   }
   ol {
