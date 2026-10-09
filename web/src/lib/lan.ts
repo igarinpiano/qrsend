@@ -16,13 +16,67 @@ function kinds(candidates: { address: string }[]): string {
   return candidates.map((c) => kind(c.address)).join(",") || "none";
 }
 
+/**
+ * What kind of address this is, which says over what the connection runs (the address itself is nobody's business).
+ * A connection is made between whatever addresses the two devices have: on one Wi-Fi those are private ones, but two
+ * phones on mobile data have addresses of the internet at large (IPv6), and connect through it just the same.
+ */
+export function addressKind(address: string | undefined): string {
+  if (!address) return "hidden";
+  if (address.endsWith(".local")) return "name";
+  if (address.includes(":")) {
+    const a = address.toLowerCase();
+    if (a === "::1") return "v6 loopback";
+    if (/^fe[89ab]/.test(a)) return "v6 link-local";
+    if (/^f[cd]/.test(a)) return "v6 private";
+    if (/^[23]/.test(a)) return "v6 global";
+    return "v6 other";
+  }
+  const [x, y] = address.split(".").map(Number);
+  if (x === 127) return "v4 loopback";
+  if (x === 10 || (x === 172 && y >= 16 && y <= 31) || (x === 192 && y === 168)) return "v4 private";
+  if (x === 169 && y === 254) return "v4 link-local";
+  if (x === 100 && y >= 64 && y <= 127) return "v4 carrier";
+  if (x === 192 && y === 0) return "v4 transition";
+  return "v4 public";
+}
+
+/** Logs between which kinds of addresses the connection came about, and how long a packet takes there and back. */
+async function logPath(pc: RTCPeerConnection, who: string): Promise<void> {
+  try {
+    const stats = await pc.getStats();
+    const all: Record<string, unknown>[] = [];
+    stats.forEach((s) => all.push(s as Record<string, unknown>));
+    const transport = all.find((s) => s.type === "transport" && s.selectedCandidatePairId);
+    const pairs = all.filter((s) => s.type === "candidate-pair");
+    const pair =
+      pairs.find((s) => s.id === transport?.selectedCandidatePairId) ??
+      pairs.find((s) => s.selected) ??
+      pairs.find((s) => s.nominated && s.state === "succeeded");
+    if (!pair) return;
+    const end = (id: unknown) => {
+      const c = all.find((s) => s.id === id);
+      if (!c) return "unknown";
+      const kind = addressKind((c.address ?? c.ip) as string | undefined);
+      return [kind, c.candidateType, c.networkType].filter(Boolean).join(" ");
+    };
+    const rtt = typeof pair.currentRoundTripTime === "number" ? Math.round(pair.currentRoundTripTime * 1000) : undefined;
+    log("link", `${who}: path chosen`, { own: end(pair.localCandidateId), other: end(pair.remoteCandidateId), thereAndBackMs: rtt });
+  } catch {
+    /* nothing to log */
+  }
+}
+
 /** Logs how a connection in the making gets on. */
 function watch(pc: RTCPeerConnection, who: string): void {
   const since = performance.now();
   const say = (what: string, state: string) => log("link", `${who}: ${what} ${state}`, { s: (performance.now() - since) / 1000 });
   pc.addEventListener("icegatheringstatechange", () => say("looking for addresses:", pc.iceGatheringState));
   pc.addEventListener("iceconnectionstatechange", () => say("path:", pc.iceConnectionState));
-  pc.addEventListener("connectionstatechange", () => say("connection:", pc.connectionState));
+  pc.addEventListener("connectionstatechange", () => {
+    say("connection:", pc.connectionState);
+    if (pc.connectionState === "connected") void logPath(pc, who);
+  });
   pc.addEventListener("icecandidateerror", (e) => say("address error:", String((e as RTCPeerConnectionIceErrorEvent).errorCode)));
 }
 

@@ -65,13 +65,15 @@ function header(): string[] {
   } catch {
     /* no storage */
   }
-  const nav = navigator as Navigator & { deviceMemory?: number; connection?: { effectiveType?: string } };
+  const nav = navigator as Navigator & { deviceMemory?: number; connection?: { effectiveType?: string; type?: string } };
   return [
     `QRSend ${__APP_VERSION__} (built ${__BUILD_TIME__}) · log of ${beganAt.toISOString()}`,
     `browser: ${navigator.userAgent}`,
     `screen: ${screen.width}×${screen.height} at ${window.devicePixelRatio}x · window ${window.innerWidth}×${window.innerHeight} · cores ${
       navigator.hardwareConcurrency ?? "?"
-    } · memory ${nav.deviceMemory ?? "?"} GB · network ${nav.connection?.effectiveType ?? "?"}`,
+    } · memory ${nav.deviceMemory ?? "?"} GB · network ${nav.connection?.type ?? "?"} (as fast as ${
+      nav.connection?.effectiveType ?? "?"
+    })`,
     `preview features on: ${features.sort().join(", ") || "none"}`,
     "(No file names, contents, device IDs or network addresses are recorded.)",
   ];

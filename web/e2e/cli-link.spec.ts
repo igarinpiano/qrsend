@@ -55,6 +55,12 @@ test("CLI → web: the browser connects to the sender, which is shown nothing", 
           throw e;
         });
       if (process.env.QRSEND_LINK_MB) console.log(`TOOK ${megabytes} MiB in ${(Date.now() - since) / 1000} s (from opening the page)`);
+      // The log says between which kinds of addresses the connection was
+      // made (which tells a local network from the internet), and no more.
+      await page.getByRole("button", { name: "Copy log" }).click();
+      const log = await page.getByTestId("log-text").inputValue();
+      expect(log).toMatch(/answer: path chosen {2}own="v4 (loopback|private)[^"]*" other="v4 (loopback|private)[^"]*"/);
+      expect(log).not.toContain("127.0.0.1");
       // The sender heard that everything arrived, and stops by itself.
       expect(await ended).toBe(0);
       expect(said).toContain("The receiver has everything");
