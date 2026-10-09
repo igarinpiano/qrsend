@@ -206,6 +206,7 @@ qrsend send [PATH|-]...            ファイル・フォルダ・標準入力を
 
 qrsend recv                        受信
     --camera <N|NAME> | --video <FILE> | --images <DIR>
+    --log <FILE>                   診断ログ（send にもある。ファイル名・内容・ID・アドレスは書かない）
     --camera-size <WxH>  --camera-fps <N>
                                    カメラに求める解像度・枚数（既定はカメラ任せ。Linux では 640x480 のことが多い）
     -o, --out <DIR>                出力先（既定: カレントディレクトリ）

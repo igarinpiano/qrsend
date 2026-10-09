@@ -8,7 +8,7 @@
   import { rememberLink, trustedDevices } from "../lib/devices";
   import { KIND_SEEDED_OFFER, LINK_PREFIX, LanSender, canConnect, fingerprintHex, introductionMessage, type LinkState } from "../lib/lan";
   import { log, logEvery } from "../lib/log";
-  import { featureOn } from "../lib/prefs";
+  import { featureChoice, featureOn } from "../lib/prefs";
   import { Scanner, type ScanStats } from "../lib/scanner";
   import { Ear, canListen } from "../lib/sound";
 
@@ -52,6 +52,9 @@
   const lanFeature = featureOn("lan") && canConnect;
   let lan: LanSender | undefined;
   let link = $state<LinkState | undefined>();
+  /** Over what the connection runs, and whether one through the internet was turned down (the choice "Wi-Fi"). */
+  let linkPath = $state<"local" | "internet" | "unknown">("unknown");
+  let linkRefused = $state(false);
   const linkUp = $derived(link === "connected");
   let linkTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -100,19 +103,28 @@
       offer: (payload, id) => void engine.sendLinkOffer(payload, id).catch(() => {}),
       offerKnown: (payload, id) => void engine.sendLinkOffer(payload, id, true).catch(() => {}),
       offerSeeded: (payload, id) => void engine.sendLinkOffer(payload, id, KIND_SEEDED_OFFER).catch(() => {}),
+      refused: () => {
+        linkRefused = true;
+        log("tx", "a connection through the internet was not used: the setting allows one network only");
+      },
       introduced: (introduction, certificate) => void introduced(introduction, certificate),
       pull: (count, binary, more) => engine.sendLink(count, binary, more),
       feedback: (code, taken) => hear(code, taken),
       state: (state) => {
         link = state;
         if (state === "offering") markLink("offered");
-        if (state === "connected") markLink("connected");
+        if (state === "connected") {
+          markLink("connected");
+          linkPath = lan?.path ?? "unknown";
+        }
         engine.sendTextChannelUp(state === "connected").catch(() => {});
         // A lost connection: the screen takes over again, and a new offer goes out.
         if (state === "closed" && !finished) linkTimer = setTimeout(() => lan?.start().catch(() => {}), 2000);
       },
       },
-      { remembers: rememberFeature, known },
+      // "Wi-Fi": only within one network. "Wi-Fi & Cellular Data": through
+      // the internet as well, which is what two phones on mobile data do.
+      { remembers: rememberFeature, known, oneNetwork: featureChoice("lan") !== "any" },
     );
     lan.start().catch(() => (link = "closed"));
   }
@@ -575,8 +587,11 @@
     <div class="info small">
       <strong>
         {info.summary}
+        {#if linkRefused && !linkUp}
+          <span class="small muted" data-testid="link-refused">· not connected: the receiver is on another network (Feature preview: Wi-Fi only)</span>
+        {/if}
         {#if linkUp}
-          <span class="channel" data-testid="link-up">+ local network{remembered ? ` · ${remembered}` : ""}</span>
+          <span class="channel" data-testid="link-up">+ {linkPath === "internet" ? "internet (direct)" : "local network"}{remembered ? ` · ${remembered}` : ""}</span>
         {/if}
       </strong>
       <span>

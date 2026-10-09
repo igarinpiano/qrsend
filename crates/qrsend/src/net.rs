@@ -26,6 +26,8 @@ use qrsend_core::feedback::{self, Feedback};
 use qrsend_core::link::TcpOffer;
 use qrsend_core::sender::{SegmentSource, SessionLayout};
 
+use crate::log;
+
 const MAGIC: &[u8; 7] = b"QSTCP1\n";
 /// The receiver's first line: it is who it should be (it knows the key).
 const HELLO: &str = "B1";
@@ -122,6 +124,74 @@ pub enum LinkEvent {
     /// offer makes one connection, see `crate::rtc`).
     #[cfg_attr(not(feature = "webrtc"), allow(dead_code))]
     Offer(Vec<String>),
+}
+
+/// The kind of an address, which says over what a connection runs (and is
+/// all the log records of it). The same kinds as the web app's.
+pub(crate) fn address_kind(ip: IpAddr) -> &'static str {
+    match ip {
+        IpAddr::V4(a) => {
+            let [x, y, ..] = a.octets();
+            if a.is_loopback() {
+                "v4 loopback"
+            } else if a.is_private() {
+                "v4 private"
+            } else if a.is_link_local() {
+                "v4 link-local"
+            } else if x == 100 && (64..128).contains(&y) {
+                "v4 carrier"
+            } else if x == 192 && y == 0 {
+                "v4 transition"
+            } else {
+                "v4 public"
+            }
+        }
+        IpAddr::V6(a) => match a.segments()[0] {
+            _ if a.is_loopback() => "v6 loopback",
+            s if s & 0xffc0 == 0xfe80 => "v6 link-local",
+            s if s & 0xfe00 == 0xfc00 => "v6 private",
+            s if s & 0xe000 == 0x2000 => "v6 global",
+            _ => "v6 other",
+        },
+    }
+}
+
+/// Whether an address of that kind exists within one network only (see
+/// the web app's `addresses.ts`).
+pub(crate) fn within_one_network(ip: IpAddr) -> bool {
+    matches!(
+        address_kind(ip),
+        "v4 loopback"
+            | "v4 private"
+            | "v4 link-local"
+            | "v6 loopback"
+            | "v6 link-local"
+            | "v6 private"
+    )
+}
+
+/// Over what a connection between two addresses runs: one network
+/// ("local") or the internet, as far as the addresses say.
+pub(crate) fn path_between(own: IpAddr, other: IpAddr) -> &'static str {
+    if within_one_network(own) || within_one_network(other) {
+        return "local";
+    }
+    match (own, other) {
+        // Devices on one network share the first 64 bits.
+        (IpAddr::V6(a), IpAddr::V6(b)) if a.segments()[..4] == b.segments()[..4] => "local",
+        _ => "internet",
+    }
+}
+
+/// For the log: the kinds of the two ends of a connection, and over what
+/// it runs.
+pub(crate) fn path_said(own: SocketAddr, other: SocketAddr) -> String {
+    format!(
+        "own=\"{}\" other=\"{}\" over={}",
+        address_kind(own.ip()),
+        address_kind(other.ip()),
+        path_between(own.ip(), other.ip())
+    )
 }
 
 /// Addresses of this machine other devices on the network may reach. Asking
@@ -243,6 +313,11 @@ fn serve_one<S: SegmentSource + Send + 'static>(
         bail!("no greeting");
     }
     stream.set_read_timeout(None)?;
+    if let (Ok(own), Ok(other)) = (stream.local_addr(), stream.peer_addr()) {
+        log::line("link", || {
+            format!("TCP: a receiver connected {}", path_said(own, other))
+        });
+    }
     let _ = events.send(LinkEvent::Up);
 
     let state = Arc::new((
@@ -356,6 +431,7 @@ pub fn connect(offer: TcpOffer, session_id: u32) -> Link {
     let (written_tx, written) = bounded::<()>(0);
     thread::spawn(move || {
         let Some(mut stream) = dial(&offer) else {
+            log::line("link", || "TCP: no address of the offer answered".into());
             return;
         };
         let run = || -> Result<()> {
@@ -371,6 +447,11 @@ pub fn connect(offer: TcpOffer, session_id: u32) -> Link {
             stream.set_read_timeout(None)?;
             let (mut to_receiver, mut to_sender) = seals(&offer.key, &from_receiver, &from_sender);
             to_sender.write(&mut stream, HELLO.as_bytes())?;
+            if let (Ok(own), Ok(other)) = (stream.local_addr(), stream.peer_addr()) {
+                log::line("link", || {
+                    format!("TCP: connected {}", path_said(own, other))
+                });
+            }
             let mut writer = stream.try_clone()?;
             thread::spawn(move || {
                 for line in reply_rx {
@@ -408,6 +489,39 @@ fn dial(offer: &TcpOffer) -> Option<TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_addresses_say() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for (address, kind) in [
+            ("192.168.1.20", "v4 private"),
+            ("172.20.10.2", "v4 private"),
+            ("100.72.3.4", "v4 carrier"),
+            ("192.0.0.2", "v4 transition"),
+            ("169.254.3.4", "v4 link-local"),
+            ("127.0.0.1", "v4 loopback"),
+            ("8.8.8.8", "v4 public"),
+            ("2400:4050:abcd:1200::5", "v6 global"),
+            ("fe80::1", "v6 link-local"),
+            ("fd12:3456::1", "v6 private"),
+            ("::1", "v6 loopback"),
+        ] {
+            assert_eq!(address_kind(ip(address)), kind, "{address}");
+        }
+        assert_eq!(
+            path_between(ip("192.168.1.20"), ip("192.168.1.31")),
+            "local"
+        );
+        assert_eq!(
+            path_between(ip("2400:4050:abcd:1200::1"), ip("2400:4050:abcd:1200::2")),
+            "local"
+        );
+        assert_eq!(
+            path_between(ip("2400:4050:abcd:1200::1"), ip("240a:61:1234:5678::2")),
+            "internet"
+        );
+        assert_eq!(path_between(ip("8.8.8.8"), ip("1.1.1.1")), "internet");
+    }
 
     #[test]
     fn sealed_records_round_trip_and_reject_tampering() {

@@ -27,7 +27,10 @@ use str0m::config::{DtlsCert, Fingerprint};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, IceCreds, Input, Output, Rtc, RtcConfig};
 
-use crate::net::{Link, LinkEvent, SYMBOL_SIZE, local_addresses};
+use crate::log;
+use crate::net::{
+    Link, LinkEvent, SYMBOL_SIZE, address_kind, local_addresses, path_said, within_one_network,
+};
 
 /// The receiver's line that shows it read the offer (see [`proof`]).
 const PROOF: char = 'K';
@@ -72,7 +75,15 @@ pub struct Description {
     pub pwd: String,
     pub fingerprint: [u8; 32],
     pub candidates: Vec<(String, u16)>,
+    /// What a browser's offer says besides (see [`FLAG_ONE_NETWORK`]); none
+    /// are written when there are none.
+    pub flags: u8,
 }
+
+/// In a browser's offer: connect only if both devices are on one network
+/// (its sender chose "Wi-Fi", not "Wi-Fi & Cellular Data"). Nothing is then
+/// sent toward an address of the internet at large.
+pub const FLAG_ONE_NETWORK: u8 = 2;
 
 impl Description {
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -88,6 +99,9 @@ impl Description {
         for (address, port) in &self.candidates {
             text(&mut out, address);
             out.extend_from_slice(&port.to_be_bytes());
+        }
+        if self.flags != 0 {
+            out.push(self.flags);
         }
         out
     }
@@ -123,6 +137,7 @@ impl Description {
             pwd,
             fingerprint,
             candidates,
+            flags: data.first().copied().unwrap_or(0),
         })
     }
 }
@@ -261,6 +276,7 @@ fn offer(sockets: &Sockets) -> Result<Offered> {
             .take(4)
             .map(|(a, _)| (a.ip().to_string(), a.port()))
             .collect(),
+        flags: 0,
     };
     let key: [u8; 16] = rand::random();
     let mut payload = key.to_vec();
@@ -324,6 +340,17 @@ where
     // file has it from its first picture.
     let mut offered = offer(&sockets)?;
     announce(&offered, &events)?;
+    log::line("link", || {
+        let kinds: Vec<&str> = sockets
+            .list
+            .iter()
+            .map(|(a, _)| address_kind(a.ip()))
+            .collect();
+        format!(
+            "WebRTC: offering a connection to browsers addresses={}",
+            kinds.join(",")
+        )
+    });
     thread::spawn(move || {
         let mut last: Option<Feedback> = None;
         loop {
@@ -333,8 +360,15 @@ where
                 .run()
                 .unwrap_or_else(|e| {
                     trace(|| format!("the connection failed: {e:#}"));
+                    log::line("link", || format!("WebRTC: the connection failed: {e:#}"));
                     None
                 });
+            log::line("link", || {
+                format!(
+                    "WebRTC: connection over complete={}",
+                    feedback.as_ref().is_some_and(|f| f.complete)
+                )
+            });
             let _ = events.send(LinkEvent::Down);
             let complete = feedback.as_ref().is_some_and(|f| f.complete);
             last = feedback.or(last);
@@ -376,6 +410,8 @@ struct Connection<'a, S> {
     /// A message the connection had no room for yet.
     waiting: VecDeque<Vec<u8>>,
     last: Option<Feedback>,
+    /// The two ends of the last packet that came (this side's, the other's).
+    ends: Option<(SocketAddr, SocketAddr)>,
 }
 
 impl<'a, S: SegmentSource> Connection<'a, S> {
@@ -404,6 +440,7 @@ impl<'a, S: SegmentSource> Connection<'a, S> {
             idle_since: None,
             waiting: VecDeque::new(),
             last: None,
+            ends: None,
         }
     }
 
@@ -442,6 +479,7 @@ impl<'a, S: SegmentSource> Connection<'a, S> {
                 .min(Duration::from_millis(50));
             match self.sockets.incoming.recv_timeout(wait) {
                 Ok((to, from, data)) => {
+                    self.ends = Some((to, from));
                     if !self.open {
                         trace(|| format!("{} B from {from} at {to}", data.len()));
                     }
@@ -478,6 +516,11 @@ impl<'a, S: SegmentSource> Connection<'a, S> {
             Event::ChannelOpen(id, _) if id == self.channel => {
                 self.open = true;
                 self.heard = Instant::now();
+                if let Some((own, other)) = self.ends {
+                    log::line("link", || {
+                        format!("WebRTC: a browser connected {}", path_said(own, other))
+                    });
+                }
             }
             Event::ChannelClose(id) if id == self.channel => return Ok(false),
             Event::ChannelData(data) if data.id == self.channel && !data.binary => {
@@ -500,6 +543,12 @@ impl<'a, S: SegmentSource> Connection<'a, S> {
             let seen = self.rtc.direct_api().remote_dtls_fingerprint().cloned();
             self.proven = seen.is_some_and(|f| line == proof(&self.key, &f.bytes));
             trace(|| format!("the receiver read the offer: {}", self.proven));
+            log::line("link", || {
+                format!(
+                    "WebRTC: the receiver showed that it read the offer: {}",
+                    self.proven
+                )
+            });
             return self.proven;
         }
         if line == HELLO {
@@ -692,8 +741,12 @@ pub fn connect(payload: Vec<u8>) -> Link {
     let (written_tx, written) = bounded::<()>(0);
     thread::spawn(move || {
         let result = receive(&payload, message_tx, reply_rx);
-        if let Err(e) = result {
-            trace(|| format!("the connection failed: {e:#}"));
+        match &result {
+            Err(e) => {
+                trace(|| format!("the connection failed: {e:#}"));
+                log::line("link", || format!("WebRTC: no connection: {e:#}"));
+            }
+            Ok(()) => log::line("link", || "WebRTC: connection over".into()),
         }
         drop(written_tx);
     });
@@ -709,11 +762,22 @@ fn receive(payload: &[u8], messages: Sender<Vec<u8>>, replies: Receiver<String>)
         .split_at_checked(16)
         .context("damaged connection offer")?;
     let description = Description::from_bytes(description)?;
+    let one_network = description.flags & FLAG_ONE_NETWORK != 0;
     let mut remote = Vec::new();
+    let mut kinds = Vec::new();
     for (address, port) in &description.candidates {
         match address.parse::<IpAddr>() {
-            Ok(ip) => remote.push(SocketAddr::new(ip, *port)),
+            Ok(ip) => {
+                kinds.push(address_kind(ip));
+                // (This program does not know its own IPv6 addresses, so it
+                // cannot tell whether one of the internet at large is on
+                // its network: where that matters, such an address is left.)
+                if !one_network || within_one_network(ip) {
+                    remote.push(SocketAddr::new(ip, *port));
+                }
+            }
             Err(_) if address.ends_with(".local") => {
+                // (Only a device on the same network can look a name up.)
                 let found = resolve_local(address, Duration::from_secs(2));
                 trace(|| {
                     format!(
@@ -721,13 +785,29 @@ fn receive(payload: &[u8], messages: Sender<Vec<u8>>, replies: Receiver<String>)
                         found.len()
                     )
                 });
+                kinds.push(if found.is_empty() {
+                    "name (not found)"
+                } else {
+                    "name"
+                });
                 remote.extend(found.into_iter().map(|ip| SocketAddr::new(ip, *port)));
             }
             Err(_) => {}
         }
     }
+    log::line("link", || {
+        format!(
+            "WebRTC: a browser's offer addresses={} oneNetworkOnly={one_network} usable={}",
+            kinds.join(","),
+            remote.len()
+        )
+    });
     if remote.is_empty() {
-        bail!("the offer holds no address that can be reached");
+        bail!(if one_network {
+            "the sender connects only on its own network, and none of its addresses is on one"
+        } else {
+            "the offer holds no address that can be reached"
+        });
     }
     let mut local = local_addresses();
     if remote.iter().any(|a| a.ip().is_loopback()) {
@@ -763,6 +843,8 @@ fn receive(payload: &[u8], messages: Sender<Vec<u8>>, replies: Receiver<String>)
     api.start_sctp(true);
 
     let started = Instant::now();
+    // The two ends of the last packet that came (this side's, the other's).
+    let mut ends: Option<(SocketAddr, SocketAddr)> = None;
     let mut channel: Option<ChannelId> = None;
     let mut replies = Some(replies);
     let mut waiting: VecDeque<String> = VecDeque::new();
@@ -818,6 +900,11 @@ fn receive(payload: &[u8], messages: Sender<Vec<u8>>, replies: Receiver<String>)
                         Event::ChannelOpen(id, _) => {
                             channel = Some(id);
                             waiting.push_front(HELLO.to_string());
+                            if let Some((own, other)) = ends {
+                                log::line("link", || {
+                                    format!("WebRTC: connected {}", path_said(own, other))
+                                });
+                            }
                         }
                         Event::ChannelClose(_) => return Ok(()),
                         Event::ChannelData(data) if data.binary => {
@@ -838,6 +925,7 @@ fn receive(payload: &[u8], messages: Sender<Vec<u8>>, replies: Receiver<String>)
             .min(Duration::from_millis(20));
         match sockets.incoming.recv_timeout(wait) {
             Ok((to, from, data)) => {
+                ends = Some((to, from));
                 if let Ok(contents) = data.as_slice().try_into() {
                     let input = Input::Receive(
                         Instant::now(),
@@ -886,14 +974,21 @@ mod tests {
             pwd: "0123456789abcdef0123456789abcdef".into(),
             fingerprint: [7; 32],
             candidates: vec![("192.168.1.20".into(), 50000), ("fd00::1".into(), 9)],
+            flags: 0,
         };
         let bytes = d.to_bytes();
         assert_eq!(Description::from_bytes(&bytes).unwrap(), d);
         assert!(Description::from_bytes(&bytes[..bytes.len() - 1]).is_err());
-        // Flags a browser appends are no part of it.
-        let mut flagged = bytes.clone();
-        flagged.push(1);
-        assert_eq!(Description::from_bytes(&flagged).unwrap(), d);
+        // What a browser says besides comes last.
+        let flagged = Description {
+            flags: FLAG_ONE_NETWORK,
+            ..d.clone()
+        };
+        assert_eq!(flagged.to_bytes().len(), bytes.len() + 1);
+        assert_eq!(
+            Description::from_bytes(&flagged.to_bytes()).unwrap(),
+            flagged
+        );
     }
 
     #[test]

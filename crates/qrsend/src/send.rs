@@ -19,7 +19,7 @@ use crate::display::{self, FrameStream, GridSpec};
 #[cfg(feature = "webrtc")]
 use crate::rtc;
 use crate::spool::{Content, Spool, SpoolOptions};
-use crate::{collect, identity, net, util};
+use crate::{collect, identity, log, net, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DisplayKind {
@@ -133,6 +133,11 @@ pub struct SendArgs {
     /// Port to listen on for --lan (default: any free one)
     #[arg(long, value_name = "PORT", default_value_t = 0, requires = "lan")]
     pub lan_port: u16,
+    /// Write a diagnostic log to FILE ("-": standard error), to send along
+    /// with a report of a problem. It holds no file names, contents, device
+    /// IDs or network addresses
+    #[arg(long, value_name = "FILE")]
+    pub log: Option<PathBuf>,
     /// log2 of the segment size in bytes (advanced)
     #[arg(long, default_value_t = 20, hide = true, value_parser = clap::value_parser!(u8).range(12..=30))]
     pub seg_shift: u8,
@@ -180,6 +185,7 @@ fn parse_ec(s: &str) -> Result<Ec, String> {
 const TEXT_SYMBOL_SIZE: usize = 1024;
 
 pub fn run(args: SendArgs) -> Result<()> {
+    log::start(args.log.as_deref(), "send")?;
     let fps = args
         .fps
         .unwrap_or(if args.dense && args.export_video.is_some() {
@@ -334,6 +340,28 @@ pub fn run(args: SendArgs) -> Result<()> {
     let sender = Sender::new(layout, spool.source()?, config, only.as_deref());
     let mut stream = FrameStream::new(sender, params);
     let per_pass = stream.frames_per_pass();
+    log::line("tx", || {
+        let shown = if args.export_frames.is_some() {
+            "pictures"
+        } else if args.export_video.is_some() {
+            "video"
+        } else if args.export_text.is_some() {
+            "text"
+        } else {
+            "screen"
+        };
+        format!(
+            "packed wireBytes={} fileListBytes={} qr=v{}-{:?} bytesPerCode={symbol_size} codesPerPass={per_pass} \
+             shownAs={shown} encrypted={} lan={} resumed={}",
+            spool.info.body_len + spool.info.meta_len as u64,
+            spool.info.meta_len,
+            params.version,
+            params.ec,
+            !args.to.is_empty(),
+            args.lan,
+            only.is_some(),
+        )
+    });
     if args.lan {
         let (listener, offer) = net::listen(args.lan_address.as_deref(), args.lan_port)?;
         // The offer travels as codes like the frames do, so its parts must
@@ -346,6 +374,14 @@ pub fn run(args: SendArgs) -> Result<()> {
             &offer.to_bytes(),
             room,
         )?;
+        log::line("link", || {
+            let kinds: Vec<&str> = offer
+                .addresses
+                .iter()
+                .map(|a| a.parse().map_or("name", net::address_kind))
+                .collect();
+            format!("TCP: offering a connection addresses={}", kinds.join(","))
+        });
         eprintln!(
             "Offering a network connection at {} port {}.",
             offer.addresses.join(", "),
@@ -427,6 +463,9 @@ pub fn run(args: SendArgs) -> Result<()> {
         spool.info.summary
     );
     let rate = symbol_size as f64 * fps * per_tick as f64;
+    log::line("tx", || {
+        format!("showing codesPerPicture={per_tick} fps={fps}")
+    });
     eprintln!(
         "{} on the wire · QR v{}-{:?} · {} B per code · {} codes per pass{}",
         util::human_bytes(spool.info.body_len + spool.info.meta_len as u64),

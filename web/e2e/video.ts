@@ -96,5 +96,10 @@ export async function captureImage(page: Page, testId: string): Promise<Picture>
 /** Turns preview features on, through the page a user would use. */
 export async function enablePreview(page: Page, ...titles: RegExp[]) {
   await page.goto("./#/preview");
-  for (const title of titles) await page.getByRole("checkbox", { name: title }).check();
+  for (const title of titles) {
+    // A feature with several ways of being on has a menu: its first way.
+    const menu = page.getByRole("combobox", { name: title });
+    if (await menu.count()) await menu.selectOption({ index: 1 });
+    else await page.getByRole("checkbox", { name: title }).check();
+  }
 }

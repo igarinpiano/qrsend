@@ -219,6 +219,8 @@
   let linkState = $state<"none" | "answering" | "connected" | "closed">("none");
   let answerUrl = $state("");
   let linkError = $state("");
+  /** Over what the connection runs. */
+  let linkPath = $state<"local" | "internet" | "unknown">("unknown");
   /** Answering the usual offer (with a code on this screen), and taking up an offer made to this device. */
   let lan: LanReceiver | undefined;
   let silent: LanReceiver | undefined;
@@ -347,6 +349,9 @@
         linkPacked.push(message);
         flush();
       },
+      path: (path) => {
+        if (linked === made) linkPath = path;
+      },
       state: (state) => {
         if (state === "closed") {
           // An attempt that never connected changes nothing.
@@ -358,6 +363,7 @@
         if (state === "connected") {
           mark("connected");
           linked = made;
+          linkPath = made.path;
           linkedOffer = made === silent ? silentOffer : lanOffer;
           log("rx", "connected", { by: made === silent ? "offer to this device" : "answer code", lasting: made.lasting });
           for (const other of [lan, silent]) if (other !== made) other?.stop();
@@ -639,8 +645,11 @@
 
 {#if linkState === "connected" && !result}
   <p class="small row" data-testid="link-connected">
-    <span class="badge ok">Local network</span>
-    <span>Receiving directly from the sender, and through the camera as well.</span>
+    <span class="badge ok">{linkPath === "internet" ? "Internet (direct)" : "Local network"}</span>
+    <span>
+      Receiving directly from the sender{linkPath === "internet" ? " through the internet (on mobile data, this counts toward the data plan)" : ""},
+      and through the camera as well.
+    </span>
     <button onclick={disconnect}>Disconnect</button>
   </p>
 {:else if linkError}

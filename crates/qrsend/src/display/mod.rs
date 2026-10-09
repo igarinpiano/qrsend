@@ -13,6 +13,7 @@ use qrsend_core::qr::{self, QUIET, QrMatrix, QrParams};
 use qrsend_core::schedule::Recurring;
 use qrsend_core::sender::Sender;
 
+use crate::log;
 use crate::net::LinkEvent;
 use crate::spool::FileSource;
 use crate::util;
@@ -118,10 +119,14 @@ impl FrameStream {
                 // The connection brings the transfer from its start: the
                 // screen goes on from its end, so both bring something.
                 LinkEvent::Up => {
+                    log::line("tx", || format!("connection up codesShown={}", self.frames));
                     self.link_up = true;
                     self.sender.set_backwards(true);
                 }
                 LinkEvent::Down => {
+                    log::line("tx", || {
+                        format!("connection down codesShown={}", self.frames)
+                    });
                     self.link_up = false;
                     self.sender.set_backwards(false);
                     // What the receiver said it has still holds, but
@@ -129,6 +134,9 @@ impl FrameStream {
                     self.sender.receiver_quiet();
                 }
                 LinkEvent::Feedback(f) => {
+                    if f.complete && !self.finished {
+                        log::line("tx", || "the receiver has everything".into());
+                    }
                     self.finished |= f.complete;
                     self.sender.apply_feedback(f);
                 }
@@ -149,6 +157,15 @@ impl FrameStream {
     pub fn next_text(&mut self) -> Result<String> {
         self.poll();
         self.frames += 1;
+        if log::on() {
+            log::every("tx", std::time::Duration::from_secs(2), "tx", || {
+                format!(
+                    "progress codesShown={} connection={}",
+                    self.frames,
+                    if self.link_up { "up" } else { "none" }
+                )
+            });
+        }
         let extras = self.extras.len() + self.extras_live.len();
         if extras > 0 && !self.link_up {
             // Never at a fixed distance, which would keep the offer to one

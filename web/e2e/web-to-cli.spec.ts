@@ -101,8 +101,14 @@ test("web → CLI: the CLI connects to the sending browser over the network", as
   });
   try {
     const page = await (await browser.newContext({ baseURL, permissions: ["camera"] })).newPage();
+    // What the page logs about the connection, to print if it fails.
+    const said: string[] = [];
+    await page.addInitScript(() => localStorage.setItem("qrsend.debug.log", "1"));
+    page.on("console", (m) => {
+      if (m.text().startsWith("[qrsend]") && / link | tx +(a connection|connection)/.test(m.text())) said.push(m.text());
+    });
     await page.goto("./#/preview");
-    await page.getByRole("checkbox", { name: /Local network boost/ }).check();
+    await page.getByRole("combobox", { name: /Local network boost/ }).selectOption("wifi");
     await page.goto("./#/send");
     await page.getByRole("tab", { name: "Text" }).click();
     // Far more than the pictures taken below can carry.
@@ -119,9 +125,9 @@ test("web → CLI: the CLI connects to the sending browser over the network", as
     if (!received.stderr.includes("Receiving over the network")) {
       // What each side made of the attempt.
       console.log(received.stderr.split("\n").filter((l) => !/ B from |BufferedAmount|data: /.test(l)).slice(0, 60).join("\n"));
-      await page.getByRole("button", { name: "Copy log" }).click().catch(() => {});
-      const log = await page.getByTestId("log-text").inputValue().catch(() => "no log");
-      console.log(log.split("\n").filter((l) => / link /.test(l)).join("\n"));
+      // (What the page said while the CLI ran arrives only now.)
+      await page.waitForTimeout(1000);
+      console.log(said.join("\n"));
     }
     expect(received.stderr).toContain("Receiving over the network");
     expect(received.status).toBe(0);

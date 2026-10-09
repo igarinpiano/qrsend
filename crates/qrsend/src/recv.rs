@@ -24,7 +24,7 @@ use crate::input::{Input, Picture, image_paths};
 use crate::rtc;
 use crate::send::parse_size;
 use crate::store::Store;
-use crate::{decode, identity, net, util};
+use crate::{decode, identity, log, net, util};
 
 #[derive(clap::Args)]
 pub struct RecvArgs {
@@ -77,6 +77,11 @@ pub struct RecvArgs {
     /// Decoder threads (default: all cores)
     #[arg(long)]
     pub threads: Option<usize>,
+    /// Write a diagnostic log to FILE ("-": standard error), to send along
+    /// with a report of a problem. It holds no file names, contents, device
+    /// IDs or network addresses
+    #[arg(long, value_name = "FILE")]
+    pub log: Option<PathBuf>,
 }
 
 /// Who sent a transfer, as far as signatures can tell.
@@ -328,6 +333,7 @@ fn read_text(path: &std::path::Path, tx: crossbeam_channel::Sender<Vec<String>>)
 }
 
 pub fn run(args: RecvArgs) -> Result<()> {
+    log::start(args.log.as_deref(), "recv")?;
     let input = if args.text.is_some() {
         None
     } else if let Some(dev) = &args.camera {
@@ -366,6 +372,24 @@ pub fn run(args: RecvArgs) -> Result<()> {
         let _ = ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst));
     }
 
+    log::line("input", || {
+        let from = if args.camera.is_some() {
+            "camera"
+        } else if args.video.is_some() {
+            "video"
+        } else if !args.images.is_empty() {
+            "images"
+        } else {
+            "text"
+        };
+        format!(
+            "from={from} askedSize={} askedFps={} threads={threads} lan={}",
+            args.camera_size
+                .map_or("default".into(), |(w, h)| format!("{w}x{h}")),
+            args.camera_fps.map_or("default".into(), |f| f.to_string()),
+            !args.no_lan
+        )
+    });
     let (ftx, frx) = bounded::<Picture>(threads * 2);
     let (ttx, trx) = unbounded::<Vec<String>>();
     let producer = match (input, args.text.clone()) {
@@ -381,16 +405,27 @@ pub fn run(args: RecvArgs) -> Result<()> {
     // The size of the pictures being read, once the first one is in.
     let picture = Arc::new(std::sync::OnceLock::<(usize, usize)>::new());
     let colors = Arc::new(decode::ColorWatch::default());
+    // Pictures decoded so far, and the time that took (microseconds, all
+    // threads together).
+    let decoded = Arc::new((
+        std::sync::atomic::AtomicU64::new(0),
+        std::sync::atomic::AtomicU64::new(0),
+    ));
     for _ in 0..threads {
         let (frx, ttx, stop, lattice) = (frx.clone(), ttx.clone(), stop.clone(), lattice.clone());
-        let (picture, colors) = (picture.clone(), colors.clone());
+        let (picture, colors, decoded) = (picture.clone(), colors.clone(), decoded.clone());
         thread::spawn(move || {
             while let Ok(f) = frx.recv() {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
                 let _ = picture.set((f.luma.width, f.luma.height));
+                let began = Instant::now();
                 let texts = decode::detect_picture(&f, &lattice, &colors);
+                decoded.0.fetch_add(1, Ordering::Relaxed);
+                decoded
+                    .1
+                    .fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
                 if ttx.send(texts).is_err() {
                     break;
                 }
@@ -427,6 +462,9 @@ pub fn run(args: RecvArgs) -> Result<()> {
     let mut tries = 0;
     let mut said_size = args.camera.is_none();
     let mut said_foreign_offer = false;
+    // For the log: codes read (frames and others), and what was last logged.
+    let (mut codes_read, mut offers_read) = (0u64, 0u64);
+    let mut logged = (Instant::now(), 0u64, 0u64);
     // When a browser's usual offer was first read.
     let mut usual_offer: Option<Instant> = None;
     let mut said_color = false;
@@ -444,8 +482,10 @@ pub fn run(args: RecvArgs) -> Result<()> {
             recv(if codes_open { &trx } else { &no_codes }) -> texts => match texts {
                 Ok(texts) => {
                     scanned += 1;
+                    codes_read += texts.len() as u64;
                     for text in texts {
                         if text.starts_with(link::PREFIX) {
+                            offers_read += 1;
                             offered.push(text);
                         } else if let Ok(frame) = Frame::from_qr_text(&text) {
                             frames.push(frame);
@@ -464,6 +504,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 Ok(message) => {
                     if link_taken == 0 {
                         say(&pb, "Receiving over the network.");
+                        log::line("link", || "first data over the connection".into());
                     }
                     for record in direct::unpack(&message) {
                         link_taken += 1;
@@ -473,6 +514,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                     }
                 }
                 Err(_) => {
+                    log::line("link", || format!("ended taken={link_taken}"));
                     say(
                         &pb,
                         if link_taken > 0 {
@@ -493,6 +535,14 @@ pub fn run(args: RecvArgs) -> Result<()> {
             for event in rx.push(frame) {
                 match event {
                     Event::Locked(p) => {
+                        log::line("rx", || {
+                            format!(
+                                "transfer found segments={} segmentBytes={} encrypted={}",
+                                p.seg_count + 1,
+                                1u64 << p.seg_shift,
+                                p.flags & qrsend_core::frame::FLAG_ENCRYPTED != 0
+                            )
+                        });
                         let store = Store::open_or_create(p)?;
                         for i in store.done_indices() {
                             rx.mark_done(i);
@@ -593,7 +643,35 @@ pub fn run(args: RecvArgs) -> Result<()> {
         }
         if !said_color && colors.in_color() {
             said_color = true;
+            log::line("camera", || "color codes noticed".into());
             say(&pb, "Color codes: reading red, green and blue apart.");
+        }
+        if log::on() {
+            log::every("progress", Duration::from_secs(2), "rx", || {
+                let (at, pictures_then, codes_then) = logged;
+                let secs = at.elapsed().as_secs_f64().max(0.001);
+                let pictures = decoded.0.load(Ordering::Relaxed);
+                let ms = decoded.1.load(Ordering::Relaxed) as f64 / 1000.0;
+                logged = (Instant::now(), pictures, codes_read);
+                let size = picture
+                    .get()
+                    .map_or("?".into(), |(w, h)| format!("{w}x{h}"));
+                format!(
+                    "progress picture={size} pictures={pictures} picturesPerS={:.1} msPerPicture={:.1} codes={codes_read} \
+                     codesPerS={:.1} color={} offers={offers_read} segments={}/{} link={} linkTaken={link_taken}",
+                    (pictures - pictures_then) as f64 / secs,
+                    if pictures > 0 {
+                        ms / pictures as f64
+                    } else {
+                        0.0
+                    },
+                    (codes_read - codes_then) as f64 / secs,
+                    colors.in_color(),
+                    rx.completed_count(),
+                    rx.segment_total(),
+                    if link.is_some() { "open" } else { "none" },
+                )
+            });
         }
         if !said_size && let Some(&(w, h)) = picture.get() {
             said_size = true;
@@ -622,6 +700,9 @@ pub fn run(args: RecvArgs) -> Result<()> {
             // offers, say so once instead of leaving the person to wonder
             // why the network is not used. (A newer web app also makes an
             // offer that needs no answer, taken up below.)
+            log::every("offer", Duration::from_secs(5), "link", || {
+                format!("offer read kind={} ours={ours}", message.kind)
+            });
             if message.kind == link::KIND_OFFER {
                 usual_offer.get_or_insert_with(Instant::now);
                 continue;
@@ -642,6 +723,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 tries += 1;
                 link_taken = 0;
                 link_reported = 0;
+                log::line("link", || format!("connecting to a browser try={tries}"));
                 say(
                     &pb,
                     "The sender (a browser) offers a network connection; connecting…",
@@ -655,6 +737,17 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 tries += 1;
                 link_taken = 0;
                 link_reported = 0;
+                log::line("link", || {
+                    let kinds: Vec<&str> = offer
+                        .addresses
+                        .iter()
+                        .map(|a| a.parse().map_or("name", net::address_kind))
+                        .collect();
+                    format!(
+                        "connecting by TCP try={tries} addresses={}",
+                        kinds.join(",")
+                    )
+                });
                 say(
                     &pb,
                     format!(
@@ -708,6 +801,14 @@ pub fn run(args: RecvArgs) -> Result<()> {
     };
     s.store.save()?;
     let id = s.store.state.session_id;
+    log::line("rx", || {
+        format!(
+            "input over complete={} segments={}/{} pictures={scanned} codes={codes_read} linkTaken={link_taken}",
+            s.store.is_complete(),
+            rx.completed_count(),
+            rx.segment_total()
+        )
+    });
     if !s.store.is_complete() {
         eprintln!(
             "Received {}/{} segments.",

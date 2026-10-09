@@ -392,6 +392,8 @@ fn a_network_connection_carries_what_the_codes_did_not() {
             "frames",
             "--frames",
             "60",
+            "--log",
+            "send.log",
         ])
         .current_dir(&env.root)
         .env("QRSEND_DATA_DIR", env.path("me/data"))
@@ -428,7 +430,12 @@ fn a_network_connection_carries_what_the_codes_did_not() {
     assert!(!env.path("alone/big.bin").exists());
 
     // One that takes the offer gets everything through the connection.
-    let out = env.run_as("them", &["recv", "--images", "frames", "-o", "out"]);
+    let out = env.run_as(
+        "them",
+        &[
+            "recv", "--images", "frames", "-o", "out", "--log", "recv.log",
+        ],
+    );
     let log = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(out.status.success(), "{log}");
     assert!(log.contains("Receiving over the network."), "{log}");
@@ -437,4 +444,34 @@ fn a_network_connection_carries_what_the_codes_did_not() {
     // And the sender, told so, stops by itself.
     wait_for("The receiver has everything.");
     assert!(sender.wait().unwrap().success());
+
+    // The diagnostic logs tell what happened, and over what kind of path,
+    // without a file name or an address in them.
+    let sent = fs::read_to_string(env.path("send.log")).unwrap();
+    let received = fs::read_to_string(env.path("recv.log")).unwrap();
+    assert!(sent.contains("tx     packed wireBytes="), "{sent}");
+    assert!(
+        sent.contains(
+            "TCP: a receiver connected own=\"v4 loopback\" other=\"v4 loopback\" over=local"
+        ),
+        "{sent}"
+    );
+    assert!(sent.contains("the receiver has everything"), "{sent}");
+    assert!(received.contains("input  from=images"), "{received}");
+    assert!(
+        received.contains("rx     transfer found segments=4"),
+        "{received}"
+    );
+    assert!(
+        received.contains("TCP: connected own=\"v4 loopback\""),
+        "{received}"
+    );
+    assert!(received.contains("input over complete=true"), "{received}");
+    for log in [&sent, &received] {
+        assert!(log.starts_with("QRSend CLI "), "{log}");
+        assert!(
+            !log.contains("big.bin") && !log.contains("127.0.0.1"),
+            "{log}"
+        );
+    }
 }

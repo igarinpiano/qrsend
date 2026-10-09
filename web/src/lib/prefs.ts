@@ -10,6 +10,8 @@ export interface PreviewFeature {
   summary: string;
   /** How to use it, step by step. */
   steps: string[];
+  /** Instead of on and off: the ways it can be on, to choose from (the first is what "on" used to mean). */
+  choices?: { value: string; label: string }[];
 }
 
 export const PREVIEW_FEATURES = [
@@ -54,11 +56,15 @@ export const PREVIEW_FEATURES = [
     title: "Local network boost",
     side: "sending",
     summary:
-      "Once each device has seen the other's screen, the two also connect directly over the local network (Wi-Fi or cable), which is far faster than a camera. Both ways are then used at once: the connection carries the transfer from its start while the screen carries it from its end, and the receiver keeps whatever arrives first. The connection is arranged through the codes themselves: no server, no account, and nothing outside the local network is contacted. The receiver connects by itself when it sees the offer (and can end the connection). If the connection fails or drops, the screen simply carries on.",
+      "Once each device has seen the other's screen, the two also connect directly, which is far faster than a camera. Both ways are then used at once: the connection carries the transfer from its start while the screen carries it from its end, and the receiver keeps whatever arrives first. The connection is arranged through the codes themselves: no server and no account. The receiver connects by itself when it sees the offer (and can end the connection). If the connection fails or drops, the screen simply carries on. With “Wi-Fi”, the devices connect only when they are on the same network (one Wi-Fi, a cable, a phone's hotspot). With “Wi-Fi & Cellular Data”, they also connect through the internet where they can: two phones on mobile data usually can, and what is sent then counts toward both data plans.",
     steps: [
-      "Both devices must be on the same network, and — for a moment — this device's camera must see the receiver's screen.",
-      "Start sending as usual. The receiver shows a code as soon as it has seen the offer; hold it up to this device's camera.",
+      "Choose “Wi-Fi” to connect only within one network, or “Wi-Fi & Cellular Data” to connect through the internet as well.",
+      "For a moment, this device's camera must see the receiver's screen: start sending as usual, and the receiver shows a code as soon as it has seen the offer. Hold it up to this device's camera.",
       "Once connected, the devices no longer need to see each other (though it helps: the screen keeps contributing).",
+    ],
+    choices: [
+      { value: "wifi", label: "Wi-Fi" },
+      { value: "any", label: "Wi-Fi & Cellular Data" },
     ],
   },
   {
@@ -120,17 +126,35 @@ export type FeatureId = (typeof PREVIEW_FEATURES)[number]["id"];
 
 const key = (id: FeatureId) => `qrsend.preview.${id}`;
 
-export function featureOn(id: FeatureId): boolean {
+/** What is stored for a feature: nothing when off, "1" when on, or the value of the way chosen. */
+function stored(id: FeatureId): string {
   try {
-    return localStorage.getItem(key(id)) === "1";
+    return localStorage.getItem(key(id)) ?? "";
   } catch {
-    return false;
+    return "";
   }
 }
 
-export function setFeature(id: FeatureId, on: boolean): void {
+export function featureOn(id: FeatureId): boolean {
+  return stored(id) !== "";
+}
+
+/**
+ * The way a feature with several ways is on ("" when off). A feature that was simply on before it got its ways is on
+ * in the first of them.
+ */
+export function featureChoice(id: FeatureId): string {
+  const value = stored(id);
+  const choices = (PREVIEW_FEATURES as readonly PreviewFeature[]).find((f) => f.id === id)?.choices ?? [];
+  if (value === "" || choices.length === 0) return value === "" ? "" : "1";
+  return choices.some((c) => c.value === value) ? value : choices[0].value;
+}
+
+/** `on`: true or false, or the value of the way chosen ("" for off). */
+export function setFeature(id: FeatureId, on: boolean | string): void {
+  const value = on === true ? "1" : on === false ? "" : on;
   try {
-    if (on) localStorage.setItem(key(id), "1");
+    if (value) localStorage.setItem(key(id), value);
     else localStorage.removeItem(key(id));
   } catch {
     /* storage unavailable: nothing to remember */

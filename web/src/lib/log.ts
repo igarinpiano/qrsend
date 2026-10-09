@@ -31,6 +31,15 @@ function show(value: Value): string {
 }
 
 /** Records one event. `area` says which part speaks (rx, tx, camera, link…). */
+/** `localStorage["qrsend.debug.log"] = "1"`: every line also goes to the console as it is written (for tests). */
+const mirrored = (() => {
+  try {
+    return localStorage.getItem("qrsend.debug.log") === "1";
+  } catch {
+    return false;
+  }
+})();
+
 export function log(area: string, what: string, data: Record<string, Value> = {}): void {
   const at = ((performance.now() - began) / 1000).toFixed(2).padStart(8);
   const details = Object.entries(data)
@@ -38,6 +47,7 @@ export function log(area: string, what: string, data: Record<string, Value> = {}
     .map(([k, v]) => `${k}=${show(v)}`)
     .join(" ");
   lines.push(`${at} ${area.padEnd(6)} ${what}${details ? `  ${details}` : ""}`);
+  if (mirrored) console.debug(`[qrsend] ${lines[lines.length - 1]}`);
   if (lines.length > MAX_LINES) {
     lines.splice(KEEP_FIRST, 1);
     dropped++;
@@ -60,7 +70,9 @@ function header(): string[] {
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i) ?? "";
-      if (key.startsWith("qrsend.preview.") && localStorage.getItem(key) === "1") features.push(key.slice(15));
+      // (On, or the way it is on: "lan=wifi".)
+      const value = key.startsWith("qrsend.preview.") ? localStorage.getItem(key) : null;
+      if (value) features.push(value === "1" ? key.slice(15) : `${key.slice(15)}=${value}`);
     }
   } catch {
     /* no storage */

@@ -8,6 +8,7 @@
 // in the other direction. It is one more way for the data to travel, nothing
 // else: if it never comes up or breaks, the screen and the camera carry on.
 import { linkCertificateFingerprint, linkParse, linkSplit, ready } from "./core";
+import { addressKind, onOneNetwork, pathBetween, type Path } from "./addresses";
 import { log } from "./log";
 
 /** What kinds of addresses a description holds (the addresses themselves are nobody's business). */
@@ -17,32 +18,10 @@ function kinds(candidates: { address: string }[]): string {
 }
 
 /**
- * What kind of address this is, which says over what the connection runs (the address itself is nobody's business).
- * A connection is made between whatever addresses the two devices have: on one Wi-Fi those are private ones, but two
- * phones on mobile data have addresses of the internet at large (IPv6), and connect through it just the same.
+ * Between which kinds of addresses the connection came about, which says over what it runs: one network, or the
+ * internet. Logged (the kinds only), with how long a packet takes there and back.
  */
-export function addressKind(address: string | undefined): string {
-  if (!address) return "hidden";
-  if (address.endsWith(".local")) return "name";
-  if (address.includes(":")) {
-    const a = address.toLowerCase();
-    if (a === "::1") return "v6 loopback";
-    if (/^fe[89ab]/.test(a)) return "v6 link-local";
-    if (/^f[cd]/.test(a)) return "v6 private";
-    if (/^[23]/.test(a)) return "v6 global";
-    return "v6 other";
-  }
-  const [x, y] = address.split(".").map(Number);
-  if (x === 127) return "v4 loopback";
-  if (x === 10 || (x === 172 && y >= 16 && y <= 31) || (x === 192 && y === 168)) return "v4 private";
-  if (x === 169 && y === 254) return "v4 link-local";
-  if (x === 100 && y >= 64 && y <= 127) return "v4 carrier";
-  if (x === 192 && y === 0) return "v4 transition";
-  return "v4 public";
-}
-
-/** Logs between which kinds of addresses the connection came about, and how long a packet takes there and back. */
-async function logPath(pc: RTCPeerConnection, who: string): Promise<void> {
+async function pathOf(pc: RTCPeerConnection, who: string): Promise<Path> {
   try {
     const stats = await pc.getStats();
     const all: Record<string, unknown>[] = [];
@@ -53,17 +32,19 @@ async function logPath(pc: RTCPeerConnection, who: string): Promise<void> {
       pairs.find((s) => s.id === transport?.selectedCandidatePairId) ??
       pairs.find((s) => s.selected) ??
       pairs.find((s) => s.nominated && s.state === "succeeded");
-    if (!pair) return;
-    const end = (id: unknown) => {
+    if (!pair) return "unknown";
+    const address = (id: unknown) => {
       const c = all.find((s) => s.id === id);
-      if (!c) return "unknown";
-      const kind = addressKind((c.address ?? c.ip) as string | undefined);
-      return [kind, c.candidateType, c.networkType].filter(Boolean).join(" ");
+      return { address: (c?.address ?? c?.ip) as string | undefined, of: c };
     };
+    const [own, other] = [address(pair.localCandidateId), address(pair.remoteCandidateId)];
+    const said = (end: typeof own) => [addressKind(end.address), end.of?.candidateType, end.of?.networkType].filter(Boolean).join(" ");
+    const path = pathBetween(own.address, other.address);
     const rtt = typeof pair.currentRoundTripTime === "number" ? Math.round(pair.currentRoundTripTime * 1000) : undefined;
-    log("link", `${who}: path chosen`, { own: end(pair.localCandidateId), other: end(pair.remoteCandidateId), thereAndBackMs: rtt });
+    log("link", `${who}: path chosen`, { own: said(own), other: said(other), over: path, thereAndBackMs: rtt });
+    return path;
   } catch {
-    /* nothing to log */
+    return "unknown";
   }
 }
 
@@ -73,10 +54,7 @@ function watch(pc: RTCPeerConnection, who: string): void {
   const say = (what: string, state: string) => log("link", `${who}: ${what} ${state}`, { s: (performance.now() - since) / 1000 });
   pc.addEventListener("icegatheringstatechange", () => say("looking for addresses:", pc.iceGatheringState));
   pc.addEventListener("iceconnectionstatechange", () => say("path:", pc.iceConnectionState));
-  pc.addEventListener("connectionstatechange", () => {
-    say("connection:", pc.connectionState);
-    if (pc.connectionState === "connected") void logPath(pc, who);
-  });
+  pc.addEventListener("connectionstatechange", () => say("connection:", pc.connectionState));
   pc.addEventListener("icecandidateerror", (e) => say("address error:", String((e as RTCPeerConnectionIceErrorEvent).errorCode)));
 }
 
@@ -100,6 +78,12 @@ export const KIND_SEEDED_OFFER = 6;
 const PROOF = "K";
 /** In an offer: the sender remembers devices it trusts, to connect without an answer next time. */
 const FLAG_REMEMBERS = 1;
+/**
+ * In an offer: connect only if both devices are on one network (the sender's choice "Wi-Fi"). The receiver then uses
+ * only addresses that can be on one network with its own, on both sides (see `addresses.ts`), and does not answer when
+ * there are none.
+ */
+const FLAG_ONE_NETWORK = 2;
 const FEEDBACK_PREFIX = "QSF1-";
 /** The receiver's first line: it takes messages of packed binary records. */
 const HELLO_BINARY = "B1";
@@ -373,6 +357,8 @@ export interface SenderHooks {
   offerKnown?(payload: Uint8Array | null, id: number): void;
   /** Codes of the offer to a receiver that shows no answer (`null`: none any more). */
   offerSeeded?(payload: Uint8Array | null, id: number): void;
+  /** A connection came about through the internet although only one network is allowed: it was not used. */
+  refused?(): void;
   /** The receiver says who it is (see `introduction`); `certificate` is the fingerprint it connected with. */
   introduced?(introduction: string, certificate: Uint8Array): void;
 }
@@ -383,6 +369,8 @@ export interface SenderOptions {
   remembers?: boolean;
   /** Certificate fingerprint of a device connected to before: it is offered a connection that needs no answer. */
   known?: Uint8Array;
+  /** Connect only within one network, never through the internet (which may mean mobile data). */
+  oneNetwork?: boolean;
 }
 
 export class LanSender {
@@ -415,6 +403,12 @@ export class LanSender {
   /** The receiver takes binary messages (it said so). */
   private binary = false;
   private stopped = false;
+  /** A connection through the internet came about where only one network is allowed: no more offers. */
+  private refusing = false;
+  /** Over what the connection in use runs. */
+  path: Path = "unknown";
+  /** This device's addresses as offered (to tell which of the receiver's can be on one network with them). */
+  private own: { address: string; port: number }[] = [];
   private wake?: () => void;
 
   constructor(
@@ -434,7 +428,7 @@ export class LanSender {
    */
   async start(): Promise<void> {
     this.close();
-    if (this.stopped) return;
+    if (this.stopped || this.refusing) return;
     this.id = (this.id + 1) % 256;
     const id = this.id;
     const attempt = (peer: () => Uint8Array | undefined, who: string) => {
@@ -442,8 +436,28 @@ export class LanSender {
       watch(pc, who);
       const channel = pc.createDataChannel("qrsend");
       channel.bufferedAmountLowThreshold = BUFFER_HIGH / 4;
-      channel.onopen = () => {
-        if (this.channel !== channel && this.knownChannel !== channel && this.seededChannel !== channel) return;
+      channel.onopen = async () => {
+        const ours = () => this.channel === channel || this.knownChannel === channel || this.seededChannel === channel;
+        if (!ours()) return;
+        // (Asked anew of every receiver. Before the wait below: the
+        // receiver's greeting may well arrive during it.)
+        this.binary = false;
+        const path = await pathOf(pc, who);
+        if (!ours()) return;
+        if (this.options.oneNetwork && path === "internet") {
+          // (The receiver keeps to one network by itself when told so; one
+          // that does not know how is stopped here.)
+          log("link", `${who}: through the internet, which is not allowed: not used`);
+          this.refusing = true;
+          this.hooks.offer(null, id);
+          this.hooks.offerKnown?.(null, id);
+          this.hooks.offerSeeded?.(null, id);
+          this.close();
+          this.hooks.refused?.();
+          this.hooks.state("closed");
+          return;
+        }
+        this.path = path;
         const all = [this.channel, this.knownChannel, this.seededChannel, this.pc, this.knownPc, this.seededPc];
         const others = all.filter((x) => x !== channel && x !== pc);
         this.pc = pc;
@@ -494,8 +508,10 @@ export class LanSender {
     this.pc = pc;
     this.channel = channel;
     await pc.setLocalDescription(await pc.createOffer());
-    const payload = await described(pc, this.options.remembers ? FLAG_REMEMBERS : 0);
+    const scope = this.options.oneNetwork ? FLAG_ONE_NETWORK : 0;
+    const payload = await described(pc, (this.options.remembers ? FLAG_REMEMBERS : 0) | scope);
     if (this.pc !== pc) return;
+    this.own = unpack(payload).candidates;
     this.hooks.offer(payload, id);
     this.hooks.state("offering");
 
@@ -507,7 +523,7 @@ export class LanSender {
       this.knownPc = second.pc;
       this.knownChannel = second.channel;
       await second.pc.setLocalDescription(await second.pc.createOffer());
-      const offer = new Uint8Array([...(await knownTag(known)), ...(await described(second.pc))]);
+      const offer = new Uint8Array([...(await knownTag(known)), ...(await described(second.pc, scope))]);
       const { ufrag, pwd } = await answerCredentials(offer);
       await second.pc.setRemoteDescription({
         type: "answer",
@@ -538,7 +554,8 @@ export class LanSender {
       this.seededPc = third.pc;
       this.seededChannel = third.channel;
       await third.pc.setLocalDescription(await third.pc.createOffer());
-      const offer = new Uint8Array([...seed, ...(await described(third.pc))]);
+      const scope = this.options.oneNetwork ? FLAG_ONE_NETWORK : 0;
+      const offer = new Uint8Array([...seed, ...(await described(third.pc, scope))]);
       const { ufrag, pwd } = await answerCredentials(offer);
       await third.pc.setRemoteDescription({ type: "answer", sdp: buildSdp({ ufrag, pwd, fingerprint, candidates: [] }, "answer") });
       if (this.seededPc !== third.pc) return;
@@ -560,6 +577,11 @@ export class LanSender {
     if (pc.signalingState !== "have-local-offer") return;
     const description = unpack(msg.payload);
     log("link", "answer read", { addresses: kinds(description.candidates) });
+    if (this.options.oneNetwork) {
+      // Nothing is sent toward an address that cannot be on this network.
+      description.candidates = onOneNetwork(description.candidates, this.own);
+      log("link", "addresses on one network with this device", { addresses: kinds(description.candidates) });
+    }
     this.answered = description.fingerprint;
     await pc.setRemoteDescription({ type: "answer", sdp: buildSdp(description, "answer") });
   }
@@ -636,8 +658,7 @@ export class LanSender {
 
   /** Sends codes as fast as the receiver takes them in. */
   private async pump(channel: RTCDataChannel): Promise<void> {
-    // (Asked anew of every receiver; kept after the end for the measurements.)
-    this.binary = false;
+    // (Kept after the end for the measurements.)
     this.sent = 0;
     this.acked = 0;
     this.rate = RATE_START;
@@ -769,6 +790,8 @@ export interface ReceiverHooks {
   /** A message of packed binary records that arrived through the connection. */
   packed(message: ArrayBuffer): void;
   state(state: "connected" | "closed"): void;
+  /** Over what the connection runs: one network, or the internet (known a moment after it is up). */
+  path?(path: Path): void;
 }
 
 export class LanReceiver {
@@ -778,6 +801,8 @@ export class LanReceiver {
   lasting = false;
   /** What to send first on a connection made from an open offer. */
   private proof?: string;
+  /** Over what the connection runs (known a moment after it is up). */
+  path: Path = "unknown";
 
   constructor(private hooks: ReceiverHooks) {}
 
@@ -803,13 +828,39 @@ export class LanReceiver {
   async accept(offer: LinkMessage, lasting?: () => Promise<RTCCertificate | undefined>): Promise<string> {
     const description = unpack(offer.payload);
     const certificate = (description.flags ?? 0) & FLAG_REMEMBERS ? await lasting?.() : undefined;
-    log("link", "offer taken up", { id: offer.id, addresses: kinds(description.candidates), senderRemembers: !!description.flags });
+    log("link", "offer taken up", { id: offer.id, addresses: kinds(description.candidates), senderRemembers: !!((description.flags ?? 0) & FLAG_REMEMBERS) });
     const pc = this.open(certificate);
-    await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(description, "offer") });
-    await pc.setLocalDescription(await pc.createAnswer());
-    const payload = await described(pc);
-    const codes = linkSplit(offer.session, KIND_ANSWER, offer.id, payload, 2000) as string[];
+    const payload = await this.take(pc, description, true);
+    const codes = linkSplit(offer.session, KIND_ANSWER, offer.id, payload!, 2000) as string[];
     return codes[0];
+  }
+
+  /**
+   * Sets the sender's offer and this side's answer (`munge`: what to change in it first). Returns this side's
+   * description when it is `wanted` or had to be waited for.
+   *
+   * An offer for one network only (see `FLAG_ONE_NETWORK`) is taken up with the addresses that can be on one network
+   * with this device's, and with those of this device that can be on one with the sender's: nothing is sent toward an
+   * address elsewhere, and none of this device's is told. That needs this device's addresses first, so the sender's
+   * are handed over afterwards. With no such address there is no connection to be had.
+   */
+  private async take(pc: RTCPeerConnection, description: Description, wanted: boolean, munge?: (sdp: string) => string): Promise<Uint8Array | undefined> {
+    const oneNetwork = ((description.flags ?? 0) & FLAG_ONE_NETWORK) !== 0;
+    const theirs = description.candidates;
+    await pc.setRemoteDescription({ type: "offer", sdp: buildSdp({ ...description, candidates: oneNetwork ? [] : theirs }, "offer") });
+    const answer = await pc.createAnswer();
+    const sdp = munge ? munge(answer.sdp ?? "") : (answer.sdp ?? "");
+    await pc.setLocalDescription({ type: "answer", sdp });
+    if (!oneNetwork) return wanted ? described(pc) : undefined;
+    const mine = unpack(await described(pc));
+    const reachable = onOneNetwork(theirs, mine.candidates);
+    const told = onOneNetwork(mine.candidates, theirs);
+    log("link", "the sender connects within one network only", { theirs: kinds(reachable), own: kinds(told) });
+    if (reachable.length === 0 || told.length === 0) throw new Error("the sender connects only on its own network, and this device is not on it");
+    for (const [i, c] of reachable.entries()) {
+      await pc.addIceCandidate({ candidate: `candidate:${i + 1} 1 udp ${2122260223 - i} ${c.address} ${c.port} typ host generation 0`, sdpMid: "0", sdpMLineIndex: 0 });
+    }
+    return pack({ ...mine, candidates: told, flags: 0 });
   }
 
   /**
@@ -819,11 +870,10 @@ export class LanReceiver {
    */
   async acceptKnown(offer: LinkMessage, certificate: RTCCertificate): Promise<void> {
     const pc = this.open(certificate);
-    await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(unpack(offer.payload.subarray(8)), "offer") });
     const { ufrag, pwd } = await answerCredentials(offer.payload);
-    const answer = await pc.createAnswer();
-    const sdp = (answer.sdp ?? "").replace(/a=ice-ufrag:.*/g, `a=ice-ufrag:${ufrag}`).replace(/a=ice-pwd:.*/g, `a=ice-pwd:${pwd}`);
-    await pc.setLocalDescription({ type: "answer", sdp });
+    await this.take(pc, unpack(offer.payload.subarray(8)), false, (sdp) =>
+      sdp.replace(/a=ice-ufrag:.*/g, `a=ice-ufrag:${ufrag}`).replace(/a=ice-pwd:.*/g, `a=ice-pwd:${pwd}`),
+    );
   }
 
   /**
@@ -836,13 +886,14 @@ export class LanReceiver {
     const description = unpack(offer.payload.subarray(16));
     log("link", "open offer taken up", { id: offer.id, addresses: kinds(description.candidates) });
     const pc = this.open();
-    await pc.setRemoteDescription({ type: "offer", sdp: buildSdp(description, "offer") });
     const { ufrag, pwd } = await answerCredentials(offer.payload);
-    const answer = await pc.createAnswer();
-    const sdp = (answer.sdp ?? "").replace(/a=ice-ufrag:.*/g, `a=ice-ufrag:${ufrag}`).replace(/a=ice-pwd:.*/g, `a=ice-pwd:${pwd}`);
-    const own = parseSdp(sdp).fingerprint;
-    if (own.length !== 32) throw new Error("this browser gave no usable connection details");
-    await pc.setLocalDescription({ type: "answer", sdp });
+    let own: Uint8Array = new Uint8Array();
+    await this.take(pc, description, false, (sdp) => {
+      const changed = sdp.replace(/a=ice-ufrag:.*/g, `a=ice-ufrag:${ufrag}`).replace(/a=ice-pwd:.*/g, `a=ice-pwd:${pwd}`);
+      own = parseSdp(changed).fingerprint;
+      if (own.length !== 32) throw new Error("this browser gave no usable connection details");
+      return changed;
+    });
     this.proof = PROOF + hex(await sha256("qrsend open link\n", new Uint8Array([...key, ...own])));
   }
 
@@ -864,6 +915,10 @@ export class LanReceiver {
         if (greeted) return;
         greeted = true;
         log("link", "answer: channel open");
+        void pathOf(pc, "answer").then((path) => {
+          this.path = path;
+          this.hooks.path?.(path);
+        });
         this.hooks.state("connected");
         if (this.proof) channel.send(this.proof);
         channel.send(HELLO_BINARY);

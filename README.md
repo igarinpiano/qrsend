@@ -81,6 +81,12 @@ qrsend recv --video recording.mp4 -o ~/Downloads   # needs ffmpeg for non-.y4m v
 qrsend recv --images frames/
 ```
 
+When something goes wrong, `--log FILE` (on `send` and `recv`) writes down what
+happened when: the pictures and codes read per second, the transfer found, the
+connections tried and over what kind of path they ran. It holds no file names,
+contents, device IDs or network addresses, so it can be passed on as it is. The
+web app has the same under "Copy log".
+
 A webcam often hands out small pictures unless asked (640×480 is a common
 default on Linux), which is too little for dense codes: `recv` prints the size
 it gets, and `--camera-size` / `--camera-fps` ask for more. The web app's
@@ -188,11 +194,15 @@ loaded (PWA).
     without a camera that sees the receiver's screen. The receiver is asked
     every time before it makes a sound.
   - *Local network boost*: once each device has seen the other's screen, they
-    also connect directly over the local network (no server, and nothing
-    outside the network is contacted). Both ways are
+    also connect directly (no server is involved). Both ways are
     then used at once — megabytes per second instead of kilobytes — and the
     screen carries on alone if the connection drops. The sender finds the
-    pace the connection can take as it goes.
+    pace the connection can take as it goes. It is a
+    choice of three: *Off*, *Wi-Fi* (connect only when both devices are on one
+    network) and *Wi-Fi & Cellular Data* (also through the internet where the
+    devices can reach each other, as two phones on mobile data usually can;
+    that counts toward both data plans). Which of the two a connection is, the
+    devices tell from their addresses.
   - *Remember trusted devices*: a device you trust that has connected over
     the local network once is connected to directly from then on — its
     screen no longer has to be shown to the sender's camera.

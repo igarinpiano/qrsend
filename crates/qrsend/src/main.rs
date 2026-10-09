@@ -8,6 +8,7 @@ mod extract;
 mod identity;
 mod inbox;
 mod input;
+mod log;
 mod net;
 mod paths;
 mod recv;

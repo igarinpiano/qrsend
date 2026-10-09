@@ -1,11 +1,13 @@
 <script lang="ts">
-  import { PREVIEW_FEATURES, featureOn, setFeature, type FeatureId } from "../lib/prefs";
+  import { PREVIEW_FEATURES, featureChoice, setFeature, type FeatureId, type PreviewFeature } from "../lib/prefs";
 
-  let on = $state(Object.fromEntries(PREVIEW_FEATURES.map((f) => [f.id, featureOn(f.id)])) as Record<FeatureId, boolean>);
+  const features: readonly PreviewFeature[] = PREVIEW_FEATURES;
+  /** Per feature: "" when off, otherwise the way it is on. */
+  let chosen = $state(Object.fromEntries(features.map((f) => [f.id, featureChoice(f.id as FeatureId)])) as Record<string, string>);
 
-  function toggle(id: FeatureId, value: boolean) {
-    on[id] = value;
-    setFeature(id, value);
+  function choose(id: string, value: string) {
+    chosen[id] = value;
+    setFeature(id as FeatureId, value);
   }
 </script>
 
@@ -15,16 +17,32 @@
   off, QRSend works exactly as before. The choice is remembered in this browser.
 </p>
 
-{#each PREVIEW_FEATURES as feature (feature.id)}
+{#each features as feature (feature.id)}
   <div class="card stack">
-    <label class="feature">
-      <input type="checkbox" checked={on[feature.id]} onchange={(e) => toggle(feature.id, e.currentTarget.checked)} />
-      <span>
-        <strong>{feature.title}</strong>
-        <span class="badge">{on[feature.id] ? "On" : "Off"}</span>
-        <span class="small muted">when {feature.side}</span>
-      </span>
-    </label>
+    {#if feature.choices}
+      <!-- The system's own menu: it is what people know on their device. -->
+      <label class="feature">
+        <select aria-label={feature.title} value={chosen[feature.id]} onchange={(e) => choose(feature.id, e.currentTarget.value)}>
+          <option value="">Off</option>
+          {#each feature.choices as choice (choice.value)}
+            <option value={choice.value}>{choice.label}</option>
+          {/each}
+        </select>
+        <span>
+          <strong>{feature.title}</strong>
+          <span class="small muted">when {feature.side}</span>
+        </span>
+      </label>
+    {:else}
+      <label class="feature">
+        <input type="checkbox" checked={chosen[feature.id] !== ""} onchange={(e) => choose(feature.id, e.currentTarget.checked ? "1" : "")} />
+        <span>
+          <strong>{feature.title}</strong>
+          <span class="badge">{chosen[feature.id] ? "On" : "Off"}</span>
+          <span class="small muted">when {feature.side}</span>
+        </span>
+      </label>
+    {/if}
     <p class="small">{feature.summary}</p>
     <ol class="small muted">
       {#each feature.steps as step}
@@ -47,6 +65,10 @@
     flex: none;
     width: 1.2em;
     height: 1.2em;
+  }
+  .feature select {
+    flex: none;
+    font: inherit;
   }
   ol {
     margin: 0;
