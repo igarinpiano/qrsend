@@ -49,6 +49,8 @@ web/                 Svelte 5 + Vite + TS の PWA
   src/views/                Home / Send(+Player) / Receive(+Camera, Result) / Devices / Inbox / Preview（Feature preview）
   e2e/                      Playwright。CLI が書いた Y4M を Chrome の仮想カメラに流す相互運用テスト（暗号化・多セグメント・ZIP を含む）。bridge.ts は 2 つのページを「互いのカメラ」として生でつなぐ（BroadcastChannel で画像を送り、getUserMedia を canvas.captureStream に差し替える）。相手の反応を見て変わる機能（自動調節、案内）はこれで試す
 npm/                 npm 配布用: assemble.py（機種別パッケージの対応表）と launcher.js
+fuzz/                cargo-fuzz のターゲット（frame / codes / meta / payload / receiver / sound。他人から届くものを読む所すべて）と seeds/（正しい入力を書き出す種の生成器）。メインのワークスペースには入れていない（nightly が要る）
+deny.toml            cargo-deny の設定（RustSec の勧告・ライセンス・取得元）
 ```
 
 ## コマンド
@@ -68,6 +70,15 @@ npm run wasm        # crates/qrsend-wasm をビルドし src/wasm/ に bindings 
 npm run dev         # 開発サーバ
 npm run check && npm run build
 cargo build --release -p qrsend && npx playwright test   # e2e（CLI バイナリを使う。動画ファイル受信のテストは ffmpeg が無いと skip）
+```
+
+セキュリティ（`.github/workflows/security.yml` と同じことを手元で）:
+
+```bash
+cargo deny check                      # 依存の脆弱性勧告・ライセンス・取得元（cargo install cargo-deny）
+zizmor .github                        # ワークフローの静的解析（cargo install zizmor）
+(cd web && npm audit && npm audit signatures)
+cd fuzz && cargo run -p qrsend-fuzz-seeds -- corpus && cargo +nightly fuzz run meta -- -max_total_time=60
 ```
 
 手動 E2E（実カメラ無しで往復できる）:
@@ -164,10 +175,22 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 - **e2e でブラウザを起動するときは必ず `--use-fake-device-for-media-stream` を付ける**（`e2e/video.ts` の `fakeCamera`）。`--use-fake-ui-for-media-stream` だけだと権限が自動で通り、受信ページが開発機の本物のカメラを開いてしまう。
 - Two-way transfer（逆方向チャネル、0.1.2〜、Web のみ、preview）: 送信側がオンだと SendSession がデータの合間に notice（QSC1）を混ぜる。受信側はそれを見たセッションに限りフィードバック QR を表示し（0.3 秒以上の間隔で描き直す）、送信プレーヤーが自分のカメラ（前面優先）で読んで `engine.sendFeedback` に渡す。途切れたら 2 秒で `sendReceiverSilent(false)`（窓の完成待ちをやめる）、10 秒で `sendReceiverSilent(true)`（全送信に戻る）。`COMPLETE` は展開まで終わってから立てる。フィードバックは認証なしの助言で、到達の証明には使わない。順方向は逆方向に依存させない（PROTOCOL §11.3）。e2e（`two-way.spec.ts`）は 2 つのブラウザの仮想カメラを Y4M でつないで往復させる。
 
+- **セキュリティ上の約束**（2026-10-10、ユーザーの指示で全体を監査して直した。0.1.6）:
+  - 他人から届く数値（フィードバック・resume code の範囲、manifest のサイズの合計など）は `checked_add` で足す。debug ビルドでは panic、release では桁あふれで検査をすり抜けていた。fuzz（debug assertions 付き）が見張る。
+  - 端末に出す名前（ファイル名・送信者名・デバイス名・offer のアドレス）は `util::printable`、受信したテキストは `util::printable_text` を通す（端末が実行してしまう制御文字と表示順を変える文字をエスケープ。`--stdout` とパイプ先には生のまま）。新しく表示を足すときも通す。ログには名前そのものを書かない（従来どおり）。
+  - Meta は検査（復号・署名・manifest・転送の形）に通してから保存する。失敗したら捨てて集め直す（CLI は `Session::on_meta` の内側の Err、Web は `openMeta` の "damaged"。wasm の `openMeta` は「開けた: null／壊れている: 理由の文字列／この端末では無理: 例外」）。以前は保存してから失敗していたので、その転送を開くたびに失敗した（以前の版が保存したものは開くときに捨てる）。
+  - CLI の inbox・送信キャッシュ・設定の置き場は `paths::create_private`（0700。既にあるものは自分の物で誰でも書ける場所でないこと、上の階層も /tmp のような sticky 以外の誰でも書ける場所でないことを確かめる）、秘密鍵は `paths::write_private`（最初から 0600。以前は書いてから chmod していた）。ホームが無いときの置き場は /tmp/qrsend-<uid>（以前は全員共通の /tmp/qrsend）。
+  - TCP 直結（`net.rs`）: 鍵を知らない相手（同じネットワークの誰でも）が送信側を待たせられないよう、ハンドシェイクは接続ごとのスレッドで、全体に 5 秒の制限（`Deadline`）、最初のレコードは 64 バイトまで。以前は読み出しごとの制限だけで、1 バイトずつ送る相手が唯一の受け口を塞げた（4 MiB の確保も）。
+  - Y4M の大きさは 16384 まで（ヘッダの値をそのまま掛け算していた）。
+  - npm の launcher は子を待つ（`spawn`）: Ctrl-C でも先に終わらず、`qrsend recv` の終了コード 2 と resume code の表示を待つ。シグナルは子に渡し、子がシグナルで終わったら同じシグナルで終わる。
+  - ワークフロー: アクションはすべてコミットの SHA に固定（コメントに版。Dependabot が更新する）、checkout は `persist-credentials: false`、権限は最小（ci は contents: read、Pages の書き込みは deploy ジョブだけ）、matrix の値は env 経由で run に渡す。zizmor が見張る。
+- **セキュリティ CI**（`security.yml`、push・PR・毎週月曜）: cargo-deny（`deny.toml`。勧告を無視するときは理由つきで書く。いまは minifb 経由の `instant` の「メンテ終了」だけ）、npm audit（開発用の依存も。ビルドに使うので）と `npm audit signatures`、CodeQL（Rust・TypeScript・Actions、security-extended）、zizmor（ワークフロー）、fuzz（6 ターゲット、PR では各 2 分、毎週は 20 分。落ちたら入力を artifact に残す）。Dependabot（`.github/dependabot.yml`）は cargo・npm・Actions を週 1 回まとめて、公開から 7 日待って提案する（乗っ取られたパッケージ対策）。Dependabot security updates はリポジトリの設定でオンにする。
+  - fuzz を手元で: nightly と cargo-fuzz（`cargo install cargo-fuzz`）。CLI だけにある読み取り（rtc の offer、mDNS の応答、Y4M）は fuzz ターゲットから使えないので、単体テストで壊れた入力を試している。
+
 ## リリース
 
 - パッケージ: crates.io の `qrsend`（CLI）/ `qrsend-core`、npm の `qrsend-cli`（launcher。コマンド名は `qrsend`。@ なしの `qrsend` は send / resend に似ているとして npm に拒否された）+ 機種別パッケージ（`npm/assemble.py` の TARGETS）。機種別は最初の 8 種だけ `qrsend-bin-<platform>`、0.1.1 以降に追加するものはすべて `@qrsend/cli-bin-<platform>`（npm の組織 `qrsend` を使う。@ なしの新しい名前は spam 判定・類似名判定に引っかかりやすい）。launcher は musl と ARMv6/ARMv7 を実行時に選ぶ。`qrsend-wasm` は publish しない。
-- 公開状況（2026-10-09）: **0.1.5 を公開済み**（GitHub Release は 30 個の成果物、crates.io の 2 つ、npm の `qrsend-cli` と機種別 24 個。0.1.3・0.1.4 は前日に公開）。手順は毎回同じで、publish-all を 1 回（`-f version=<版>`。GitHub Releases → npm）＋ crates.io だけをもう 1 回（`-f version=<版> -f ref=v<版> -f publish_github_release=false -f publish_npm=false -f publish_crates_io=true`。タグの内容を公開するので、main が先に進んでいても食い違わない）。npm は Trusted Publishing（OIDC）で全部通る。`qrsend-bin-win32-x64` / `-arm64` は 0.1.0〜0.1.5 とも npm サポートの spam 判定解除待ちで、これがある限り npm の段は「その 2 つだけ失敗」で赤になり、crates.io は単独で再実行が要る（解除後に `scripts/npm-publish-remaining.sh <各バージョン> --trust`）。32bit Windows は `@qrsend/cli-bin-win32-ia32` で確定。npm のレジストリに新しい版が見えるまで 5 分ほどかかる。もっと遅れることもある: 0.1.5 では `@qrsend/cli-bin-linux-ia32-musl` だけ、公開ログは成功（`+ …@0.1.5`）なのに 30 分以上レジストリに出ず、npm のサイトには「0.1.5 Validating」と表示されていた（npm 側の検査中。失敗ではないので、公開ログの `+` を見て判断し、やり直さない）。0.1.4 から CLI に `webrtc` feature が入り、NetBSD 版だけそれ無し。リリース前に CI が緑であることを確かめる（push のたびに確認する）。次のリリース前に 0.1.6 に上げる。2026-10-07 の 16:50 UTC ごろ、GitHub が `workflow_dispatch` と push に 500 を返す時間帯があった（ステータスページは正常表示）。待って再試行するしかない。
+- 公開状況（2026-10-09）: **0.1.5 を公開済み**（0.1.6 はセキュリティ修正。下の手順で公開する）（GitHub Release は 30 個の成果物、crates.io の 2 つ、npm の `qrsend-cli` と機種別 24 個。0.1.3・0.1.4 は前日に公開）。手順は毎回同じで、publish-all を 1 回（`-f version=<版>`。GitHub Releases → npm）＋ crates.io だけをもう 1 回（`-f version=<版> -f ref=v<版> -f publish_github_release=false -f publish_npm=false -f publish_crates_io=true`。タグの内容を公開するので、main が先に進んでいても食い違わない）。npm は Trusted Publishing（OIDC）で全部通る。`qrsend-bin-win32-x64` / `-arm64` は 0.1.0〜0.1.5 とも npm サポートの spam 判定解除待ちで、これがある限り npm の段は「その 2 つだけ失敗」で赤になり、crates.io は単独で再実行が要る（解除後に `scripts/npm-publish-remaining.sh <各バージョン> --trust`）。32bit Windows は `@qrsend/cli-bin-win32-ia32` で確定。npm のレジストリに新しい版が見えるまで 5 分ほどかかる。もっと遅れることもある: 0.1.5 では `@qrsend/cli-bin-linux-ia32-musl` だけ、公開ログは成功（`+ …@0.1.5`）なのに 30 分以上レジストリに出ず、npm のサイトには「0.1.5 Validating」と表示されていた（npm 側の検査中。失敗ではないので、公開ログの `+` を見て判断し、やり直さない）。0.1.4 から CLI に `webrtc` feature が入り、NetBSD 版だけそれ無し。リリース前に CI が緑であることを確かめる（push のたびに確認する）。次のリリース前に 0.1.6 に上げる。2026-10-07 の 16:50 UTC ごろ、GitHub が `workflow_dispatch` と push に 500 を返す時間帯があった（ステータスページは正常表示）。待って再試行するしかない。
 - 手順は igarinpiano/dirlens と同じ方式。`.github/workflows/publish-all.yml` を手動実行（Actions → publish-all → Run workflow）すると GitHub Releases → npm → crates.io の順に公開する。認証は両レジストリとも Trusted Publishing（OIDC）で、トークンはリポジトリに置かない。
   - ビルドは `reusable-build-matrix.yml`（macOS/Windows はネイティブ、それ以外は cross）。必須 8 種に加えて `optional: true` の対象（32bit Windows・Windows GNU・macOS universal・Linux ia32/ARMv7/ARMv6/RISC-V/ppc64le/s390x/LoongArch・Android・FreeBSD/NetBSD/illumos）があり、optional は失敗してもリリースを止めない。`cross: true` はタグ付きリリース版の cross（古い glibc でリンクされる。必須の glibc 版は下限 2.28 を検査）、`cross: git` は main ブランチの cross（LoongArch・NetBSD・Android だけ。イメージが新しく glibc 2.39 になるので他には使わない）。musl・Android・BSD などは `--no-default-features`（window 無し）。
   - `build-check.yml`（手動）は公開せずに全対象をビルドする。対象や依存を変えたらこれで確認する。
