@@ -1,0 +1,141 @@
+# Looks for vulnerabilities from every side there is, so that none slips in
+# unnoticed: on every change, and every week besides (new advisories against
+# dependencies appear without anything changing here).
+#
+# - Dependencies: RustSec advisories, licenses and sources of every crate
+#   (cargo-deny, deny.toml); npm advisories and registry signatures of the
+#   web app's packages.
+# - Code: CodeQL's security queries for the Rust, the TypeScript and the
+#   workflows themselves.
+# - Workflows: zizmor (injection, credentials, pinning, permissions).
+# - Untrusted input: every parser of what others send (codes, network
+#   records, sound) is fuzzed for a while, longer in the weekly run.
+#
+# Dependabot (.github/dependabot.yml) proposes the updates these find.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-dependencies:
+    name: Rust dependencies (advisories, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+      - name: The fuzz targets' dependencies too
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
+          command: check advisories
+
+  npm-dependencies:
+    name: npm dependencies (advisories, signatures)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # (No install scripts: nothing of the packages runs here.)
+      - run: npm ci --ignore-scripts
+      # Every advisory counts, the build tools' too: they make what is deployed.
+      - run: npm audit --audit-level=low
+      - name: Registry signatures and provenance of what was installed
+        run: npm audit signatures
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # report findings to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: /language:${{ matrix.language }}
+
+  workflows:
+    name: Workflows (zizmor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          # (Fails on any finding, instead of only reporting it to code scanning.)
+          advanced-security: false
+          persona: regular
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [frame, codes, meta, payload, receiver, sound]
+    env:
+      TARGET: ${{ matrix.target }}
+      # Seconds per target: a while on every change, long every week.
+      SECONDS_TO_FUZZ: ${{ github.event_name == 'schedule' && 1200 || 120 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Seeds (valid inputs of every kind, to start from)
+        working-directory: fuzz
+        run: cargo run --locked -p qrsend-fuzz-seeds -- corpus
+      - name: Fuzz
+        working-directory: fuzz
+        run: cargo +nightly fuzz run "$TARGET" -- -max_total_time="$SECONDS_TO_FUZZ" -rss_limit_mb=4096 -timeout=30
+      - name: Keep what failed (reproduce with `cargo +nightly fuzz run <target> <file>`)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/

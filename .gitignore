@@ -6,3 +6,7 @@
 /web/test-results
 /web/playwright-report
 /web/blob-report
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

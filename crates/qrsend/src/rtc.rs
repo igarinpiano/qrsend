@@ -1014,4 +1014,49 @@ mod tests {
         assert!(p.starts_with('K') && p.len() == 65);
         assert_ne!(proof(&[1; 16], &[3; 32]), p);
     }
+
+    /// What arrives from others (an offer off the screen, any packet on the
+    /// mDNS port) may be anything: no input makes these panic.
+    #[test]
+    fn damaged_offers_and_answers_are_only_refused() {
+        let valid = Description {
+            ufrag: "abcd".into(),
+            pwd: "0123456789abcdef0123456789abcdef".into(),
+            fingerprint: [7; 32],
+            candidates: vec![("192.168.1.20".into(), 50000)],
+            flags: FLAG_ONE_NETWORK,
+        }
+        .to_bytes();
+        let mut dns = vec![0, 0, 0x84, 0, 0, 1, 0, 1, 0, 0, 0, 0];
+        dns.extend_from_slice(b"\x04host\x05local\x00\x00\x01\x00\x01");
+        dns.extend_from_slice(&[0xc0, 12, 0, 1, 0x80, 1, 0, 0, 0, 120, 0, 4, 192, 168, 1, 7]);
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..20_000 {
+            for base in [&valid, &dns] {
+                let mut data = base.clone();
+                // Cut short, grown, and with bytes changed.
+                data.truncate(next() as usize % (data.len() + 1));
+                for _ in 0..next() % 4 {
+                    data.push(next() as u8);
+                }
+                for _ in 0..next() % 3 {
+                    if !data.is_empty() {
+                        let at = next() as usize % data.len();
+                        data[at] = next() as u8;
+                    }
+                }
+                let _ = Description::from_bytes(&data);
+                let _ = answers(&data);
+            }
+            let noise: Vec<u8> = (0..round % 300).map(|_| next() as u8).collect();
+            let _ = Description::from_bytes(&noise);
+            let _ = answers(&noise);
+        }
+    }
 }
