@@ -15,25 +15,25 @@ categories = ["encoding", "command-line-utilities"]
 age = "0.12.1"
 age-core = "0.12"
 base64 = "0.23.1"
-bech32 = "0.11"
+bech32 = "0.12"
 blake3 = "1.8.7"
 crc32fast = "1.5.2"
 ed25519-dalek = "3.0.0"
 fast_qr = { version = "0.14.0", default-features = false }
-p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 qrcode = { version = "0.14.1", default-features = false }
-rand = "0.8"
+rand = "0.10"
 rqrr = { version = "0.11.0", default-features = false }
 ruzstd = { version = "0.9", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 thiserror = "2.0.21"
 zstd = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 
 [features]
 default = ["zstd-native"]
