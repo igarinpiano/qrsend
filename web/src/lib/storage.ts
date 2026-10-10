@@ -42,7 +42,12 @@ class OpfsFile implements RandomFile {
   }
   write(offset: number, data: Uint8Array): void {
     let put = 0;
-    while (put < data.length) put += this.handle.write(data.subarray(put), { at: offset + put });
+    while (put < data.length) {
+      const n = this.handle.write(data.subarray(put), { at: offset + put });
+      // (Nothing written and no error, as on a full disk: going round again would never end.)
+      if (n <= 0) throw new Error(`short write at ${offset + put}: ${put} of ${data.length} bytes`);
+      put += n;
+    }
   }
   size(): number {
     return this.handle.getSize();

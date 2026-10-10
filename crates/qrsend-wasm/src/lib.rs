@@ -1504,31 +1504,36 @@ impl Receive {
     /// Decrypts and checks the meta segment. For encrypted transfers the keys
     /// must have been provided (`setIdentity`, or `setPublicKey` + one
     /// `addSecret` per `stanzaKeys(meta)`).
+    ///
+    /// Returns null when it opened. A text says why it is of no use although
+    /// another copy may be: it is damaged or was tampered with (the segment
+    /// is then collected anew, see `resetSegment`). An error is final: this
+    /// device cannot open the transfer.
     #[wasm_bindgen(js_name = openMeta)]
-    pub fn open_meta(&mut self, meta: &[u8]) -> JsResult<()> {
+    pub fn open_meta(&mut self, meta: &[u8]) -> JsResult<Option<String>> {
         let p = *self.rx.params().ok_or_else(|| js_err("no session"))?;
         let encrypted = p.flags & FLAG_ENCRYPTED != 0;
-        let opened =
-            crypto::open_meta(meta, p.session_id, encrypted, self.keys.as_age()).map_err(|e| {
-                match e {
-                    OpenMetaError::NoIdentity => {
-                        js_err("This transfer is encrypted. Create your device ID first.")
-                    }
-                    OpenMetaError::NotForUs => {
-                        js_err("This transfer is encrypted for another device.")
-                    }
-                    e => js_err(e),
-                }
-            })?;
+        let opened = match crypto::open_meta(meta, p.session_id, encrypted, self.keys.as_age()) {
+            Ok(opened) => opened,
+            Err(OpenMetaError::NoIdentity) => {
+                return Err(js_err(
+                    "This transfer is encrypted. Create your device ID first.",
+                ));
+            }
+            Err(OpenMetaError::NotForUs) => {
+                return Err(js_err("This transfer is encrypted for another device."));
+            }
+            Err(e) => return Ok(Some(e.to_string())),
+        };
         let m = opened.manifest;
         if m.body.length.div_ceil(1 << p.seg_shift) != p.seg_count as u64
             || m.body.segment_blake3.len() != p.seg_count as usize
         {
-            return Err(js_err("manifest does not match the transfer layout"));
+            return Ok(Some("manifest does not match the transfer layout".into()));
         }
         self.manifest = Some(m);
         self.signer = opened.signer;
-        Ok(())
+        Ok(None)
     }
 
     fn matches_manifest(&self, index: u32, data: &[u8]) -> bool {
