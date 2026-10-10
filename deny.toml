@@ -13,11 +13,7 @@ all-features = true
 # with the reason, never silently.
 version = 2
 yanked = "deny"
-ignore = [
-    # `instant` is unmaintained (not a vulnerability). Only minifb (the window
-    # display) uses it, and no minifb release has moved off it yet.
-    { id = "RUSTSEC-2024-0384", reason = "unmaintained, no known vulnerability; only via minifb, no release without it" },
-]
+ignore = []
 
 [licenses]
 version = 2

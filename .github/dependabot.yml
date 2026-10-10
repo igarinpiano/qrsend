@@ -1,7 +1,10 @@
 # Proposes dependency updates (and, with Dependabot security updates on in
 # the repository settings, fixes for advisories as soon as they appear).
-# Updates of each kind come together in one pull request a week. A version
-# is proposed only after it has been out for a week (a package hijacked to
+#
+# Updates that keep compatibility come together in one pull request a week
+# per kind; a new major version comes on its own, since it may need changes
+# to the code, and one that does must not hold up the others. A version is
+# proposed only after it has been out for a week (a package hijacked to
 # publish a malicious release is usually found and pulled within days);
 # security updates do not wait.
 version: 2
@@ -14,8 +17,19 @@ updates:
       default-days: 7
     groups:
       rust:
-        patterns: ["*"]
-    open-pull-requests-limit: 5
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 10
+    ignore:
+      # Must be the version age uses: its functions take this crate's types
+      # (remove when age moves to a newer bech32).
+      - dependency-name: bech32
+        versions: [">= 0.12"]
+      # qrsend-core: the version age uses, whose WebAssembly backend
+      # qrsend-wasm switches on (`js`). Newer crates bring 0.4 along, which
+      # qrsend-wasm switches on separately (`getrandom04`).
+      # (Patch releases still come, of 0.2 and of 0.4.)
+      - dependency-name: getrandom
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: cargo
     directory: /fuzz
@@ -35,8 +49,13 @@ updates:
       default-days: 7
     groups:
       web:
-        patterns: ["*"]
-    open-pull-requests-limit: 5
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 10
+    ignore:
+      # svelte-check (the type check of `npm run check`) supports TypeScript
+      # up to 6 (remove when a svelte-check release accepts 7).
+      - dependency-name: typescript
+        versions: [">= 7"]
 
   # The actions are pinned to commits: this moves the pins (and the version
   # comments next to them) when new versions come out.
