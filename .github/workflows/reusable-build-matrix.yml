@@ -34,6 +34,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
@@ -77,19 +80,26 @@ jobs:
     defaults:
       run:
         shell: bash
+    # (The matrix reaches the scripts through the environment, never pasted
+    # into them.)
+    env:
+      TARGET: ${{ matrix.target }}
+      FEATURES: ${{ matrix.features }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
+          toolchain: stable
           targets: ${{ matrix.universal && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
       - name: Install cross (release)
         if: matrix.cross == true
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: cross
       - name: Install cross (git)
@@ -97,10 +107,11 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross --locked --force
       - name: Build (release, native)
         if: ${{ !matrix.cross && !matrix.universal }}
-        run: cargo build --release --locked -p qrsend --target ${{ matrix.target }} ${{ matrix.features }}
+        # ($FEATURES is several words on purpose.)
+        run: cargo build --release --locked -p qrsend --target "$TARGET" $FEATURES
       - name: Build (release, cross)
         if: matrix.cross
-        run: cross build --release --locked -p qrsend --target ${{ matrix.target }} ${{ matrix.features }}
+        run: cross build --release --locked -p qrsend --target "$TARGET" $FEATURES
       - name: Build (release, macOS universal)
         if: matrix.universal
         run: |
@@ -117,24 +128,24 @@ jobs:
         env:
           MAX_GLIBC: ${{ matrix.glibc }}
         run: |
-          bin="target/${{ matrix.target }}/release/qrsend"
+          bin="target/$TARGET/release/qrsend"
           need="$(readelf -V --wide "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -V | tail -1)"
-          echo "max GLIBC required by ${{ matrix.target }}: ${need:-none}"
+          echo "max GLIBC required by $TARGET: ${need:-none}"
           if [ -n "$MAX_GLIBC" ] && [ -n "$need" ] && [ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
-            echo "::error::${{ matrix.target }} requires GLIBC_$need (> $MAX_GLIBC)"
+            echo "::error::$TARGET requires GLIBC_$need (> $MAX_GLIBC)"
             exit 1
           fi
       - name: Smoke test
         if: ${{ !matrix.cross }}
         run: |
-          exe=qrsend; [[ "${{ matrix.target }}" == *windows* ]] && exe=qrsend.exe
-          "target/${{ matrix.target }}/release/$exe" --version
+          exe=qrsend; [[ "$TARGET" == *windows* ]] && exe=qrsend.exe
+          "target/$TARGET/release/$exe" --version
       - name: Collect
         run: |
-          mkdir -p out/${{ matrix.target }}
-          exe=qrsend; [[ "${{ matrix.target }}" == *windows* ]] && exe=qrsend.exe
-          cp "target/${{ matrix.target }}/release/$exe" "out/${{ matrix.target }}/"
-      - uses: actions/upload-artifact@v4
+          mkdir -p "out/$TARGET"
+          exe=qrsend; [[ "$TARGET" == *windows* ]] && exe=qrsend.exe
+          cp "target/$TARGET/release/$exe" "out/$TARGET/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bin-${{ matrix.target }}
           path: out/
