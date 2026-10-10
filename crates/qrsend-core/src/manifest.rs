@@ -89,8 +89,11 @@ impl Manifest {
     }
 
     /// Sum of declared file sizes; must equal `body.plain_length` for `files`.
-    pub fn files_total(&self) -> u64 {
-        self.entries.iter().map(Entry::file_size).sum()
+    /// `None` when it does not fit a `u64` (no real transfer does).
+    pub fn files_total(&self) -> Option<u64> {
+        self.entries
+            .iter()
+            .try_fold(0u64, |sum, e| sum.checked_add(e.file_size()))
     }
 }
 
@@ -236,7 +239,7 @@ fn validate(m: &Manifest) -> Result<(), MetaError> {
         }
     }
     match m.kind {
-        Kind::Files if m.files_total() != m.body.plain_length => {
+        Kind::Files if m.files_total() != Some(m.body.plain_length) => {
             bad("entry sizes do not add up to plain_length")
         }
         Kind::Text if !m.entries.is_empty() => bad("text transfer with entries"),
@@ -354,6 +357,20 @@ mod tests {
     fn rejects_inconsistent_sizes() {
         let mut m = sample();
         m.body.plain_length = 4;
+        let env = MetaEnvelope::from_manifest(&m).unwrap();
+        assert!(matches!(
+            env.manifest(0x1a2b3c4d),
+            Err(MetaError::Invalid(_))
+        ));
+        // Sizes that only add up by going round past the largest number.
+        let mut m = sample();
+        m.entries[1].size = Some(u64::MAX);
+        m.entries.push(Entry {
+            path: "d/b.txt".into(),
+            size: Some(4),
+            ..m.entries[1].clone()
+        });
+        m.body.plain_length = 3;
         let env = MetaEnvelope::from_manifest(&m).unwrap();
         assert!(matches!(
             env.manifest(0x1a2b3c4d),

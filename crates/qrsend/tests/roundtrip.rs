@@ -475,3 +475,81 @@ fn a_network_connection_carries_what_the_codes_did_not() {
         );
     }
 }
+
+/// A file list that does not open (damaged, or someone else's codes with the
+/// same session id) is collected again instead of ending the transfer, and
+/// is not stored where it would stop every later attempt.
+#[test]
+fn a_damaged_file_list_is_received_again() {
+    use qrsend_core::frame::Frame;
+
+    let env = Env::new("badmeta");
+    env.ok(&[
+        "send",
+        "--plain",
+        "--text",
+        "the real text",
+        "--passes",
+        "2",
+        "--export-text",
+        "frames.txt",
+    ]);
+    let text = fs::read_to_string(env.path("frames.txt")).unwrap();
+    let meta = text
+        .lines()
+        .filter_map(|l| Frame::from_qr_text(l).ok())
+        .find(|f| f.header.is_meta())
+        .expect("a meta frame");
+    // The same meta segment, with other content: every source symbol of it.
+    let size = meta.symbol.len();
+    let k = (meta.header.seg_len as usize).div_ceil(size);
+    let mut forged = String::new();
+    for esi in 0..k {
+        let header = qrsend_core::frame::FrameHeader {
+            esi: esi as u32,
+            ..meta.header
+        };
+        let symbol = noise(size * (esi + 1))[size * esi..].to_vec();
+        forged.push_str(&Frame { header, symbol }.to_qr_text());
+        forged.push('\n');
+    }
+    fs::write(env.path("received.txt"), format!("{forged}{text}")).unwrap();
+    let out = env.run(&["recv", "--text", "received.txt"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("file list failed verification"), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim_end(),
+        "the real text"
+    );
+}
+
+/// What a transfer names is shown, not obeyed: a file name or a sender's
+/// name cannot make the terminal do anything.
+#[test]
+fn names_cannot_drive_the_terminal() {
+    let env = Env::new("escapes");
+    fs::create_dir_all(env.path("in")).unwrap();
+    let name = "report\u{1b}]0;owned\u{7}.txt";
+    if fs::write(env.path("in").join(name), "x").is_err() {
+        return; // (A file system that refuses such a name.)
+    }
+    env.ok(&[
+        "send",
+        "--plain",
+        "--sender-name",
+        "evil\u{1b}[2J",
+        &format!("in/{name}"),
+        "--export-text",
+        "frames.txt",
+    ]);
+    let out = env.run(&["recv", "--text", "frames.txt", "--keep", "-o", "out"]);
+    assert!(out.status.success());
+    let shown = String::from_utf8_lossy(&out.stderr);
+    assert!(!shown.contains('\u{1b}'), "{shown:?}");
+    let list = env.ok(&["inbox", "list"]);
+    assert!(
+        !list.contains('\u{1b}') && list.contains("report\\u{1b}"),
+        "{list:?}"
+    );
+}

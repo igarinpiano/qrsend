@@ -29,6 +29,41 @@ pub fn human_duration(secs: f64) -> String {
     }
 }
 
+/// Characters a terminal acts on instead of showing: control characters
+/// (which move the cursor, retitle the window, rewrite the clipboard…) and
+/// the ones that reorder text (and can make a name read as another).
+fn acts_on(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A name or other short text from a transfer or a device ID, safe to print
+/// to a terminal: what a terminal would act on is shown as an escape.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| match acts_on(c) {
+            true => c.escape_unicode().to_string(),
+            false => c.to_string(),
+        })
+        .collect()
+}
+
+/// A received text, safe to print to a terminal: as [`printable`], but line
+/// breaks and tabs stay what they are (a carriage return only before a line
+/// break: alone, it would let a line be overwritten by the next).
+pub fn printable_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' | '\t' => out.push(c),
+            '\r' if chars.peek() == Some(&'\n') => out.push(c),
+            c if acts_on(c) => out.extend(c.escape_unicode()),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -129,6 +164,23 @@ mod tests {
         assert!((r - 2000.0).abs() < 1.0, "{r}");
         // Remaining going up (a rejected segment) never yields a negative rate.
         assert_eq!(m.update(t0 + Duration::from_secs(62), 9_000), 0.0);
+    }
+
+    #[test]
+    fn what_reaches_the_terminal_is_shown_not_obeyed() {
+        assert_eq!(printable("photo 写真.jpg"), "photo 写真.jpg");
+        assert_eq!(printable("a\x1b]0;owned\x07b"), "a\\u{1b}]0;owned\\u{7}b");
+        assert_eq!(printable("x\u{9b}2Jy"), "x\\u{9b}2Jy");
+        assert_eq!(printable("gpj.\u{202e}exe"), "gpj.\\u{202e}exe");
+        assert_eq!(printable("line\nnext"), "line\\u{a}next");
+        assert_eq!(
+            printable_text("one\r\ntwo\tthree\nfour"),
+            "one\r\ntwo\tthree\nfour"
+        );
+        assert_eq!(
+            printable_text("shown\rhidden\x1b[2J"),
+            "shown\\u{d}hidden\\u{1b}[2J"
+        );
     }
 
     #[test]

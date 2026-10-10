@@ -8,7 +8,7 @@ use clap::{Args, Subcommand};
 use qrsend_core::crypto::DevicePublic;
 use qrsend_core::qr::{self, Luma};
 
-use crate::identity;
+use crate::{identity, util};
 
 #[derive(Args)]
 pub struct IdArgs {
@@ -135,7 +135,11 @@ pub fn devices(cmd: DevicesCmd) -> Result<()> {
                 println!("No trusted devices. Add one with `qrsend devices add <ID>`.");
             }
             for d in list {
-                println!("{:<24} {}", d.name, d.public()?.fingerprint());
+                println!(
+                    "{:<24} {}",
+                    util::printable(&d.name),
+                    d.public()?.fingerprint()
+                );
             }
         }
         DevicesCmd::Add {
@@ -151,7 +155,7 @@ pub fn devices(cmd: DevicesCmd) -> Result<()> {
             };
             let public = DevicePublic::parse(&id)?;
             let shown = name.as_deref().unwrap_or(&public.name);
-            eprintln!("Device:      {shown}");
+            eprintln!("Device:      {}", util::printable(shown));
             eprintln!("Fingerprint: {}", public.fingerprint());
             if !yes {
                 if !std::io::stdin().is_terminal() {
@@ -166,7 +170,8 @@ pub fn devices(cmd: DevicesCmd) -> Result<()> {
             let t = identity::add_device(&public, name.as_deref())?;
             println!(
                 "Trusted {}. Send to it with `qrsend send --to {:?} …`",
-                t.name, t.name
+                util::printable(&t.name),
+                t.name
             );
         }
         DevicesCmd::Rm { device } => {
@@ -182,7 +187,7 @@ pub fn devices(cmd: DevicesCmd) -> Result<()> {
                 bail!("no trusted device {device:?}");
             }
             identity::save_devices(&list)?;
-            println!("Removed {device}.");
+            println!("Removed {}.", util::printable(&device));
         }
         DevicesCmd::Rename { old, new } => {
             let mut list = identity::devices()?;

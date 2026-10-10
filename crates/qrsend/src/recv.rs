@@ -98,7 +98,7 @@ impl SenderInfo {
             .map(|c| format!(" claims to be {c:?}"))
             .unwrap_or_default();
         match self {
-            SenderInfo::Trusted(name) => format!("{name} ✓"),
+            SenderInfo::Trusted(name) => format!("{} ✓", util::printable(name)),
             SenderInfo::Unverified(key) => format!("unverified sender (key {key}){claimed}"),
             SenderInfo::Unsigned => format!("unsigned{claimed}"),
         }
@@ -156,11 +156,28 @@ impl Session {
             me,
         };
         if s.store.has_meta() {
-            let (m, sender) = open_meta(&s.store.meta_bytes()?, &s.store.params(), s.me.as_ref())?;
-            s.manifest = Some(m);
-            s.sender = sender;
+            match s.read_meta(&s.store.meta_bytes()?)? {
+                Ok((m, sender)) => {
+                    s.manifest = Some(m);
+                    s.sender = sender;
+                }
+                // (Stored by an earlier version without being checked first.)
+                Err(_) => s.store.forget(0),
+            }
         }
         Ok(s)
+    }
+
+    /// Opens and checks a file list. The outer error is final (this device
+    /// cannot open the transfer); the inner one says that the list is
+    /// damaged or was tampered with, so collecting it again may bring a good
+    /// one.
+    fn read_meta(&self, data: &[u8]) -> Result<Result<(Manifest, SenderInfo)>> {
+        match open_meta(data, &self.store.params(), self.me.as_ref()) {
+            Ok((m, sender)) => Ok(self.check_manifest(&m).map(|()| (m, sender))),
+            Err(e) if e.downcast_ref::<OpenMetaError>().is_some() => Ok(Err(e)),
+            Err(e) => Err(e),
+        }
     }
 
     fn seg_len(&self, index: u32) -> Option<usize> {
@@ -179,12 +196,16 @@ impl Session {
         Ok(())
     }
 
-    /// Stores the meta segment; returns segments that failed late verification.
-    fn on_meta(&mut self, data: &[u8]) -> Result<Vec<u32>> {
+    /// Stores the meta segment once it has been checked; returns segments
+    /// that failed late verification, or (inner error) why the meta segment
+    /// is of no use and has to be received again.
+    fn on_meta(&mut self, data: &[u8]) -> Result<Result<Vec<u32>>> {
+        let (manifest, sender) = match self.read_meta(data)? {
+            Ok(opened) => opened,
+            Err(e) => return Ok(Err(e)),
+        };
         self.store.write_meta(data)?;
-        let (manifest, sender) = open_meta(data, &self.store.params(), self.me.as_ref())?;
         self.sender = sender;
-        self.check_manifest(&manifest)?;
         self.store.state.summary = Some(summary(&manifest));
         self.manifest = Some(manifest);
         let mut bad = Vec::new();
@@ -197,7 +218,7 @@ impl Session {
             }
         }
         self.store.save()?;
-        Ok(bad)
+        Ok(Ok(bad))
     }
 
     fn verify(&self, index: u32, data: &[u8]) -> bool {
@@ -222,12 +243,13 @@ impl Session {
     }
 }
 
+/// A line about what a transfer holds (names as a terminal can show them).
 pub fn summary(m: &Manifest) -> String {
-    let top: Vec<&str> = m
+    let top: Vec<String> = m
         .entries
         .iter()
         .filter(|e| !e.path.contains('/'))
-        .map(|e| e.path.as_str())
+        .map(|e| util::printable(&e.path))
         .collect();
     match m.kind {
         qrsend_core::manifest::Kind::Text => {
@@ -236,7 +258,7 @@ pub fn summary(m: &Manifest) -> String {
         qrsend_core::manifest::Kind::Files => {
             let names = match top.len() {
                 0 => String::from("(empty)"),
-                1 => top[0].to_string(),
+                1 => top[0].clone(),
                 n => format!("{} and {} more", top[0], n - 1),
             };
             let files = m.file_count();
@@ -288,13 +310,14 @@ pub fn resume_hint(session_id: u32, missing: &[u32]) -> String {
 
 pub fn report(outcome: Outcome, stdout_text: bool) {
     match outcome {
-        Outcome::Text(text) => {
-            if stdout_text {
-                print!("{text}");
-            } else {
-                println!("{text}");
-            }
+        // Asked for as it is (--stdout), or going elsewhere than a terminal:
+        // the text itself. On a terminal: what it says, not what it would
+        // make the terminal do.
+        Outcome::Text(text) if stdout_text => print!("{text}"),
+        Outcome::Text(text) if !std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+            println!("{text}")
         }
+        Outcome::Text(text) => println!("{}", util::printable_text(&text)),
         Outcome::Stdout => {}
         Outcome::Files { saved, skipped } => {
             for p in &saved {
@@ -543,12 +566,11 @@ pub fn run(args: RecvArgs) -> Result<()> {
                                 p.flags & qrsend_core::frame::FLAG_ENCRYPTED != 0
                             )
                         });
-                        let store = Store::open_or_create(p)?;
-                        for i in store.done_indices() {
+                        let s = Session::open(Store::open_or_create(p)?)?;
+                        for i in s.store.done_indices() {
                             rx.mark_done(i);
                         }
-                        let resumed = !store.done_indices().is_empty();
-                        let s = Session::open(store)?;
+                        let resumed = !s.store.done_indices().is_empty();
                         if let Some(m) = &s.manifest {
                             print_manifest_header(&pb, m, &p, &s.sender);
                         } else {
@@ -587,11 +609,26 @@ pub fn run(args: RecvArgs) -> Result<()> {
                     Event::Completed { index, data } => {
                         let s = session.as_mut().expect("locked before completion");
                         if index == 0 {
-                            for bad in s.on_meta(&data)? {
-                                rx.reset(bad);
+                            match s.on_meta(&data)? {
+                                Ok(bad) => {
+                                    for bad in bad {
+                                        rx.reset(bad);
+                                    }
+                                    let m = s.manifest.as_ref().unwrap();
+                                    print_manifest_header(&pb, m, &s.store.params(), &s.sender);
+                                }
+                                Err(e) => {
+                                    rx.reset(0);
+                                    log::line("rx", || "file list unusable".into());
+                                    say(
+                                        &pb,
+                                        format!(
+                                            "The file list failed verification ({}); waiting for it again",
+                                            util::printable(&format!("{e:#}"))
+                                        ),
+                                    );
+                                }
                             }
-                            let m = s.manifest.as_ref().unwrap();
-                            print_manifest_header(&pb, m, &s.store.params(), &s.sender);
                         } else if !s.on_segment(index, &data)? {
                             rx.reset(index);
                             say(
@@ -752,7 +789,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                     &pb,
                     format!(
                         "The sender offers a network connection ({}); connecting…",
-                        offer.addresses.join(", ")
+                        util::printable(&offer.addresses.join(", "))
                     ),
                 );
                 link = Some(net::connect(offer, message.session_id));

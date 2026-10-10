@@ -289,7 +289,7 @@ pub fn segment_hash(data: &[u8]) -> String {
 pub enum UnpackError {
     #[error("unsafe path: {0}")]
     Path(#[from] PathError),
-    #[error("duplicate path {0}")]
+    #[error("duplicate path {0:?}")]
     Duplicate(String),
     #[error("{0}: content does not match its hash")]
     HashMismatch(String),
@@ -411,7 +411,7 @@ pub fn unpack_text<R: Read>(manifest: &Manifest, body: R) -> Result<String, Unpa
     let reader = decoded_reader(manifest.body.encoding, body)?;
     let mut buf = Vec::new();
     reader
-        .take(manifest.body.plain_length + 1)
+        .take(manifest.body.plain_length.saturating_add(1))
         .read_to_end(&mut buf)?;
     match (buf.len() as u64).cmp(&manifest.body.plain_length) {
         std::cmp::Ordering::Less => Err(UnpackError::Truncated),

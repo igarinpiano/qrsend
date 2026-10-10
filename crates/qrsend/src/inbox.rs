@@ -62,7 +62,7 @@ pub fn run(cmd: InboxCmd) -> Result<()> {
                     status,
                     st.summary
                         .as_deref()
-                        .unwrap_or("(file list not received yet)")
+                        .map_or("(file list not received yet)".into(), util::printable)
                 );
             }
         }
@@ -80,10 +80,11 @@ pub fn run(cmd: InboxCmd) -> Result<()> {
                 Some(m) => {
                     println!("Content:  {}", crate::recv::summary(m));
                     for e in m.entries.iter().take(200) {
+                        let path = util::printable(&e.path);
                         match e.kind {
-                            EntryType::Dir => println!("  {}/", e.path),
+                            EntryType::Dir => println!("  {path}/"),
                             EntryType::File => {
-                                println!("  {}  ({})", e.path, util::human_bytes(e.file_size()))
+                                println!("  {path}  ({})", util::human_bytes(e.file_size()))
                             }
                         }
                     }

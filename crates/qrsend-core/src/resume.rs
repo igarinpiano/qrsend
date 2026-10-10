@@ -139,7 +139,9 @@ impl ResumeCode {
         let mut segments = Vec::new();
         let mut end = 0u64;
         for _ in 0..count {
-            let start = end + get_leb(payload, &mut pos)?;
+            let start = end
+                .checked_add(get_leb(payload, &mut pos)?)
+                .ok_or(ResumeError::Malformed)?;
             let len = get_leb(payload, &mut pos)?;
             end = start.checked_add(len).ok_or(ResumeError::Malformed)?;
             if end > crate::frame::MAX_U24 as u64 + 1 {
@@ -174,6 +176,20 @@ mod tests {
             assert!(text.starts_with("QSR1-"));
             assert_eq!(ResumeCode::decode(&text).unwrap(), code);
             assert_eq!(ResumeCode::decode(&text.to_lowercase()).unwrap(), code);
+        }
+    }
+
+    #[test]
+    fn rejects_ranges_beyond_any_transfer() {
+        for (gap, len) in [(u64::MAX, 1), (1, u64::MAX), (1 << 24, 1)] {
+            let mut data = 7u32.to_le_bytes().to_vec();
+            for v in [2, 1, 1, gap, len] {
+                put_leb(&mut data, v);
+            }
+            let check = crc32fast::hash(&data) as u16;
+            data.extend_from_slice(&check.to_le_bytes());
+            let text = format!("{PREFIX}{}", base32_encode(&data));
+            assert_eq!(ResumeCode::decode(&text), Err(ResumeError::Malformed));
         }
     }
 
