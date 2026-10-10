@@ -246,6 +246,9 @@ fn header_value<'a>(fields: &'a [&'a str], tag: char) -> Option<&'a str> {
     fields.iter().find_map(|f| f.strip_prefix(tag))
 }
 
+/// The largest side of a picture read from a video (8K is 7680).
+const MAX_SIDE: usize = 16384;
+
 /// Minimal YUV4MPEG2 reader (8 bits per sample).
 fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<Picture>, dedupe: bool) -> Result<()> {
     let mut line = String::new();
@@ -256,6 +259,10 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<Picture>, dedupe: bool) -> Result<
     }
     let w: usize = header_value(&fields, 'W').context("Y4M width")?.parse()?;
     let h: usize = header_value(&fields, 'H').context("Y4M height")?.parse()?;
+    // (A video from anywhere: its header must not ask for memory at will.)
+    if !(1..=MAX_SIDE).contains(&w) || !(1..=MAX_SIDE).contains(&h) {
+        bail!("unsupported Y4M picture size {w}×{h} (at most {MAX_SIDE} on each side)");
+    }
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     // The size of each of the two chroma planes.
     let chroma = match header_value(&fields, 'C').unwrap_or("420jpeg") {
@@ -355,6 +362,21 @@ mod tests {
             color: None,
         };
         assert!(gray.channels().is_none());
+    }
+
+    #[test]
+    fn y4m_headers_cannot_ask_for_memory_at_will() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        for header in [
+            "YUV4MPEG2 W4294967296 H4294967296 C420jpeg\n",
+            "YUV4MPEG2 W100000 H100000 C420jpeg\n",
+            "YUV4MPEG2 W0 H10 C420jpeg\n",
+        ] {
+            let input = format!("{header}FRAME\n");
+            assert!(read_y4m(input.as_bytes(), &tx, false).is_err(), "{header}");
+        }
+        let ok = format!("YUV4MPEG2 W2 H2 Cmono\nFRAME\n{}", "\0".repeat(4));
+        read_y4m(ok.as_bytes(), &tx, false).unwrap();
     }
 
     #[test]

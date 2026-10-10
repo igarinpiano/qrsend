@@ -357,6 +357,9 @@ fn read_text(path: &std::path::Path, tx: crossbeam_channel::Sender<Vec<String>>)
 
 pub fn run(args: RecvArgs) -> Result<()> {
     log::start(args.log.as_deref(), "recv")?;
+    if args.camera_fps.is_some_and(|f| !(f.is_finite() && f > 0.0)) {
+        bail!("--camera-fps must be a positive number");
+    }
     let input = if args.text.is_some() {
         None
     } else if let Some(dev) = &args.camera {

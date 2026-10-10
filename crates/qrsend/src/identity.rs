@@ -37,15 +37,9 @@ pub fn default_name() -> String {
 
 pub fn save(identity: &DeviceIdentity) -> Result<()> {
     let path = identity_path();
-    fs::create_dir_all(path.parent().unwrap())?;
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, identity.to_secret_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-    }
-    fs::rename(tmp, path)?;
+    paths::create_private(path.parent().unwrap())?;
+    // (Never readable by others, not even for a moment.)
+    paths::write_private(&path, identity.to_secret_string().as_bytes())?;
     Ok(())
 }
 
@@ -88,7 +82,7 @@ pub fn devices() -> Result<Vec<Trusted>> {
 
 pub fn save_devices(list: &[Trusted]) -> Result<()> {
     let path = devices_path();
-    fs::create_dir_all(path.parent().unwrap())?;
+    paths::create_private(path.parent().unwrap())?;
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(list)?)?;
     fs::rename(tmp, path)?;

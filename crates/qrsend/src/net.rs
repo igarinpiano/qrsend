@@ -11,8 +11,9 @@
 //! in the code, so only someone who saw the sender's screen can take part,
 //! and nobody else on the network can read or alter it.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -37,8 +38,14 @@ pub const SYMBOL_SIZE: usize = 4096;
 const MESSAGE_BYTES: usize = 256 << 10;
 /// No record is larger than this (a damaged length must not allocate at will).
 const MAX_RECORD: usize = 4 << 20;
+/// The greeting is the one record before the other side has shown that it
+/// knows the key: it is small.
+const MAX_GREETING: usize = 64;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
+/// The whole handshake, however the other side spreads its bytes out.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Handshakes under way at once, at most (each takes a thread).
+const MAX_HANDSHAKES: usize = 16;
 /// How often the receiver reports, at most.
 pub const REPLY_EVERY: Duration = Duration::from_millis(100);
 /// Everything was sent, something is still missing, and no report settles
@@ -78,8 +85,9 @@ impl Seal {
         Ok(())
     }
 
-    /// `None` when the other side closed the connection.
-    fn read(&mut self, from: &mut impl Read) -> Result<Option<Vec<u8>>> {
+    /// `None` when the other side closed the connection. Records longer than
+    /// `max` are refused before anything is allocated for them.
+    fn read(&mut self, from: &mut impl Read, max: usize) -> Result<Option<Vec<u8>>> {
         let mut len = [0u8; 4];
         match from.read_exact(&mut len) {
             Ok(()) => {}
@@ -87,7 +95,7 @@ impl Seal {
             Err(e) => return Err(e.into()),
         }
         let len = u32::from_le_bytes(len) as usize;
-        if len > MAX_RECORD {
+        if len > max {
             bail!("the connection carries something else than a QRSend transfer");
         }
         let mut sealed = vec![0u8; len];
@@ -97,6 +105,38 @@ impl Seal {
             .decrypt(&nonce, &sealed[..])
             .map(Some)
             .map_err(|_| anyhow::anyhow!("the other side does not have the key from the code"))
+    }
+}
+
+/// Reads from a connection with one time limit for everything read through
+/// it: a timeout for each read alone lets a peer that sends a byte now and
+/// then hold on for as long as it likes.
+struct Deadline<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl<'a> Deadline<'a> {
+    fn new(stream: &'a TcpStream, within: Duration) -> Self {
+        Deadline {
+            stream,
+            until: Instant::now() + within,
+        }
+    }
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "handshake took too long",
+            ));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(buf)
     }
 }
 
@@ -259,6 +299,10 @@ struct Outgoing<S> {
 /// Serves receivers that connect, one at a time, until one reports that it
 /// has everything. `source` opens the transfer's data anew (each connection
 /// reads on its own).
+///
+/// Every connection first goes through the handshake on a thread of its own,
+/// within a time limit: whoever connects without the key (anyone on the
+/// network can) is turned away without holding up a receiver that has it.
 pub fn serve<S, F>(
     listener: TcpListener,
     offer: TcpOffer,
@@ -269,14 +313,34 @@ pub fn serve<S, F>(
     S: SegmentSource + Send + 'static,
     F: Fn() -> Result<S> + Send + 'static,
 {
+    let (proven_tx, proven) = bounded::<Proven>(MAX_HANDSHAKES);
+    let session_id = layout.session_id;
+    let key = offer.key;
     thread::spawn(move || {
-        let mut last: Option<Feedback> = None;
+        let busy = Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
+            if busy.load(Ordering::SeqCst) >= MAX_HANDSHAKES {
+                continue;
+            }
+            busy.fetch_add(1, Ordering::SeqCst);
+            let (busy, proven_tx) = (busy.clone(), proven_tx.clone());
+            thread::spawn(move || {
+                // (An error: someone without the key, or something else entirely.)
+                let shook = handshake(stream, &key, session_id);
+                busy.fetch_sub(1, Ordering::SeqCst);
+                if let Ok(p) = shook {
+                    let _ = proven_tx.send(p);
+                }
+            });
+        }
+    });
+    thread::spawn(move || {
+        let mut last: Option<Feedback> = None;
+        for p in proven {
             let Ok(source) = source() else { return };
             let direct = DirectSender::new(layout, source, last.as_ref());
-            // (An error: someone without the key, or something else entirely.)
-            let feedback = serve_one(stream, &offer, direct, &events).unwrap_or(None);
+            let feedback = serve_one(p, direct, &events).unwrap_or(None);
             let _ = events.send(LinkEvent::Down);
             let complete = feedback.as_ref().is_some_and(|f| f.complete);
             last = feedback.or(last);
@@ -287,32 +351,52 @@ pub fn serve<S, F>(
     });
 }
 
-/// Returns the last feedback of the connection once it ends.
-fn serve_one<S: SegmentSource + Send + 'static>(
-    mut stream: TcpStream,
-    offer: &TcpOffer,
-    direct: DirectSender<S>,
-    events: &Sender<LinkEvent>,
-) -> Result<Option<Feedback>> {
+/// A connection whose other end showed that it knows the key.
+struct Proven {
+    stream: TcpStream,
+    to_receiver: Seal,
+    to_sender: Seal,
+}
+
+/// The sender's side of the handshake.
+fn handshake(stream: TcpStream, key: &[u8; 16], session_id: u32) -> Result<Proven> {
     // (A system firewall may hand over a connection it has already cut:
     // every call on it then fails, and the next one is waited for.)
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    let mut within = Deadline::new(&stream, HANDSHAKE_TIMEOUT);
     let mut hello = [0u8; MAGIC.len() + 4 + 16];
-    stream.read_exact(&mut hello)?;
+    within.read_exact(&mut hello)?;
     let session = u32::from_le_bytes(hello[MAGIC.len()..MAGIC.len() + 4].try_into().unwrap());
-    if &hello[..MAGIC.len()] != MAGIC || session != direct.layout().session_id {
+    if &hello[..MAGIC.len()] != MAGIC || session != session_id {
         bail!("not for this transfer");
     }
     let from_receiver: [u8; 16] = hello[MAGIC.len() + 4..].try_into().unwrap();
     let from_sender: [u8; 16] = rand::random();
-    stream.write_all(&from_sender)?;
-    let (mut to_receiver, mut to_sender) = seals(&offer.key, &from_receiver, &from_sender);
+    (&stream).write_all(&from_sender)?;
+    let (to_receiver, mut to_sender) = seals(key, &from_receiver, &from_sender);
     // Nothing is sent before the receiver has shown that it knows the key.
-    if to_sender.read(&mut stream)?.as_deref() != Some(HELLO.as_bytes()) {
+    if to_sender.read(&mut within, MAX_GREETING)?.as_deref() != Some(HELLO.as_bytes()) {
         bail!("no greeting");
     }
     stream.set_read_timeout(None)?;
+    Ok(Proven {
+        stream,
+        to_receiver,
+        to_sender,
+    })
+}
+
+/// Returns the last feedback of the connection once it ends.
+fn serve_one<S: SegmentSource + Send + 'static>(
+    proven: Proven,
+    direct: DirectSender<S>,
+    events: &Sender<LinkEvent>,
+) -> Result<Option<Feedback>> {
+    let Proven {
+        mut stream,
+        mut to_receiver,
+        mut to_sender,
+    } = proven;
     if let (Ok(own), Ok(other)) = (stream.local_addr(), stream.peer_addr()) {
         log::line("link", || {
             format!("TCP: a receiver connected {}", path_said(own, other))
@@ -336,7 +420,7 @@ fn serve_one<S: SegmentSource + Send + 'static>(
         let mut stream = stream.try_clone()?;
         thread::spawn(move || {
             // Lines: "A<n>" (n records taken in) and feedback codes.
-            while let Ok(Some(message)) = to_sender.read(&mut stream) {
+            while let Ok(Some(message)) = to_sender.read(&mut stream, MAX_RECORD) {
                 let text = String::from_utf8_lossy(&message);
                 let mut out = state.0.lock().unwrap();
                 for line in text.lines() {
@@ -441,9 +525,8 @@ pub fn connect(offer: TcpOffer, session_id: u32) -> Link {
             hello.extend_from_slice(&session_id.to_le_bytes());
             hello.extend_from_slice(&from_receiver);
             stream.write_all(&hello)?;
-            stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
             let mut from_sender = [0u8; 16];
-            stream.read_exact(&mut from_sender)?;
+            Deadline::new(&stream, HANDSHAKE_TIMEOUT).read_exact(&mut from_sender)?;
             stream.set_read_timeout(None)?;
             let (mut to_receiver, mut to_sender) = seals(&offer.key, &from_receiver, &from_sender);
             to_sender.write(&mut stream, HELLO.as_bytes())?;
@@ -463,7 +546,7 @@ pub fn connect(offer: TcpOffer, session_id: u32) -> Link {
                 let _ = writer.shutdown(std::net::Shutdown::Write);
                 drop(written_tx);
             });
-            while let Some(message) = to_receiver.read(&mut stream)? {
+            while let Some(message) = to_receiver.read(&mut stream, MAX_RECORD)? {
                 if message_tx.send(message).is_err() {
                     break;
                 }
@@ -532,25 +615,100 @@ mod tests {
         a_out.write(&mut wire, b"first").unwrap();
         a_out.write(&mut wire, b"second").unwrap();
         let mut reader = &wire[..];
-        assert_eq!(b_in.read(&mut reader).unwrap().unwrap(), b"first");
-        assert_eq!(b_in.read(&mut reader).unwrap().unwrap(), b"second");
-        assert!(b_in.read(&mut reader).unwrap().is_none());
+        assert_eq!(
+            b_in.read(&mut reader, MAX_RECORD).unwrap().unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            b_in.read(&mut reader, MAX_RECORD).unwrap().unwrap(),
+            b"second"
+        );
+        assert!(b_in.read(&mut reader, MAX_RECORD).unwrap().is_none());
 
         // Another key, another connection (salt), a flipped bit, a record
         // out of order: all refused.
         let (mut other_key, _) = seals(&[4; 16], &[1; 16], &[2; 16]);
-        assert!(other_key.read(&mut &wire[..]).is_err());
+        assert!(other_key.read(&mut &wire[..], MAX_RECORD).is_err());
         let (mut other_salt, _) = seals(&key, &[9; 16], &[2; 16]);
-        assert!(other_salt.read(&mut &wire[..]).is_err());
+        assert!(other_salt.read(&mut &wire[..], MAX_RECORD).is_err());
         let mut damaged = wire.clone();
         damaged[10] ^= 1;
         let (mut c, _) = seals(&key, &[1; 16], &[2; 16]);
-        assert!(c.read(&mut &damaged[..]).is_err());
+        assert!(c.read(&mut &damaged[..], MAX_RECORD).is_err());
         let (mut d, _) = seals(&key, &[1; 16], &[2; 16]);
         let second = &wire[4 + 5 + 16..];
-        assert!(d.read(&mut &second[..]).is_err());
+        assert!(d.read(&mut &second[..], MAX_RECORD).is_err());
         // The two directions do not share a key.
         let (_, mut back) = seals(&key, &[1; 16], &[2; 16]);
-        assert!(back.read(&mut &wire[..]).is_err());
+        assert!(back.read(&mut &wire[..], MAX_RECORD).is_err());
+    }
+
+    #[test]
+    fn a_record_too_long_is_refused_before_it_is_read() {
+        let (mut seal, _) = seals(&[3; 16], &[1; 16], &[2; 16]);
+        let mut wire = Vec::new();
+        seal.write(&mut wire, &[0; 100]).unwrap();
+        let (mut other, _) = seals(&[3; 16], &[1; 16], &[2; 16]);
+        assert!(other.read(&mut &wire[..], MAX_GREETING).is_err());
+        // Only the length was looked at: 4 GiB announced, 4 bytes there.
+        let (mut third, _) = seals(&[3; 16], &[1; 16], &[2; 16]);
+        assert!(
+            third
+                .read(&mut &u32::MAX.to_le_bytes()[..], MAX_RECORD)
+                .is_err()
+        );
+    }
+
+    /// Anyone on the network can connect. Whoever does so without the key,
+    /// saying nothing or a byte now and then, holds up neither the receiver
+    /// that has the key nor the sender.
+    #[test]
+    fn a_stranger_on_the_network_holds_nothing_up() {
+        use qrsend_core::sender::MemorySource;
+        let (listener, offer) = listen(Some("127.0.0.1"), 0).unwrap();
+        let addr = SocketAddr::new("127.0.0.1".parse().unwrap(), offer.port);
+        let body: Vec<u8> = (0..100_000u32).map(|i| (i * 7) as u8).collect();
+        let layout = SessionLayout {
+            session_id: 42,
+            flags: 0,
+            seg_shift: 16,
+            meta_len: 300,
+            body_len: body.len() as u64,
+            symbol_size: SYMBOL_SIZE,
+        };
+        let (events, _events) = unbounded();
+        let body2 = body.clone();
+        serve(
+            listener,
+            offer.clone(),
+            layout,
+            move || {
+                Ok(MemorySource {
+                    meta: vec![1; 300],
+                    body: body2.clone(),
+                    seg_shift: 16,
+                })
+            },
+            events,
+        );
+        // One says nothing at all; another trickles its greeting.
+        let _silent = TcpStream::connect(addr).unwrap();
+        let mut trickle = TcpStream::connect(addr).unwrap();
+        thread::spawn(move || {
+            for b in MAGIC {
+                if trickle.write_all(&[*b]).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(400));
+            }
+        });
+        thread::sleep(Duration::from_millis(100));
+        let began = Instant::now();
+        let link = connect(offer, 42);
+        let first = link.messages.recv_timeout(Duration::from_secs(3));
+        assert!(first.is_ok(), "nothing came within 3 s");
+        assert!(began.elapsed() < HANDSHAKE_TIMEOUT);
+        let frames = direct::unpack(&first.unwrap()).count();
+        assert!(frames > 0);
     }
 }
