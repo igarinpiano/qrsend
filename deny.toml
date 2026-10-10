@@ -1,0 +1,55 @@
+# cargo-deny: what the dependency tree may contain (run by the security
+# workflow on every change and every week: new advisories arrive without any
+# change here). `cargo deny check` runs it locally.
+
+[graph]
+# Every platform and feature that is built or published (the web build's
+# wasm32 dependencies, Windows, macOS, the optional features).
+all-features = true
+
+[advisories]
+# Vulnerabilities, unmaintained and unsound crates (RustSec), and versions
+# withdrawn from crates.io. An advisory that does not apply is listed here
+# with the reason, never silently.
+version = 2
+yanked = "deny"
+ignore = [
+    # `instant` is unmaintained (not a vulnerability). Only minifb (the window
+    # display) uses it, and no minifb release has moved off it yet.
+    { id = "RUSTSEC-2024-0384", reason = "unmaintained, no known vulnerability; only via minifb, no release without it" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# Licenses compatible with distributing QRSend under Apache-2.0.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# Several versions of one crate are common (rand 0.8 for age, 0.10 for the
+# CLI); a wildcard version requirement is not.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Crates only from crates.io: no git dependencies, no other registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

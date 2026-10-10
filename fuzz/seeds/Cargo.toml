@@ -1,0 +1,12 @@
+# Writes valid inputs for every fuzz target (real frames, manifests, codes,
+# sound), so that fuzzing starts from what QRSend actually reads instead of
+# having to find its way to it: `cargo run -p qrsend-fuzz-seeds -- corpus`.
+[package]
+name = "qrsend-fuzz-seeds"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[dependencies]
+qrsend-core = { path = "../../crates/qrsend-core" }
+serde_json = "1"

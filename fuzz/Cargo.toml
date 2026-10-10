@@ -1,0 +1,66 @@
+# Fuzz targets for everything QRSend reads from others: codes off a screen or
+# from a recording, messages from a network connection, sound. Run with
+# cargo-fuzz (nightly): `cargo +nightly fuzz run <target>` in this directory.
+# The security workflow runs each of them for a while on every change.
+[package]
+name = "qrsend-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+qrsend-core = { path = "../crates/qrsend-core" }
+serde_json = "1"
+
+# Not part of the main workspace (it needs nightly and libFuzzer).
+[workspace]
+members = [".", "seeds"]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "frame"
+path = "fuzz_targets/frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codes"
+path = "fuzz_targets/codes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "meta"
+path = "fuzz_targets/meta.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload"
+path = "fuzz_targets/payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receiver"
+path = "fuzz_targets/receiver.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sound"
+path = "fuzz_targets/sound.rs"
+test = false
+doc = false
+bench = false

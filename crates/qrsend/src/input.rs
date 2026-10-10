@@ -377,6 +377,27 @@ mod tests {
         }
         let ok = format!("YUV4MPEG2 W2 H2 Cmono\nFRAME\n{}", "\0".repeat(4));
         read_y4m(ok.as_bytes(), &tx, false).unwrap();
+        // A damaged video is an error, whatever is damaged.
+        let good = format!("YUV4MPEG2 W4 H2 C420jpeg\nFRAME\n{}", "\x10".repeat(12)).into_bytes();
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..20_000 {
+            let mut data = good.clone();
+            data.truncate(next() as usize % (data.len() + 1));
+            for _ in 0..next() % 3 {
+                if !data.is_empty() {
+                    let at = next() as usize % data.len();
+                    let bytes = b"0123456789WHCFRAME \n\xff";
+                    data[at] = bytes[next() as usize % bytes.len()];
+                }
+            }
+            let _ = read_y4m(&data[..], &tx, false);
+        }
     }
 
     #[test]

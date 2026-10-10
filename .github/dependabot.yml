@@ -1,0 +1,51 @@
+# Proposes dependency updates (and, with Dependabot security updates on in
+# the repository settings, fixes for advisories as soon as they appear).
+# Updates of each kind come together in one pull request a week. A version
+# is proposed only after it has been out for a week (a package hijacked to
+# publish a malicious release is usually found and pulled within days);
+# security updates do not wait.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      rust:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      fuzz:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      web:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  # The actions are pinned to commits: this moves the pins (and the version
+  # comments next to them) when new versions come out.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
