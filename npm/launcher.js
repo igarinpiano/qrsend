@@ -4,7 +4,7 @@
 // installed alongside via optionalDependencies (the same well-established
 // approach used by esbuild / swc / Biome / turbo).
 "use strict";
-const { spawnSync } = require("child_process");
+const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
@@ -132,20 +132,47 @@ function launchErrorMessage(found, error, arch = process.arch) {
   return msg;
 }
 
+// Signals the program should get too when they are sent to this process
+// alone (a terminal's Ctrl-C reaches both anyway).
+const FORWARDED = process.platform === "win32" ? [] : ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
+
 function main() {
   const found = findBinary();
   if (found.error) {
     console.error(found.error);
     process.exit(1);
   }
-  const result = spawnSync(found.path, process.argv.slice(2), {
-    stdio: "inherit",
-  });
-  if (result.error) {
-    console.error(launchErrorMessage(found, result.error));
-    process.exit(1);
+  // Waits for the program instead of blocking on it: on Ctrl-C, `qrsend
+  // recv` saves what it has and prints how to continue, which takes a
+  // moment, and this process must neither end before that (the shell would
+  // be back while it still writes) nor lose its exit status.
+  const child = spawn(found.path, process.argv.slice(2), { stdio: "inherit" });
+  const forward = {};
+  for (const signal of [...FORWARDED, "SIGINT"]) {
+    forward[signal] = () => {
+      if (FORWARDED.includes(signal)) {
+        try {
+          child.kill(signal);
+        } catch (e) {
+          /* already gone */
+        }
+      }
+    };
+    process.on(signal, forward[signal]);
   }
-  process.exit(result.status === null ? 1 : result.status);
+  child.on("error", (error) => {
+    console.error(launchErrorMessage(found, error));
+    process.exit(1);
+  });
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      // Ended by a signal: end the same way, so that the shell sees it.
+      for (const [name, handler] of Object.entries(forward)) process.removeListener(name, handler);
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code === null ? 1 : code);
+  });
 }
 
 if (require.main === module) {

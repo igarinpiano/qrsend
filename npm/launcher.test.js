@@ -72,3 +72,35 @@ test("32-bit ARM picks ARMv7 or ARMv6, glibc or musl", () => {
     /could not find/,
   );
 });
+
+test("Ctrl-C: the launcher waits for the program and passes its exit status on", { skip: process.platform === "win32" }, async () => {
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  const { spawn } = require("child_process");
+  const { PLATFORMS } = require("./launcher.js");
+  const entry = PLATFORMS[`${process.platform} ${process.arch}`];
+  if (!entry) return;
+  // An installed launcher next to a stand-in for the program, which (like
+  // `qrsend recv`) takes a moment on Ctrl-C to save and say how to go on.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "qrsend-launcher-"));
+  const launcher = path.join(root, "node_modules", "qrsend-cli", "bin", "qrsend.js");
+  fs.mkdirSync(path.dirname(launcher), { recursive: true });
+  fs.copyFileSync(path.join(__dirname, "launcher.js"), launcher);
+  for (const pkg of [entry.pkg, entry.muslPkg].filter(Boolean)) {
+    const bin = path.join(root, "node_modules", ...pkg.split("/"), "bin", "qrsend");
+    fs.mkdirSync(path.dirname(bin), { recursive: true });
+    fs.writeFileSync(bin, "#!/bin/sh\ntrap 'sleep 0.5; echo saved; exit 2' INT\necho running\nwhile :; do sleep 0.1; done\n", { mode: 0o755 });
+  }
+  const child = spawn(process.execPath, [launcher, "recv"], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout.on("data", (d) => (out += d));
+  await new Promise((resolve) => child.stdout.once("data", resolve));
+  // What a terminal does on Ctrl-C: the signal goes to the whole group.
+  process.kill(-child.pid, "SIGINT");
+  // ("close": the program's output is all in as well.)
+  const [code, signal] = await new Promise((resolve) => child.on("close", (c, s) => resolve([c, s])));
+  fs.rmSync(root, { recursive: true, force: true });
+  assert.deepStrictEqual([code, signal], [2, null]);
+  assert.match(out, /saved/);
+});
