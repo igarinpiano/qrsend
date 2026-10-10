@@ -221,10 +221,15 @@ pub fn finalize(
                 ".qrsend-{}.partial",
                 session_hex(store.state.session_id)
             ));
-            if partial.exists() {
+            if fs::symlink_metadata(&partial).is_ok() {
                 fs::remove_dir_all(&partial)?;
             }
-            fs::create_dir_all(&partial)?;
+            // Made anew (never one that someone else put there), and for this
+            // user only while it fills.
+            let mut new_dir = fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut new_dir, 0o700);
+            new_dir.create(&partial)?;
             if let Err(e) = unpack(
                 manifest,
                 reader,

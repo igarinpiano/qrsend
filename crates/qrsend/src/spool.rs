@@ -118,11 +118,12 @@ fn summary(manifest: &Manifest) -> String {
 impl Spool {
     pub fn create(content: Content, opts: &SpoolOptions) -> Result<Spool> {
         let root = paths::spools_dir();
-        fs::create_dir_all(&root).with_context(|| format!("cannot create {}", root.display()))?;
+        paths::create_private(&root)
+            .with_context(|| format!("cannot create {}", root.display()))?;
         cleanup_old(&root);
         let session_id = new_session_id();
         let tmp = root.join(format!(".tmp-{}", session_hex(session_id)));
-        fs::create_dir_all(&tmp)?;
+        paths::create_private(&tmp)?;
         let result = Self::build(&tmp, session_id, content, opts);
         if result.is_err() {
             let _ = fs::remove_dir_all(&tmp);

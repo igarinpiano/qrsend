@@ -193,7 +193,8 @@ pub fn run(args: SendArgs) -> Result<()> {
         } else {
             10.0
         });
-    if !(0.0..=10.0).contains(&args.redundancy) || fps <= 0.0 || args.passes <= 0.0 {
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if !(0.0..=10.0).contains(&args.redundancy) || !positive(fps) || !positive(args.passes) {
         bail!("--redundancy must be within 0..10, and --fps and --passes positive");
     }
     let exporting = args.export_frames.is_some() || args.export_video.is_some();

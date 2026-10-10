@@ -66,7 +66,7 @@ impl Store {
             );
         }
         let dir = Self::dir_for(p.session_id);
-        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        paths::create_private(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let now = util::now();
         let state = State {
             session_id: p.session_id,
