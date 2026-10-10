@@ -355,19 +355,36 @@ function state(s: RecvSession): RecvState {
   };
 }
 
-/** Decrypts (if needed) and checks the meta segment; records a fatal error if it cannot be used. */
-async function openMeta(s: RecvSession, meta: Uint8Array): Promise<boolean> {
+/**
+ * Decrypts (if needed) and checks the meta segment. "damaged": of no use, but another copy may be (damaged, or
+ * tampered with): it is collected anew. "final": this device cannot open the transfer, recorded as its error.
+ */
+async function openMeta(s: RecvSession, meta: Uint8Array): Promise<{ opened: "yes" | "damaged" | "final"; why?: string }> {
+  const flags = (s.r.params() as { flags: number }).flags;
+  const me = flags & FLAG_ENCRYPTED && s.me?.kind === "webcrypto" ? s.me : undefined;
+  let keys: Uint8Array[] = [];
   try {
-    const flags = (s.r.params() as { flags: number }).flags;
-    if (flags & FLAG_ENCRYPTED && s.me?.kind === "webcrypto") {
-      for (const key of stanzaKeys(meta) as Uint8Array[]) s.r.addSecret(key, await sharedSecret(s.me, key));
-    }
-    s.r.openMeta(meta);
-    return true;
+    if (me) keys = stanzaKeys(meta) as Uint8Array[];
+  } catch (e) {
+    // (Not even the start of an encrypted file.)
+    return { opened: "damaged", why: e instanceof Error ? e.message : String(e) };
+  }
+  try {
+    for (const key of keys) s.r.addSecret(key, await sharedSecret(me!, key));
+    const damage = s.r.openMeta(meta) as string | undefined;
+    return damage ? { opened: "damaged", why: damage } : { opened: "yes" };
   } catch (e) {
     s.error = e instanceof Error ? e.message : String(e);
-    return false;
+    return { opened: "final", why: s.error };
   }
+}
+
+/** Forgets a stored meta segment that does not open, so that it is received again. */
+async function forgetMeta(s: RecvSession): Promise<void> {
+  s.done.delete(0);
+  s.r.resetSegment(0);
+  await dropKept(s, 0);
+  if (s.record) await (await fileStore()).remove(dir(s.record.session, "meta"));
 }
 
 function segmentAt(s: RecvSession, index: number): Uint8Array {
@@ -497,7 +514,10 @@ async function resume(s: RecvSession, rec: SessionRecord): Promise<void> {
   s.unverified = [...rec.unverified];
   if (s.done.has(0)) {
     const meta = await readWhole(store, dir(rec.session, "meta"));
-    if (await openMeta(s, meta)) verifyPending(s);
+    const { opened } = await openMeta(s, meta);
+    if (opened === "yes") verifyPending(s);
+    // (Stored by an earlier version without being checked first.)
+    else if (opened === "damaged") await forgetMeta(s);
   }
   await restoreKept(s, rec);
 }
@@ -633,18 +653,28 @@ async function recvPush(
   for (const { index, data } of s.r.takeCompleted() as { index: number; data: Uint8Array }[]) {
     if (s.done.has(index)) continue;
     if (index === 0) {
+      // Checked before it is kept: one that does not open is collected anew.
+      const { opened, why } = await openMeta(s, data);
+      logLine("rx", opened === "yes" ? "file list" : opened === "damaged" ? "file list damaged: collecting it again" : "file list unusable", {
+        bytes: data.length,
+        s: s.lockedAt ? (performance.now() - s.lockedAt) / 1000 : undefined,
+        // (What a damaged list's parser says may quote it, names included: only final errors, which are this
+        // app's own words, are logged.)
+        error: opened === "final" ? why?.slice(0, 200) : undefined,
+      });
+      if (opened === "final") break;
+      if (opened === "damaged") {
+        await forgetMeta(s);
+        s.notice = "The file list failed verification and will be received again.";
+        continue;
+      }
+      // (Written anew: what may be there from before must not trail it.)
+      await store.remove(dir(rec.session, "meta"));
       const meta = await store.open(dir(rec.session, "meta"));
       meta.write(0, data);
       meta.close();
       s.done.add(0);
       important = true;
-      const opened = await openMeta(s, data);
-      logLine("rx", opened ? "file list" : "file list unusable", {
-        bytes: data.length,
-        s: s.lockedAt ? (performance.now() - s.lockedAt) / 1000 : undefined,
-        error: opened ? undefined : s.error?.slice(0, 200),
-      });
-      if (!opened) break;
       verifyPending(s);
     } else {
       s.body!.write((index - 1) * segSize, data);
