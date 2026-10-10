@@ -151,8 +151,7 @@ pub struct DeviceIdentity {
 impl DeviceIdentity {
     pub fn generate(name: &str) -> Result<DeviceIdentity, CryptoError> {
         let mut seed = [0u8; 32];
-        rand::RngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut seed)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        getrandom::getrandom(&mut seed).map_err(|e| io::Error::other(e.to_string()))?;
         Ok(DeviceIdentity {
             name: name.to_string(),
             x25519: age::x25519::Identity::generate(),

@@ -93,7 +93,9 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 
 - `cargo fmt` で整形されるため、スクリプトで文字列置換して編集すると一致しないことがある。編集は Read → Edit で行う。
 - core は WASM でも使うので、スレッド・ファイルシステム・プロセスを直接使わない。zstd は feature で切替: `zstd-native`（既定、C ライブラリ）/ `ruzstd`（WASM、レベル 1 相当・finish 時に一括圧縮）。どちらも標準 zstd なので相互に読める。
-- 乱数は rand 0.8 の OsRng（age と同じ getrandom 0.2 系に揃え、wasm では getrandom の `js` feature を qrsend-wasm 側で有効化）。
+- 乱数: core は rand を使わず getrandom 0.2 を直接使う（age と同じ版。wasm では qrsend-wasm が `js` feature を有効化）。p256 0.14 などが引き込む getrandom 0.4 は、qrsend-wasm の `getrandom04`（`wasm_js` feature）で有効化している（無いと wasm のビルドが compile_error で止まる）。CLI は rand 0.10。
+- 依存の版の決まり（Dependabot の `ignore` に理由つきで書いてある）: `bech32` は age と同じ版（0.11。型を渡し合うので）、core の `getrandom` は 0.2、web の TypeScript は svelte-check が対応するまで 6。
+- **linkcert の証明書は版が変わっても 1 バイトも変えてはいけない**（ブラウザと CLI がそれぞれ種から作って一致させるので、版の違う相手とつながらなくなる）。`linkcert::tests::the_certificate_of_a_seed_never_changes` が固定値で見張る（p256 を 0.13 → 0.14 に上げたときに追加）。
 - CLI のデコード（decode.rs）: rxing は縮小・圧縮に強いが多数のコードは苦手、rqrr は位置（四隅・モジュール数）を返すがスクリーンショットに弱い。全体を一度に読むと 2px モジュールの 28 個入りフレームでどちらも半分程度しか読めなかったので、「rxing で 1 個 → rqrr で位置を測る → 4 モジュール間隔の格子をたどって各セルを切り出し個別にデコード（失敗時は 2〜3 倍に拡大して再試行）」にしている。実測: 12×12 で 144/144、4K・1px モジュール 299 個で 290。rqrr を密なフレーム全体にかけると数十秒かかるので避ける。
 - QR 生成は fast_qr ＋マスク固定（1 個 0.9ms。qrcode crate のマスク選定は 11ms）。qrcode crate は容量計算と ID 用 QR（render_text）にだけ使う。
 - clap で `Option<T>` 型の引数に独自の value_parser（Option を返す）を付けると実行時に型不一致で panic する。`--density` は専用 enum（DensityArg）にしている。
@@ -184,7 +186,7 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
   - Y4M の大きさは 16384 まで（ヘッダの値をそのまま掛け算していた）。
   - npm の launcher は子を待つ（`spawn`）: Ctrl-C でも先に終わらず、`qrsend recv` の終了コード 2 と resume code の表示を待つ。シグナルは子に渡し、子がシグナルで終わったら同じシグナルで終わる。
   - ワークフロー: アクションはすべてコミットの SHA に固定（コメントに版。Dependabot が更新する）、checkout は `persist-credentials: false`、権限は最小（ci は contents: read、Pages の書き込みは deploy ジョブだけ）、matrix の値は env 経由で run に渡す。zizmor が見張る。
-- **セキュリティ CI**（`security.yml`、push・PR・毎週月曜）: cargo-deny（`deny.toml`。勧告を無視するときは理由つきで書く。いまは minifb 経由の `instant` の「メンテ終了」だけ）、npm audit（開発用の依存も。ビルドに使うので）と `npm audit signatures`、CodeQL（Rust・TypeScript・Actions、security-extended）、zizmor（ワークフロー）、fuzz（6 ターゲット、PR では各 2 分、毎週は 20 分。落ちたら入力を artifact に残す）。Dependabot（`.github/dependabot.yml`）は cargo・npm・Actions を週 1 回まとめて、公開から 7 日待って提案する（乗っ取られたパッケージ対策）。Dependabot security updates はリポジトリの設定でオンにする。
+- **セキュリティ CI**（`security.yml`、push・PR・毎週月曜）: cargo-deny（`deny.toml`。勧告を無視するときは理由つきで書く。いまは無し。minifb 0.29 で `instant` が外れた）、npm audit（開発用の依存も。ビルドに使うので）と `npm audit signatures`、CodeQL（Rust・TypeScript・Actions、security-extended）、zizmor（ワークフロー）、fuzz（6 ターゲット、PR では各 2 分、毎週は 20 分。落ちたら入力を artifact に残す）。Dependabot（`.github/dependabot.yml`）は cargo・npm・Actions を週 1 回まとめて、公開から 7 日待って提案する（乗っ取られたパッケージ対策）。Dependabot security updates はリポジトリの設定でオンにする。
   - fuzz を手元で: nightly と cargo-fuzz（`cargo install cargo-fuzz`）。CLI だけにある読み取り（rtc の offer、mDNS の応答、Y4M）は fuzz ターゲットから使えないので、単体テストで壊れた入力を試している。
 
 ## リリース

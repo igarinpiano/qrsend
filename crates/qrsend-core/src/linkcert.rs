@@ -74,7 +74,7 @@ pub fn certificate(seed: &[u8]) -> LinkCertificate {
             SigningKey::from_slice(h.finalize().as_bytes()).ok()
         })
         .expect("some hash is a key");
-    let point = key.verifying_key().to_encoded_point(false);
+    let point = key.verifying_key().to_sec1_point(false);
     let mut public = vec![0u8];
     public.extend_from_slice(point.as_bytes());
     let mut serial = *blake3::derive_key("qrsend link certificate serial v1", seed)
@@ -146,6 +146,23 @@ mod tests {
         // An X.509 certificate of the usual size for this kind of key.
         assert_eq!(a.certificate[0], SEQUENCE);
         assert!((250..400).contains(&a.certificate.len()));
+    }
+
+    /// The certificate must not change with a library update: a browser and
+    /// the command line of different versions work it out on their own and
+    /// have to agree (computed with p256 0.13, kept with 0.14).
+    #[test]
+    fn the_certificate_of_a_seed_never_changes() {
+        let c = certificate(&[7; 16]);
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        assert_eq!(
+            hex(&c.fingerprint()),
+            "1470c28fa1a18459507e292a48bbb2e7d99b51c42134a0977249f9e603ef1f08"
+        );
+        assert_eq!(
+            hex(&Sha256::digest(&c.private_key)),
+            "d44d7c71b04db2c453de4253c2606f2d8dc920ca973140a5cf8d7fe1adad8076"
+        );
     }
 
     #[test]

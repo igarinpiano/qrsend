@@ -114,6 +114,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+          # (Nothing cached: what a release builds comes from the lockfile alone.)
+          package-manager-cache: false
       - name: Build the web app
         working-directory: web
         run: |
@@ -222,6 +224,7 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
       - name: Publish (platform packages first, the main package last)
         env:
           VERSION: ${{ needs.check-version.outputs.version }}
