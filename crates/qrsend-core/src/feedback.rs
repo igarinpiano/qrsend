@@ -290,7 +290,9 @@ impl Feedback {
         let mut missing = Vec::new();
         let mut end = 0u64;
         for _ in 0..count {
-            let start = end + get_leb(payload, &mut pos)?;
+            let start = end
+                .checked_add(get_leb(payload, &mut pos)?)
+                .ok_or(FeedbackError::Malformed)?;
             let len = get_leb(payload, &mut pos)?;
             end = start.checked_add(len).ok_or(FeedbackError::Malformed)?;
             if len == 0 || end > crate::frame::MAX_U24 as u64 + 1 {
@@ -427,6 +429,22 @@ mod tests {
             Feedback::decode(&text[..text.len() - 3]),
             Err(FeedbackError::Malformed)
         );
+    }
+
+    /// Feedback comes from whoever shows a code to the sender's camera: no
+    /// number in it may overflow.
+    #[test]
+    fn rejects_ranges_beyond_any_transfer() {
+        for (gap, len) in [(u64::MAX, 1), (1, u64::MAX), (1 << 24, 1)] {
+            let mut data = 7u32.to_le_bytes().to_vec();
+            data.push(0);
+            for v in [1, 2, 3, 2, 1, 1, gap, len] {
+                put_leb(&mut data, v);
+            }
+            let check = crc32fast::hash(&data) as u16;
+            data.extend_from_slice(&check.to_le_bytes());
+            assert_eq!(Feedback::from_bytes(&data), Err(FeedbackError::Malformed));
+        }
     }
 
     #[test]

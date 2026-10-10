@@ -95,8 +95,7 @@ fn summary(manifest: &Manifest) -> String {
                 .entries
                 .iter()
                 .find(|e| !e.path.contains('/'))
-                .map(|e| e.path.as_str())
-                .unwrap_or("?");
+                .map_or("?".into(), |e| util::printable(&e.path));
             let tops = manifest
                 .entries
                 .iter()
@@ -105,7 +104,7 @@ fn summary(manifest: &Manifest) -> String {
             let what = if tops > 1 {
                 format!("{first} and {} more", tops - 1)
             } else {
-                first.to_string()
+                first
             };
             format!(
                 "{what} ({files} file{}, {})",
