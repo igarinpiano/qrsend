@@ -1,7 +1,14 @@
-# Publishes a release: GitHub Releases → npm → crates.io, in that fixed order.
-# Pick the destinations when running it; unselected stages are skipped, and a
-# failed stage stops the later ones. Manual only: Actions → publish-all → Run
-# workflow. (Modeled on igarinpiano/dirlens.)
+# Publishes a release: GitHub Releases first, then npm and crates.io side by
+# side. Pick the destinations when running it; unselected stages are skipped.
+# Manual only: Actions → publish-all → Run workflow. (Modeled on
+# igarinpiano/dirlens.)
+#
+# Nothing is published unless every target of the build matrix was built: a
+# target that fails stops all three (see the `complete` job of
+# reusable-build-matrix.yml). To go on without one on purpose, tick "allow a
+# missing target". A failed GitHub Release stops npm and crates.io; npm and
+# crates.io do not wait for each other (one package that npm refuses must
+# not hold the crates back).
 #
 # Authentication uses Trusted Publishing (OIDC) for both registries — no
 # tokens are stored in this repository.
@@ -31,8 +38,7 @@
 # ADDING A PLATFORM LATER: its npm package does not exist yet, so the npm
 # stage publishes everything else and then fails naming it. Publish it once
 # with `scripts/npm-publish-remaining.sh <version> --trust` (which also adds
-# its trusted publisher); the next release includes it automatically. The
-# crates.io stage is skipped when the npm stage fails: run it again on its own.
+# its trusted publisher); the next release includes it automatically.
 name: publish-all
 
 on:
@@ -57,6 +63,10 @@ on:
         description: "Publish to crates.io"
         type: boolean
         default: true
+      allow_missing_target:
+        description: "Allow a missing target: publish although one could not be built (it is left out)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -92,6 +102,7 @@ jobs:
     uses: ./.github/workflows/reusable-build-matrix.yml # zizmor: ignore[self-repository] (the documented form)
     with:
       ref: ${{ inputs.ref }}
+      allow_missing: ${{ inputs.allow_missing_target }}
 
   web:
     needs: check-version
@@ -255,12 +266,15 @@ jobs:
             exit 1
           fi
 
+  # (Beside npm, not after it. Like npm it follows the builds — where they
+  # ran: with only crates.io selected there are none — and the GitHub Release.)
   crates-io:
-    needs: [check-version, github-release, npm]
+    needs: [check-version, build, github-release]
     if: |
       always() && inputs.publish_crates_io &&
-      needs.github-release.result != 'failure' && needs.github-release.result != 'cancelled' &&
-      needs.npm.result != 'failure' && needs.npm.result != 'cancelled'
+      needs.check-version.result == 'success' &&
+      needs.build.result != 'failure' && needs.build.result != 'cancelled' &&
+      needs.github-release.result != 'failure' && needs.github-release.result != 'cancelled'
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
