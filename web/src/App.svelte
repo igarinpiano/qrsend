@@ -5,6 +5,7 @@
   import DevicesView from "./views/DevicesView.svelte";
   import InboxView from "./views/InboxView.svelte";
   import PreviewView from "./views/PreviewView.svelte";
+  import StorageView from "./views/StorageView.svelte";
   import { log, logLines, logText } from "./lib/log";
   import { reloadForUpdate } from "./lib/update";
 
@@ -90,6 +91,8 @@
       <InboxView />
     {:else if route.path === "/preview"}
       <PreviewView />
+    {:else if route.path === "/storage"}
+      <StorageView />
     {:else}
       <Home />
     {/if}
@@ -106,7 +109,7 @@
 <footer class="small muted">
   <p>
     <a href="https://github.com/igarinpiano/qrsend">QRSend</a> is open source (Apache-2.0). Nothing you send or receive
-    leaves your devices. <a href="#/preview">Feature preview</a> ·
+    leaves your devices. <a href="#/preview">Feature preview</a> · <a href="#/storage">Storage</a> ·
     <button class="link" onclick={copyLog} data-testid="copy-log" title="What happened when, without file names, contents, IDs or addresses: for a bug report">
       {logCopied || "Copy log"}
     </button>

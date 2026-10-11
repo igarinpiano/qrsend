@@ -26,14 +26,21 @@ impl Env {
 
     /// Runs as a given "device" (separate identity, inbox and cache).
     fn run_as(&self, device: &str, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_qrsend"))
+        self.command(device, args).output().unwrap()
+    }
+
+    /// The command `run_as` runs, to be given more of an environment.
+    fn command(&self, device: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_qrsend"));
+        command
             .args(args)
             .current_dir(&self.root)
             .env("QRSEND_DATA_DIR", self.path(&format!("{device}/data")))
             .env("QRSEND_CACHE_DIR", self.path(&format!("{device}/cache")))
             .env("QRSEND_CONFIG_DIR", self.path(&format!("{device}/config")))
-            .output()
-            .unwrap()
+            .env_remove("QRSEND_LOG")
+            .env_remove("QRSEND_NO_KEEP");
+        command
     }
 
     fn ok_as(&self, device: &str, args: &[&str]) -> String {
@@ -552,4 +559,227 @@ fn names_cannot_drive_the_terminal() {
         !list.contains('\u{1b}') && list.contains("report\\u{1b}"),
         "{list:?}"
     );
+    // The same where the storage is listed: of what was received, and of
+    // what was sent.
+    let list = env.ok(&["storage"]);
+    assert!(
+        !list.contains('\u{1b}') && list.matches("report\\u{1b}").count() == 2,
+        "{list:?}"
+    );
+}
+
+#[test]
+fn storage_and_logs_are_listed_and_removed() {
+    let env = Env::new("storage");
+    fs::create_dir_all(env.path("in")).unwrap();
+    fs::write(env.path("in/secret-name.bin"), noise(300_000)).unwrap();
+
+    // Nothing yet.
+    assert!(
+        env.ok(&["storage"])
+            .starts_with("QRSend keeps nothing on this machine.")
+    );
+    let out = env.run(&["log"]);
+    assert!(out.status.success() && out.stdout.is_empty());
+
+    // A send, and a receive that stops halfway.
+    env.ok(&["send", "--plain", "in", "--export-frames", "f"]);
+    let all = frames(&env.path("f"));
+    for f in &all[40..] {
+        fs::remove_file(f).unwrap();
+    }
+    let out = env.run(&["recv", "--images", "f", "-o", "out"]);
+    assert_eq!(out.status.code(), Some(2));
+
+    // Both left a log without having been asked, and the latest is printed.
+    let list = env.ok(&["log", "list"]);
+    assert_eq!(list.matches(" UTC  ").count(), 2, "{list}");
+    let received = env.ok(&["log"]);
+    assert!(received.contains("· qrsend recv\n"), "{received}");
+    assert!(
+        received.contains("end    not complete: kept in the inbox"),
+        "{received}"
+    );
+    // Runs are counted back from the latest, as git counts commits.
+    assert_eq!(env.ok(&["log", "HEAD"]), received);
+    let sent = env.ok(&["log", "HEAD~1"]);
+    assert!(sent.contains("· qrsend send\n"), "{sent}");
+    assert!(sent.trim_end().ends_with("end    finished"), "{sent}");
+    assert_eq!(env.ok(&["log", "show", "HEAD^"]), sent);
+    assert!(
+        list.contains("HEAD     ") && list.contains("HEAD~1   "),
+        "{list}"
+    );
+    assert!(!sent.contains("secret-name") && !received.contains("secret-name"));
+    assert!(!env.run(&["log", "HEAD~2"]).status.success());
+    assert!(!env.run(&["log", "2"]).status.success());
+
+    // A run that fails says that there is a log, and the log says how it ended.
+    let out = env.run(&["recv", "--images", "nowhere"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("`qrsend log` prints it"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let failed = env.ok(&["log"]);
+    assert!(failed.contains("end    stopped with an error"), "{failed}");
+    assert!(!failed.contains("nowhere"), "{failed}");
+
+    // No log is kept when it is written elsewhere, or turned off.
+    env.ok(&[
+        "send",
+        "--plain",
+        "--text",
+        "x",
+        "--export-frames",
+        "g",
+        "--log",
+        "own.log",
+    ]);
+    let out = env
+        .command(
+            "me",
+            &["send", "--plain", "--text", "x", "--export-frames", "h"],
+        )
+        .env("QRSEND_LOG", "off")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(env.path("own.log").exists());
+    assert_eq!(env.ok(&["log", "list"]).matches(" UTC  ").count(), 3);
+
+    // Everything is in the list: the unfinished transfer, the three sent, the logs.
+    let listed = env.ok(&["storage"]);
+    assert!(listed.contains("1/2 parts"), "{listed}");
+    assert!(listed.contains("1 file, 292.97 KiB"), "{listed}");
+    assert_eq!(listed.matches("removed in 14 days").count(), 3, "{listed}");
+    assert!(listed.contains("3 logs"), "{listed}");
+
+    // Nothing is removed without a word of what, or without a yes.
+    for args in [
+        &["storage", "clean"][..],
+        &["storage", "clean", "--inbox"],
+        &["storage", "clean", "nothing-like-this", "--yes"],
+    ] {
+        assert!(!env.run(args).status.success(), "{args:?}");
+    }
+    let dry = env.ok(&["storage", "clean", "--all", "--dry-run"]);
+    assert!(dry.contains("Would remove 5 things"), "{dry}");
+    assert!(
+        env.ok(&["storage", "clean", "--older-than", "1h", "--yes"])
+            .contains("Nothing was removed.")
+    );
+    assert_eq!(env.ok(&["storage"]), listed);
+
+    // By kind, by ID, and the rest.
+    env.ok(&["storage", "clean", "--logs", "--yes"]);
+    assert!(env.ok(&["log", "list"]).contains("No log is kept."));
+    let id = env
+        .ok(&["inbox", "list"])
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    env.ok(&["storage", "clean", "--inbox", &id, "--yes"]);
+    assert!(env.ok(&["inbox", "list"]).contains("Inbox is empty."));
+    assert_eq!(
+        env.ok(&["storage"]).matches("removed in 14 days").count(),
+        3
+    );
+    env.ok(&["storage", "clean", "--all", "--yes"]);
+    assert!(
+        env.ok(&["storage"])
+            .starts_with("QRSend keeps nothing on this machine.")
+    );
+    assert!(
+        env.ok(&["cache", "list"])
+            .contains("No cached send sessions.")
+    );
+}
+
+#[test]
+fn nothing_sent_is_kept_when_asked_not_to() {
+    let env = Env::new("nokeep");
+    fs::write(env.path("a.bin"), noise(50_000)).unwrap();
+    let sent = |env: &Env| env.ok(&["storage"]).matches("removed in 14 days").count();
+
+    // Kept, unless told otherwise.
+    env.ok(&["send", "--plain", "a.bin", "--export-frames", "f"]);
+    assert_eq!(sent(&env), 1);
+
+    // The option: gone when sending ends, and what was received is whole.
+    let out = env.run(&[
+        "send",
+        "--plain",
+        "a.bin",
+        "--export-frames",
+        "g",
+        "--no-keep",
+    ]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("Not kept (--no-keep)"), "{said}");
+    assert!(!said.contains("To resend later"), "{said}");
+    assert_eq!(sent(&env), 1);
+    env.ok(&["recv", "--images", "g", "-o", "out"]);
+    assert_eq!(fs::read(env.path("out/a.bin")).unwrap(), noise(50_000));
+
+    // The same as a rule, from the environment — where "0" means no.
+    for (value, kept) in [("1", 1), ("0", 2)] {
+        let out = env
+            .command("me", &["send", "--plain", "a.bin", "--export-frames", "h"])
+            .env("QRSEND_NO_KEEP", value)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(sent(&env), kept, "QRSEND_NO_KEEP={value}");
+    }
+
+    // A send that fails after packing leaves nothing either.
+    let before = sent(&env);
+    let out = env.run(&[
+        "send",
+        "--plain",
+        "a.bin",
+        "--export-frames",
+        "i",
+        "--size",
+        "64x64",
+        "--no-keep",
+    ]);
+    assert!(!out.status.success());
+    assert_eq!(sent(&env), before);
+    assert!(!env.ok(&["storage"]).contains("left over"));
+
+    // Sending a kept transfer again with the option is the last time.
+    let id = env
+        .ok(&["cache", "list"])
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    env.ok(&[
+        "send",
+        "--session",
+        &id,
+        "--export-frames",
+        "j",
+        "--no-keep",
+    ]);
+    assert!(!env.ok(&["cache", "list"]).contains(&id));
+}
+
+#[test]
+fn only_the_last_logs_are_kept() {
+    let env = Env::new("logs");
+    for _ in 0..12 {
+        // (A run that fails at once still leaves its log.)
+        assert!(!env.run(&["recv", "--images", "nowhere"]).status.success());
+    }
+    let logs = fs::read_dir(env.path("me/cache/logs")).unwrap().count();
+    assert_eq!(logs, 10);
+    assert_eq!(env.ok(&["log", "list"]).matches(" UTC  ").count(), 10);
+    assert!(env.ok(&["log", "clear"]).contains("Removed 10 log(s)."));
+    assert!(!env.path("me/cache/logs").exists());
 }

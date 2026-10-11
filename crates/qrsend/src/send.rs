@@ -110,6 +110,13 @@ pub struct SendArgs {
     /// Resend a previous session (by id) from the local cache
     #[arg(long, value_name = "ID", conflicts_with_all = ["paths", "text"])]
     pub session: Option<String>,
+    /// Do not keep the packed transfer once sending ends. It is kept two
+    /// weeks otherwise, to be sent again without packing again (--session,
+    /// --resume), and takes about the size of what was sent, compressed.
+    /// Without it a transfer that stopped halfway starts over. Setting
+    /// QRSEND_NO_KEEP=1 in the environment makes this the rule
+    #[arg(long, env = "QRSEND_NO_KEEP", value_parser = clap::builder::FalseyValueParser::new())]
+    pub no_keep: bool,
     /// Encrypt for this trusted device (name, fingerprint or qrsend-id:…); repeatable
     #[arg(long, value_name = "DEVICE", conflicts_with = "plain")]
     pub to: Vec<String>,
@@ -133,8 +140,8 @@ pub struct SendArgs {
     /// Port to listen on for --lan (default: any free one)
     #[arg(long, value_name = "PORT", default_value_t = 0, requires = "lan")]
     pub lan_port: u16,
-    /// Write a diagnostic log to FILE ("-": standard error), to send along
-    /// with a report of a problem. It holds no file names, contents, device
+    /// Write the diagnostic log to FILE ("-": standard error) instead of
+    /// keeping it for `qrsend log`. It holds no file names, contents, device
     /// IDs or network addresses
     #[arg(long, value_name = "FILE")]
     pub log: Option<PathBuf>,
@@ -290,6 +297,7 @@ pub fn run(args: SendArgs) -> Result<()> {
         };
         (Spool::create(content, &opts)?, None)
     };
+    let _discard = args.no_keep.then(|| Discard::new(spool.dir.clone()));
 
     // Explicit choices win; otherwise pick the code size from the transfer
     // (small transfers) or from the frame (dense exports).
@@ -532,9 +540,35 @@ pub fn run(args: SendArgs) -> Result<()> {
             );
         }
     }
-    eprintln!(
-        "To resend later: qrsend send --session {}  (or --resume <code> from the receiver)",
-        session_hex(spool.info.session_id)
-    );
+    if args.no_keep {
+        log::line("tx", || "the packed transfer is not kept".into());
+        eprintln!("Not kept (--no-keep): to send this again, send the files again.");
+    } else {
+        eprintln!(
+            "To resend later: qrsend send --session {}  (or --resume <code> from the receiver)",
+            session_hex(spool.info.session_id)
+        );
+    }
     Ok(())
+}
+
+/// Removes a spool when sending ends (`--no-keep`): when this goes out of
+/// scope, however `run` is left, and when the program is interrupted.
+struct Discard(PathBuf);
+
+impl Discard {
+    fn new(dir: PathBuf) -> Discard {
+        let interrupted = dir.clone();
+        let _ = ctrlc::set_handler(move || {
+            let _ = std::fs::remove_dir_all(&interrupted);
+            std::process::exit(130);
+        });
+        Discard(dir)
+    }
+}
+
+impl Drop for Discard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }

@@ -64,6 +64,46 @@ pub fn printable_text(text: &str) -> String {
     out
 }
 
+/// How long ago something was, roughly.
+pub fn human_age(secs: i64) -> String {
+    match secs {
+        i64::MIN..60 => "just now".into(),
+        60..3600 => format!("{} min ago", secs / 60),
+        3600..86_400 => format!("{} h ago", secs / 3600),
+        86_400..172_800 => "1 day ago".into(),
+        _ => format!("{} days ago", secs / 86_400),
+    }
+}
+
+/// The room a file or a directory (with all that is in it) takes on disk, and
+/// when any of it was last written (seconds since 1970). Room on disk rather
+/// than length: a transfer received in part is a file with holes.
+pub fn disk_use(path: &std::path::Path) -> (u64, i64) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return (0, 0);
+    };
+    #[cfg(unix)]
+    let size = std::os::unix::fs::MetadataExt::blocks(&meta) * 512;
+    #[cfg(not(unix))]
+    let size = meta.len();
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs() as i64);
+    if !meta.is_dir() {
+        return (size, modified);
+    }
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| disk_use(&e.path()))
+        .fold((size, modified), |(s, m), (size, modified)| {
+            (s + size, m.max(modified))
+        })
+}
+
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

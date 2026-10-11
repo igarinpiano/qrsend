@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{paths, util};
 
-fn identity_path() -> PathBuf {
+pub fn identity_path() -> PathBuf {
     paths::config_dir().join("identity")
 }
 
-fn devices_path() -> PathBuf {
+pub fn devices_path() -> PathBuf {
     paths::config_dir().join("devices.json")
 }
 

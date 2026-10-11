@@ -16,6 +16,7 @@ mod recv;
 mod rtc;
 mod send;
 mod spool;
+mod storage;
 mod store;
 mod util;
 
@@ -55,6 +56,12 @@ enum Cmd {
     /// Manage cached send sessions
     #[command(subcommand)]
     Cache(CacheCmd),
+    /// Show what is kept on this machine and the room it takes; remove it
+    /// with `qrsend storage clean`
+    Storage(storage::StorageArgs),
+    /// Print the diagnostic log of the latest `send` or `recv` (one is kept
+    /// of each of the last runs), to send along with a report of a problem
+    Log(log::LogArgs),
     /// Print shell completions
     Completions { shell: clap_complete::Shell },
     /// Report what each QR detector finds in images (diagnostics)
@@ -76,8 +83,13 @@ enum CacheCmd {
 }
 
 fn main() {
-    if let Err(e) = run() {
+    let result = run();
+    log::end(result.is_ok());
+    if let Err(e) = result {
         eprintln!("error: {e:#}");
+        if log::kept_this_run() {
+            eprintln!("A log of this run was kept: `qrsend log` prints it.");
+        }
         std::process::exit(1);
     }
 }
@@ -89,6 +101,8 @@ fn run() -> Result<()> {
         Cmd::Id(args) => devices::id(args),
         Cmd::Devices(cmd) => devices::devices(cmd),
         Cmd::Inbox(cmd) => inbox::run(cmd),
+        Cmd::Storage(args) => storage::run(args),
+        Cmd::Log(args) => log::command(args),
         Cmd::Cache(CacheCmd::List) => {
             let spools = spool::Spool::list();
             if spools.is_empty() {

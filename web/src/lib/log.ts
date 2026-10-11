@@ -101,6 +101,22 @@ export function logText(): string {
 
 export const logLines = () => lines.length;
 
+/** The room the log takes (in memory, and what is kept of the session before). */
+export const logBytes = () => lines.reduce((sum, line) => sum + line.length + 1, 0) + previous.length;
+
+/** Forgets everything recorded so far, also what was kept of the session before. */
+export function clearLog(): void {
+  lines.length = 0;
+  dropped = 0;
+  previous = "";
+  dirty = false;
+  try {
+    localStorage.removeItem(STORE);
+  } catch {
+    /* no storage */
+  }
+}
+
 function keep(): void {
   if (!dirty) return;
   dirty = false;

@@ -81,11 +81,23 @@ qrsend recv --video recording.mp4 -o ~/Downloads   # needs ffmpeg for non-.y4m v
 qrsend recv --images frames/
 ```
 
-When something goes wrong, `--log FILE` (on `send` and `recv`) writes down what
-happened when: the pictures and codes read per second, the transfer found, the
-connections tried and over what kind of path they ran. It holds no file names,
-contents, device IDs or network addresses, so it can be passed on as it is. The
-web app has the same under "Copy log".
+When something goes wrong, there is a log of it afterward: every `send` and
+`recv` writes down what happened when — the pictures and codes read per
+second, the transfer found, the connections tried and over what kind of path
+they ran. It holds no file names, contents, device IDs or network addresses, so
+it can be passed on as it is. The web app has the same under "Copy log".
+
+```bash
+qrsend log            # the log of the latest run
+qrsend log HEAD~1     # the run before it (counted back as git counts commits:
+                      # HEAD, HEAD^ or HEAD~1, HEAD~2…)
+qrsend log --copy     # to the clipboard
+qrsend log list       # the last 10 runs are kept; qrsend log clear removes them
+```
+
+A kept log holds 2000 lines at most (of a longer run, the beginning and the
+end). `--log FILE` writes the log to a file of your choice instead, all of it
+however long the run, and `QRSEND_LOG=off` in the environment keeps none.
 
 A webcam often hands out small pictures unless asked (640×480 is a common
 default on Linux), which is too little for dense codes: `recv` prints the size
@@ -101,6 +113,42 @@ qrsend send --resume QSR1-XXXXXXXX
 and receive again — progress is kept in the inbox (`qrsend inbox list`).
 After a text arrives you can copy it to the clipboard or save it as a file
 (also `qrsend recv --copy`, `qrsend inbox export <id> --copy`).
+
+### What is kept, and making room
+
+```bash
+qrsend storage                          # everything kept, and the room it takes
+qrsend storage clean                    # shows the list and asks which to remove
+qrsend storage clean --all              # or say it: --inbox, --sent, --logs, IDs,
+qrsend storage clean --older-than 7d    # only what is old (--dry-run: just show)
+```
+
+| What | Where | How long |
+|---|---|---|
+| Transfers received (the inbox), still encrypted and compressed | `sessions/` in the data directory | An unfinished one stays until it is finished or removed. A finished one is removed as soon as its files are saved — unless `--keep` was given or saving failed |
+| Transfers sent, packed once so that they can be sent again (`--session`, `--resume`) | `send/` in the cache directory | Two weeks; cleared out at the next `send` after that. Not at all with `send --no-keep` |
+| Logs | `logs/` in the cache directory | The last 10 runs, a few kilobytes each |
+| This device's ID and the trusted devices | the configuration directory | Until you remove them (never by `qrsend storage`) |
+
+A sent transfer takes about the size of what was sent, compressed: after
+sending something large, `qrsend storage clean --sent` gives that room back at
+once. `qrsend send --no-keep` does not keep it in the first place (it is gone
+when sending ends), and `QRSEND_NO_KEEP=1` in the environment makes that the
+rule. The price: there is nothing to send again from, so `--session` and
+`--resume` need the files sent anew, and a receiver that stopped halfway
+starts over.
+
+Nothing received is removed by itself: an unfinished transfer waits in the
+inbox until it is continued or you remove it (`qrsend inbox rm <id>`, or
+`qrsend storage clean`).
+
+| | data | cache | configuration |
+|---|---|---|---|
+| macOS | `~/Library/Application Support/qrsend` | `~/Library/Caches/qrsend` | `~/Library/Application Support/qrsend` |
+| Linux | `~/.local/share/qrsend` | `~/.cache/qrsend` | `~/.config/qrsend` |
+| Windows | `%LOCALAPPDATA%\qrsend` | `%LOCALAPPDATA%\qrsend` | `%APPDATA%\qrsend` |
+
+`QRSEND_DATA_DIR`, `QRSEND_CACHE_DIR` and `QRSEND_CONFIG_DIR` put them elsewhere.
 
 ### As a video
 
@@ -179,6 +227,11 @@ loaded (PWA).
 - “Copy log” at the bottom of every page copies a diagnostic log for bug
   reports: what happened when (steps, timings, counts, connection states) —
   never file names, contents, device IDs or network addresses.
+- “Storage” at the bottom of every page lists what the browser keeps and the
+  room each thing takes — received transfers (they stay in the inbox after
+  their files are saved, until deleted), files left over, the log — and deletes
+  what you pick, or all of it. What is sent is kept only while it is being
+  sent. The device ID and the trusted devices are not touched.
 - **Feature preview** (footer link): new ways of sending that are still being
   worked on. Each is off until the sender turns it on; otherwise everything
   works as before.

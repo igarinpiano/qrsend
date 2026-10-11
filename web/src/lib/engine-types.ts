@@ -164,6 +164,20 @@ export interface SessionRecord {
   textSize?: number;
 }
 
+/** One thing kept in this browser's file storage (see the Storage page). */
+export interface StorageItem {
+  /** Where it is: "recv/<session>" or "send/<name>". */
+  id: string;
+  /**
+   * `received`: a transfer in the inbox, complete. `unfinished`: one in the inbox that is not. `sending`: what this
+   * tab is sending right now (it goes when sending ends). `leftover`: files nothing refers to any more.
+   */
+  kind: "received" | "unfinished" | "sending" | "leftover";
+  bytes: number;
+  /** For a transfer in the inbox: its record. */
+  record?: SessionRecord;
+}
+
 export interface EngineApi {
   sendStart(req: SendRequest): Promise<SendStarted>;
   sendFrames(count: number): Promise<FrameBatch>;
@@ -218,6 +232,10 @@ export interface EngineApi {
   inboxRemove(session: string): Promise<void>;
   /** The session's output file; entries are byte ranges of it. */
   outBlob(session: string): Promise<Blob>;
+  /** Everything kept in the file storage, with the room each thing takes. */
+  storageList(): Promise<StorageItem[]>;
+  /** Removes things by their `id` (a transfer in the inbox leaves the inbox too). */
+  storageRemove(ids: string[]): Promise<void>;
 }
 
 export type EngineEvent =

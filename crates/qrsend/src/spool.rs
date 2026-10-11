@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::collect::{Item, Source};
 use crate::{paths, util};
 
-const MAX_AGE_SECS: i64 = 14 * 24 * 3600;
+/// How long a spool is kept, to be sent again.
+pub const MAX_AGE_SECS: i64 = 14 * 24 * 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpoolInfo {

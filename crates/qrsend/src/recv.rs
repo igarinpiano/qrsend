@@ -77,8 +77,8 @@ pub struct RecvArgs {
     /// Decoder threads (default: all cores)
     #[arg(long)]
     pub threads: Option<usize>,
-    /// Write a diagnostic log to FILE ("-": standard error), to send along
-    /// with a report of a problem. It holds no file names, contents, device
+    /// Write the diagnostic log to FILE ("-": standard error) instead of
+    /// keeping it for `qrsend log`. It holds no file names, contents, device
     /// IDs or network addresses
     #[arg(long, value_name = "FILE")]
     pub log: Option<PathBuf>,
@@ -856,6 +856,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
             rx.segment_total()
         );
         eprintln!("{}", resume_hint(id, &s.store.missing()));
+        log::line("end", || "not complete: kept in the inbox".into());
         std::process::exit(2);
     }
     // Everything is verified and stored: a sender on the network may stop.

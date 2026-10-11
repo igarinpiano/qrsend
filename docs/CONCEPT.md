@@ -202,11 +202,13 @@ qrsend send [PATH|-]...            ファイル・フォルダ・標準入力を
     --density low|normal|high|max  QR の密度（--qr-version / --ecc で個別指定も可）
     --fps <N>  --grid <1|2x2>      表示速度・同時表示枚数
     --resume <CODE>                欠損セグメントのみ再送
+    --no-keep                      送信用に固めたデータを送り終えたら残さない（既定は 14 日保持。環境変数 QRSEND_NO_KEEP=1 で常時）
     --no-compress
 
 qrsend recv                        受信
     --camera <N|NAME> | --video <FILE> | --images <DIR>
-    --log <FILE>                   診断ログ（send にもある。ファイル名・内容・ID・アドレスは書かない）
+    --log <FILE>                   診断ログの書き出し先（send にもある。指定しなくても毎回 1 つ残り、qrsend log で見られる。
+                                   ファイル名・内容・ID・アドレスは書かない）
     --camera-size <WxH>  --camera-fps <N>
                                    カメラに求める解像度・枚数（既定はカメラ任せ。Linux では 640x480 のことが多い）
     -o, --out <DIR>                出力先（既定: カレントディレクトリ）
@@ -215,6 +217,13 @@ qrsend recv                        受信
     --keep                         完了後も受信データを保持
 
 qrsend inbox [list | show <ID> | export <ID> -o <DIR> | missing <ID> | rm <ID>]
+qrsend storage                     この端末に残しているもの（受信・送信・ログ）と、それぞれの容量
+qrsend storage clean [ID...]       削除。何も指定しなければ一覧を出して番号で選ぶ（「all」で全部）
+    --all | --inbox | --sent | --logs | --older-than <7d|12h|30m>
+    -y, --yes  --dry-run
+qrsend log [RUN] [--copy]          直近の send / recv の診断ログ。RUN は git と同じ数え方: HEAD（直近）、HEAD^ / HEAD~1（1 つ前）、
+                                   HEAD~2 …（直近 10 回分を保持、1 つは最大 2000 行。--log FILE のほうは無制限）
+qrsend log [list | clear]
 qrsend id [--qr]                   自分の公開鍵と確認コードを表示
 qrsend devices [list | add [<PUBKEY> | --scan] | rm <NAME> | rename <OLD> <NEW>]
 qrsend completions <SHELL>
@@ -228,6 +237,7 @@ qrsend completions <SHELL>
 | Send | ドロップ・ファイル選択・フォルダ選択・テキスト貼り付け → 宛先選択（Trusted devices / Anyone） → 全画面 QR ループ（速度・密度・グリッドの調整、Wake Lock） |
 | Receive | カメラ映像、送信者・中身の表示、セグメントマップ、速度・残り時間 |
 | Inbox | 受信中・受信済みセッションの一覧、プレビュー、保存、削除、resume code の表示 |
+| Storage | ブラウザに残しているもの（受信済み・受信途中・残骸・診断ログ）と容量の一覧。選んで、または全部まとめて削除（フッターのリンク） |
 | Devices | 自分の ID（QR・確認コード）、信頼済みデバイスの追加・削除 |
 | Settings | 既定の密度・速度、自動削除、カメラ選択、ID のバックアップ（暗号化エクスポート） |
 

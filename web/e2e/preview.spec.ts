@@ -59,7 +59,7 @@ for (const [width, height] of [
 }
 
 // The same for the other pages that need no camera.
-for (const path of ["", "send", "inbox", "devices", "preview"]) {
+for (const path of ["", "send", "inbox", "devices", "preview", "storage"]) {
   test(`no page scrolls sideways on a narrow screen: /${path}`, async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 568 });
     await page.goto(`./#/${path}`);

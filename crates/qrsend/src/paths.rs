@@ -37,6 +37,12 @@ pub fn spools_dir() -> PathBuf {
     cache_dir().join("send")
 }
 
+/// Diagnostic logs of the last runs (nothing depends on them, so they live
+/// in the cache).
+pub fn logs_dir() -> PathBuf {
+    cache_dir().join("logs")
+}
+
 /// Device identity and trusted devices.
 pub fn config_dir() -> PathBuf {
     base("QRSEND_CONFIG_DIR", dirs::config_dir())

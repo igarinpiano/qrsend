@@ -85,5 +85,7 @@
 {/if}
 
 {#if storage}
-  <p class="small muted">Browser storage used: {bytes(storage.usage)} of {bytes(storage.quota)}</p>
+  <p class="small muted">
+    Browser storage used: {bytes(storage.usage)} of {bytes(storage.quota)} · <a href="#/storage">See what takes the room</a>
+  </p>
 {/if}

@@ -21,6 +21,7 @@ import type {
   SendRequest,
   SendStarted,
   SessionRecord,
+  StorageItem,
 } from "./engine-types";
 import { identityInfo, loadIdentity, sharedSecret, sign, type StoredIdentity } from "./keys";
 import { fileStore, type FileStore, type RandomFile } from "./storage";
@@ -719,6 +720,47 @@ async function outBlob(session: string): Promise<Blob> {
   return (await fileStore()).blob(dir(session, "out"));
 }
 
+// ------------------------------------------------------------------ storage
+
+async function storageList(): Promise<StorageItem[]> {
+  const store = await fileStore();
+  const items: StorageItem[] = [];
+  const records = await inboxList();
+  for (const record of records) {
+    items.push({
+      id: `recv/${record.session}`,
+      kind: record.complete ? "received" : "unfinished",
+      bytes: await store.usage(["recv", record.session]),
+      record,
+    });
+  }
+  // What no record speaks of: of a transfer whose record was lost, or of a
+  // tab that was closed while sending.
+  const known = new Set(records.map((r) => r.session));
+  for (const name of await store.list(["recv"])) {
+    if (!known.has(name)) items.push({ id: `recv/${name}`, kind: "leftover", bytes: await store.usage(["recv", name]) });
+  }
+  for (const name of await store.list(["send"])) {
+    const mine = sending && name === SEND_DIR[1];
+    items.push({ id: `send/${name}`, kind: mine ? "sending" : "leftover", bytes: await store.usage(["send", name]) });
+  }
+  return items;
+}
+
+async function storageRemove(ids: string[]): Promise<void> {
+  const store = await fileStore();
+  let bytes = 0;
+  for (const id of ids) {
+    const [area, name, ...more] = id.split("/");
+    if ((area !== "recv" && area !== "send") || !name || more.length) continue;
+    if (area === "send" && sending && name === SEND_DIR[1]) continue;
+    bytes += await store.usage([area, name]);
+    if (area === "recv") await inboxRemove(name);
+    else await store.remove([area, name]);
+  }
+  logLine("store", "removed", { things: ids.length, bytes });
+}
+
 // ---------------------------------------------------------------------- RPC
 
 const api: EngineApi = {
@@ -744,6 +786,8 @@ const api: EngineApi = {
   inboxOpen,
   inboxRemove,
   outBlob,
+  storageList,
+  storageRemove,
 };
 
 // One call at a time: handlers await storage and crypto, and must not interleave.

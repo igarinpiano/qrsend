@@ -17,7 +17,13 @@ export interface FileStore {
   /** The file's content as a Blob; the file must not be open. */
   blob(path: string[]): Promise<Blob>;
   remove(path: string[]): Promise<void>;
+  /** The names in a directory (none if it is not there). */
+  list(path: string[]): Promise<string[]>;
+  /** The bytes a file, or a directory with all that is in it, holds. */
+  usage(path: string[]): Promise<number>;
 }
+
+type Entries = { entries(): AsyncIterable<[string, FileSystemHandle]> };
 
 type SyncHandle = {
   read(buffer: Uint8Array, options: { at: number }): number;
@@ -88,6 +94,39 @@ class OpfsStore implements FileStore {
       /* already gone */
     }
   }
+
+  async list(path: string[]): Promise<string[]> {
+    const names: string[] = [];
+    try {
+      const dir = await this.dir(path, false);
+      for await (const [name] of (dir as unknown as Entries).entries()) names.push(name);
+    } catch {
+      /* no such directory */
+    }
+    return names;
+  }
+
+  private async sizeOf(handle: FileSystemHandle): Promise<number> {
+    try {
+      if (handle.kind === "file") return (await (handle as FileSystemFileHandle).getFile()).size;
+      let sum = 0;
+      for await (const [, child] of (handle as unknown as Entries).entries()) sum += await this.sizeOf(child);
+      return sum;
+    } catch {
+      // (A file another tab is writing may not let itself be measured.)
+      return 0;
+    }
+  }
+
+  async usage(path: string[]): Promise<number> {
+    try {
+      const dir = await this.dir(path.slice(0, -1), false);
+      const name = path[path.length - 1];
+      return await this.sizeOf(await dir.getDirectoryHandle(name).catch(() => dir.getFileHandle(name)));
+    } catch {
+      return 0;
+    }
+  }
 }
 
 class MemoryFile implements RandomFile {
@@ -135,6 +174,24 @@ class MemoryStore implements FileStore {
     for (const key of [...this.files.keys()]) {
       if (key === prefix || key.startsWith(prefix + "/")) this.files.delete(key);
     }
+  }
+
+  async list(path: string[]): Promise<string[]> {
+    const prefix = path.join("/") + "/";
+    const names = new Set<string>();
+    for (const key of this.files.keys()) {
+      if (key.startsWith(prefix)) names.add(key.slice(prefix.length).split("/")[0]);
+    }
+    return [...names];
+  }
+
+  async usage(path: string[]): Promise<number> {
+    const prefix = path.join("/");
+    let sum = 0;
+    for (const [key, file] of this.files) {
+      if (key === prefix || key.startsWith(prefix + "/")) sum += file.length;
+    }
+    return sum;
   }
 }
 
