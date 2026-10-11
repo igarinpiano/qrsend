@@ -297,7 +297,7 @@ pub fn run(args: SendArgs) -> Result<()> {
         };
         (Spool::create(content, &opts)?, None)
     };
-    let _discard = args.no_keep.then(|| Discard::new(spool.dir.clone()));
+    let _discard = args.no_keep.then(|| Discard::new(&spool));
 
     // Explicit choices win; otherwise pick the code size from the transfer
     // (small transfers) or from the frame (dense exports).
@@ -553,17 +553,28 @@ pub fn run(args: SendArgs) -> Result<()> {
 }
 
 /// Removes a spool when sending ends (`--no-keep`): when this goes out of
-/// scope, however `run` is left, and when the program is interrupted.
+/// scope, however `run` is left, and when the program is interrupted. A
+/// sender that is killed outright removes nothing: the spool says that it
+/// was not to be kept, and the next `send` removes it.
 struct Discard(PathBuf);
 
 impl Discard {
-    fn new(dir: PathBuf) -> Discard {
-        let interrupted = dir.clone();
+    fn new(spool: &Spool) -> Discard {
+        spool.mark_not_kept();
+        let interrupted = spool.dir.clone();
         let _ = ctrlc::set_handler(move || {
             let _ = std::fs::remove_dir_all(&interrupted);
+            // Ends as a program does that was interrupted (a shell running a
+            // script goes by that to stop the script too, and so does the
+            // npm launcher): by the signal itself, now that it is handled.
+            #[cfg(unix)]
+            unsafe {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::raise(libc::SIGINT);
+            }
             std::process::exit(130);
         });
-        Discard(dir)
+        Discard(spool.dir.clone())
     }
 }
 

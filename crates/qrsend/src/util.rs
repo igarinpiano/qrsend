@@ -83,7 +83,7 @@ pub fn disk_use(path: &std::path::Path) -> (u64, i64) {
         return (0, 0);
     };
     #[cfg(unix)]
-    let size = std::os::unix::fs::MetadataExt::blocks(&meta) * 512;
+    let size = std::os::unix::fs::MetadataExt::blocks(&meta).saturating_mul(512);
     #[cfg(not(unix))]
     let size = meta.len();
     let modified = meta
@@ -100,7 +100,7 @@ pub fn disk_use(path: &std::path::Path) -> (u64, i64) {
         .flatten()
         .map(|e| disk_use(&e.path()))
         .fold((size, modified), |(s, m), (size, modified)| {
-            (s + size, m.max(modified))
+            (s.saturating_add(size), m.max(modified))
         })
 }
 

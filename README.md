@@ -96,8 +96,9 @@ qrsend log list       # the last 10 runs are kept; qrsend log clear removes them
 ```
 
 A kept log holds 2000 lines at most (of a longer run, the beginning and the
-end). `--log FILE` writes the log to a file of your choice instead, all of it
-however long the run, and `QRSEND_LOG=off` in the environment keeps none.
+end) and only its owner can read it. `--log FILE` writes the log to a file of
+your choice instead, all of it however long the run, and `QRSEND_LOG=off` in
+the environment keeps none.
 
 A webcam often hands out small pictures unless asked (640×480 is a common
 default on Linux), which is too little for dense codes: `recv` prints the size
@@ -133,8 +134,9 @@ qrsend storage clean --older-than 7d    # only what is old (--dry-run: just show
 A sent transfer takes about the size of what was sent, compressed: after
 sending something large, `qrsend storage clean --sent` gives that room back at
 once. `qrsend send --no-keep` does not keep it in the first place (it is gone
-when sending ends), and `QRSEND_NO_KEEP=1` in the environment makes that the
-rule. The price: there is nothing to send again from, so `--session` and
+when sending ends, also when sending fails or is interrupted; a sender that
+is killed outright leaves it to the next `send`, which removes it), and
+`QRSEND_NO_KEEP=1` in the environment makes that the rule. The price: there is nothing to send again from, so `--session` and
 `--resume` need the files sent anew, and a receiver that stopped halfway
 starts over.
 

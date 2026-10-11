@@ -20,6 +20,10 @@ use crate::{paths, util};
 /// How long a spool is kept, to be sent again.
 pub const MAX_AGE_SECS: i64 = 14 * 24 * 3600;
 
+/// The file in a spool that says it is not to be kept (`send --no-keep`),
+/// and which process will remove it when it is done sending.
+pub const NOT_KEPT: &str = "not-kept";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpoolInfo {
     pub session_id: u32,
@@ -246,6 +250,18 @@ impl Spool {
         })
     }
 
+    /// Notes in the spool that the `send` now running removes it when it
+    /// ends (see [`Spool::abandoned`]).
+    pub fn mark_not_kept(&self) {
+        let _ = fs::write(self.dir.join(NOT_KEPT), std::process::id().to_string());
+    }
+
+    /// Whether this spool was not to be kept, and the `send` that would have
+    /// removed it is gone: it was killed before it could.
+    pub fn abandoned(&self) -> bool {
+        fs::read_to_string(self.dir.join(NOT_KEPT)).is_ok_and(|pid| process_gone(pid.trim()))
+    }
+
     pub fn disk_size(&self) -> u64 {
         self.info.body_len + self.info.meta_len as u64
     }
@@ -255,11 +271,34 @@ impl Spool {
     }
 }
 
-/// Removes spools older than two weeks (best effort).
+/// Whether the process with this id is no longer there. (Only where that
+/// can be told: elsewhere, and of an id that cannot be read, the answer is
+/// no — what is spared wrongly goes after two weeks like every spool.)
+fn process_gone(pid: &str) -> bool {
+    #[cfg(unix)]
+    {
+        match pid.parse::<libc::pid_t>() {
+            // (Signal 0 sends nothing: it only says whether one could be sent.)
+            Ok(pid) if pid > 0 => {
+                let refused = unsafe { libc::kill(pid, 0) } != 0;
+                refused && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Removes spools older than two weeks, and those a `send --no-keep` that
+/// was killed left behind (best effort).
 fn cleanup_old(root: &std::path::Path) {
     let now = util::now();
     for spool in Spool::list() {
-        if now - spool.info.created > MAX_AGE_SECS {
+        if now - spool.info.created > MAX_AGE_SECS || spool.abandoned() {
             let _ = spool.remove();
         }
     }

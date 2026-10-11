@@ -360,7 +360,12 @@ where
                 .run()
                 .unwrap_or_else(|e| {
                     trace(|| format!("the connection failed: {e:#}"));
-                    log::line("link", || format!("WebRTC: the connection failed: {e:#}"));
+                    log::line("link", || {
+                        format!(
+                            "WebRTC: the connection failed: {}",
+                            log::discreet(&format!("{e:#}"))
+                        )
+                    });
                     None
                 });
             log::line("link", || {
@@ -744,7 +749,12 @@ pub fn connect(payload: Vec<u8>) -> Link {
         match &result {
             Err(e) => {
                 trace(|| format!("the connection failed: {e:#}"));
-                log::line("link", || format!("WebRTC: no connection: {e:#}"));
+                log::line("link", || {
+                    format!(
+                        "WebRTC: no connection: {}",
+                        log::discreet(&format!("{e:#}"))
+                    )
+                });
             }
             Ok(()) => log::line("link", || "WebRTC: connection over".into()),
         }

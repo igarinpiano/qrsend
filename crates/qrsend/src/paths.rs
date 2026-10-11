@@ -58,11 +58,25 @@ pub fn config_dir() -> PathBuf {
 pub fn create_private(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(dir)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)?;
+    check_private(dir)
+}
+
+/// The checks of [`create_private`] on a directory that is there, without
+/// making anything: before what is in it is shown or passed on as this
+/// user's own (a log), it must not be a place where someone else could have
+/// put it.
+pub fn check_private(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
         let me = unsafe { libc::geteuid() };
         let refuse = |at: &Path| {
             io::Error::new(
@@ -94,7 +108,10 @@ pub fn create_private(dir: &Path) -> io::Result<()> {
         Ok(())
     }
     #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)
+    {
+        let _ = dir;
+        Ok(())
+    }
 }
 
 /// Writes a file only this user can read (its content is private). Replaces

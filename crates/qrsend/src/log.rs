@@ -10,11 +10,18 @@
 //!
 //! Like the web app's ("Copy log" there), it records no file names, no
 //! contents, no device IDs and no network addresses: sizes, counts, kinds
-//! and times only.
+//! and times only. The text of an error from elsewhere (a library, the
+//! system) goes through [`discreet`] first, which takes addresses out.
+//!
+//! A log is shown on terminals and pasted into reports, so nothing in it may
+//! be more than text: every line is written with what a terminal would act
+//! on escaped, and what `qrsend log` shows is escaped again (the file could
+//! be anyone's, were its directory not checked to be this user's alone).
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -30,6 +37,12 @@ pub const KEPT: usize = 10;
 const MAX_LINES: usize = 2000;
 /// Kept whatever follows: how the run began.
 const KEEP_FIRST: usize = 60;
+/// The most characters of one line (the longest the program writes are a
+/// third of this: whatever is longer was not meant to be).
+const MAX_LINE: usize = 600;
+/// The most that is read of a kept log to show it (several times what one
+/// can hold).
+const MAX_SHOWN: u64 = 4 << 20;
 
 enum Out {
     /// Where the user said: every line, as it comes, and without a bound
@@ -223,7 +236,49 @@ impl Out {
 
 fn write(log: &mut Log, area: &str, text: &str) {
     let at = log.began.elapsed().as_secs_f64();
-    log.out.push(format!("{at:8.2} {area:<6} {text}"));
+    log.out
+        .push(format!("{at:8.2} {area:<6} {}", one_line(text)));
+}
+
+/// A text as one line of the log: what a terminal would act on is escaped (a
+/// line break too, so that nothing passes for a line of its own), and it is
+/// cut where no line the program means to write ends.
+fn one_line(text: &str) -> String {
+    let mut line = util::printable(text);
+    if let Some((at, _)) = line.char_indices().nth(MAX_LINE) {
+        line.truncate(at);
+        line.push('…');
+    }
+    line
+}
+
+/// The text of an error that is not this program's own (a library's, the
+/// system's), fit for the log: what went wrong, without whom it names. Every
+/// word that holds a network address (with a port or without, in brackets,
+/// in a longer expression) or a name on the local network is left out.
+pub fn discreet(text: &str) -> String {
+    let v4 = |word: &str| {
+        word.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .any(|part| part.trim_end_matches('.').parse::<Ipv4Addr>().is_ok())
+    };
+    let v6 = |word: &str| {
+        word.split(|c: char| !(c.is_ascii_hexdigit() || c == ':'))
+            .filter(|part| part.matches(':').count() >= 2)
+            .any(|part| {
+                part.parse::<Ipv6Addr>().is_ok()
+                    || part
+                        .strip_suffix(':')
+                        .is_some_and(|p| p.parse::<Ipv6Addr>().is_ok())
+            })
+    };
+    let name = |word: &str| word.to_ascii_lowercase().contains(".local");
+    text.split(' ')
+        .map(|word| match v4(word) || v6(word) || name(word) {
+            true => "<address>",
+            false => word,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One line: what part of the program says it, and what happened.
@@ -278,13 +333,18 @@ pub fn kept() -> Vec<KeptLog> {
         .flatten()
         .filter_map(|e| {
             let path = e.path();
-            if path.extension()? != "log" {
+            // (A file, not a link to one: only what this program wrote.)
+            if path.extension()? != "log" || !fs::symlink_metadata(&path).ok()?.is_file() {
                 return None;
             }
             // 20261009T100936Z-recv-1234
             let name = path.file_stem()?.to_str()?.to_string();
             let mut parts = name.splitn(3, '-');
             let (stamp, command) = (parts.next()?, parts.next()?);
+            let plain = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric());
+            if stamp.len() != 16 || !plain(stamp) || !plain(command) {
+                return None;
+            }
             let s = |range: std::ops::Range<usize>| stamp.get(range);
             Some(KeptLog {
                 began: format!(
@@ -306,6 +366,16 @@ pub fn kept() -> Vec<KeptLog> {
     let written = |log: &KeptLog| fs::metadata(&log.path).and_then(|m| m.modified()).ok();
     out.sort_by_cached_key(|log| std::cmp::Reverse((log.began.clone(), written(log))));
     out
+}
+
+/// The logs kept, for showing them: only from a directory that is this
+/// user's alone (see [`paths::check_private`]).
+fn kept_here() -> Result<Vec<KeptLog>> {
+    let dir = paths::logs_dir();
+    if fs::symlink_metadata(&dir).is_ok() {
+        paths::check_private(&dir).context("the logs are not shown")?;
+    }
+    Ok(kept())
 }
 
 /// Removes the logs kept; returns how many there were.
@@ -397,7 +467,7 @@ fn name_back(back: usize) -> String {
 pub fn command(args: LogArgs) -> Result<()> {
     match args.cmd.unwrap_or(LogCmd::Show(args.show)) {
         LogCmd::Show(show) => {
-            let logs = kept();
+            let logs = kept_here()?;
             if logs.is_empty() {
                 eprintln!(
                     "No log is kept. `qrsend send` and `qrsend recv` keep one each time they run{}.",
@@ -416,8 +486,13 @@ pub fn command(args: LogArgs) -> Result<()> {
                     name_back(logs.len() - 1)
                 );
             };
-            let text = fs::read_to_string(&log.path)
+            let mut text = Vec::new();
+            File::open(&log.path)
+                .and_then(|file| file.take(MAX_SHOWN).read_to_end(&mut text))
                 .with_context(|| format!("cannot read {}", log.path.display()))?;
+            // (Text and nothing else, whatever the file holds: it goes to a
+            // terminal, or into a report.)
+            let text = util::printable_text(&String::from_utf8_lossy(&text));
             if show.copy {
                 extract::copy_to_clipboard(&text)?;
                 eprintln!(
@@ -429,7 +504,7 @@ pub fn command(args: LogArgs) -> Result<()> {
             }
         }
         LogCmd::List => {
-            let logs = kept();
+            let logs = kept_here()?;
             if logs.is_empty() {
                 println!("No log is kept.");
                 return Ok(());
@@ -504,6 +579,58 @@ mod tests {
         }
         assert_eq!(name_back(0), "HEAD");
         assert_eq!(parse_back(&name_back(7)), Ok(7));
+    }
+
+    /// A log goes to terminals and into reports: whatever a line is made
+    /// from, it is one line of text, and not an endless one.
+    #[test]
+    fn a_line_is_one_line_of_text() {
+        assert_eq!(one_line("codes=12 color=false"), "codes=12 color=false");
+        assert_eq!(
+            one_line("failed: \u{1b}]0;owned\u{7}\n    0.00 end    finished"),
+            "failed: \\u{1b}]0;owned\\u{7}\\u{a}    0.00 end    finished"
+        );
+        assert_eq!(one_line("a\u{202e}b\rc"), "a\\u{202e}b\\u{d}c");
+        let long = one_line(&"é".repeat(5 * MAX_LINE));
+        assert_eq!(long.chars().count(), MAX_LINE + 1);
+        assert!(long.ends_with('…'));
+    }
+
+    /// The log names no one: an error's text from a library or the system
+    /// is written without the addresses in it.
+    #[test]
+    fn errors_are_logged_without_addresses() {
+        for (said, logged) in [
+            ("connection refused", "connection refused"),
+            (
+                "cannot reach 192.168.1.20:50000 (os error 61)",
+                "cannot reach <address> (os error 61)",
+            ),
+            ("no route to 10.0.0.7.", "no route to <address>"),
+            (
+                "bind [fe80::1c2d:3e4f]:4000 failed",
+                "bind <address> failed",
+            ),
+            ("peer 2001:db8::5 went away", "peer <address> went away"),
+            ("asked ::1: no answer", "asked <address> no answer"),
+            (
+                "candidate udp/192.168.1.20/50000 unusable",
+                "candidate <address> unusable",
+            ),
+            (
+                "no answer from 4f1e2d3c-aaaa.local:5353, giving up",
+                "no answer from <address> giving up",
+            ),
+            ("Name.LOCAL not found", "<address> not found"),
+            // What is no address stays: times, counts, versions of two parts.
+            (
+                "took 12:30:05, 3.5 s over, v1.2",
+                "took 12:30:05, 3.5 s over, v1.2",
+            ),
+            ("os error 49: cannot assign", "os error 49: cannot assign"),
+        ] {
+            assert_eq!(discreet(said), logged, "{said}");
+        }
     }
 
     #[test]

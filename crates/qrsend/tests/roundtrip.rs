@@ -768,6 +768,108 @@ fn nothing_sent_is_kept_when_asked_not_to() {
         "--no-keep",
     ]);
     assert!(!env.ok(&["cache", "list"]).contains(&id));
+
+    // A sender that is killed removes nothing. What it was not to keep says
+    // so, and the next send removes it — but not that of a sender still at it.
+    #[cfg(unix)]
+    {
+        env.ok(&["send", "--plain", "a.bin", "--export-frames", "k"]);
+        env.ok(&["send", "--plain", "a.bin", "--export-frames", "l"]);
+        let ids: Vec<String> = env
+            .ok(&["cache", "list"])
+            .lines()
+            .filter_map(|l| l.split_whitespace().next().map(String::from))
+            .collect();
+        let (killed, at_it) = (&ids[ids.len() - 2], &ids[ids.len() - 1]);
+        let mut gone = Command::new(env!("CARGO_BIN_EXE_qrsend"))
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let gone_id = gone.id();
+        gone.wait().unwrap();
+        let mark = |id: &str, process: u32| {
+            let file = env.path(&format!("me/cache/send/{id}/not-kept"));
+            fs::write(file, process.to_string()).unwrap();
+        };
+        mark(killed, gone_id);
+        mark(at_it, std::process::id());
+        let listed = env.ok(&["storage"]);
+        assert_eq!(
+            listed
+                .matches("not kept: removed when its send ends")
+                .count(),
+            2,
+            "{listed}"
+        );
+        env.ok(&["send", "--plain", "--text", "x", "--export-frames", "m"]);
+        let list = env.ok(&["cache", "list"]);
+        assert!(
+            !list.contains(killed.as_str()) && list.contains(at_it.as_str()),
+            "{list}"
+        );
+    }
+}
+
+/// A log is this user's alone, and showing one puts nothing but text on the
+/// terminal, whatever is in the file and whoever could have put it there.
+#[cfg(unix)]
+#[test]
+fn logs_are_private_and_shown_as_text_only() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let env = Env::new("logsafe");
+    assert!(!env.run(&["recv", "--images", "nowhere"]).status.success());
+    let dir = env.path("me/cache/logs");
+    assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+    let log = fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(fs::metadata(&log).unwrap().mode() & 0o777, 0o600);
+
+    // Whatever got into the file: what is shown is text.
+    let mut content = fs::read(&log).unwrap();
+    content.extend_from_slice(b"    1.00 link   \x1b]0;owned\x07 \xff\n");
+    fs::write(&log, content).unwrap();
+    let shown = env.run(&["log"]);
+    assert!(shown.status.success());
+    let shown = String::from_utf8(shown.stdout).unwrap();
+    assert!(
+        !shown.contains('\u{1b}') && !shown.contains('\u{7}'),
+        "{shown:?}"
+    );
+    assert!(shown.contains("\\u{1b}]0;owned\\u{7}"), "{shown:?}");
+    assert!(shown.contains("end    stopped with an error"), "{shown:?}");
+
+    // A link is no log, whatever its name, and neither is a file with a name
+    // this program does not give.
+    fs::write(env.path("secret"), "a secret").unwrap();
+    std::os::unix::fs::symlink(env.path("secret"), dir.join("29991231T235959Z-recv-1.log"))
+        .unwrap();
+    fs::write(dir.join("29991231T235959Z-re cv-1.log"), "not a log").unwrap();
+    fs::write(dir.join("notes.log"), "not a log").unwrap();
+    let list = env.ok(&["log", "list"]);
+    assert_eq!(list.matches(" UTC  ").count(), 1, "{list}");
+    let shown = env.ok(&["log"]);
+    assert!(
+        !shown.contains("a secret") && !shown.contains("not a log"),
+        "{shown}"
+    );
+
+    // From a directory that others could have filled, nothing is shown…
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+    for args in [&["log"][..], &["log", "list"]] {
+        let out = env.run(args);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("not used for private data"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // … and no log is kept there, which holds no transfer up.
+    let before = fs::read_dir(&dir).unwrap().count();
+    env.ok(&["send", "--plain", "--text", "x", "--export-frames", "f"]);
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), before);
+    assert_eq!(env.ok(&["recv", "--images", "f"]).trim_end(), "x");
 }
 
 #[test]

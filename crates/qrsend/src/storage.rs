@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::Subcommand;
 
-use crate::spool::{MAX_AGE_SECS, SpoolInfo};
+use crate::spool::{MAX_AGE_SECS, NOT_KEPT, SpoolInfo};
 use crate::store::State;
 use crate::{identity, log, paths, util};
 
@@ -131,6 +131,10 @@ fn sent(dir: &std::path::Path) -> Option<String> {
         "{} · {}",
         util::printable(&info.summary),
         match left {
+            // (`send --no-keep`: still sending, or killed before it removed it.)
+            _ if dir.join(NOT_KEPT).exists() => {
+                "not kept: removed when its send ends, at the latest at the next send".to_string()
+            }
             i64::MIN..=0 => "past its two weeks: removed at the next send".to_string(),
             1..=86_400 => "removed within a day".to_string(),
             _ => format!("removed in {} days", (left + 86_399) / 86_400),
@@ -382,7 +386,10 @@ fn clean(args: CleanArgs) -> Result<()> {
             Ok(()) => freed += item.size,
             Err(e) => {
                 failed += 1;
-                eprintln!("Could not remove {}: {e}", item.path.display());
+                eprintln!(
+                    "Could not remove {}: {e}",
+                    util::printable(&item.path.display().to_string())
+                );
             }
         }
     }
