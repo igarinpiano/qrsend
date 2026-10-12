@@ -14,10 +14,18 @@ test("WebKit: a device ID can be created and is still there after a reload", asy
     // them as site data and use that way. (Other builds may manage either.)
     await expect(page.getByText(/kept as site data|cannot be exported/)).toBeVisible();
     await page.getByRole("button", { name: "Create device ID" }).click();
-    await expect(page.getByTestId("my-id")).toHaveText(/^qrsend-id:1:age1/);
+    // (With post-quantum keys, which are kept the same way: the ID that
+    // holds them is the same after a reload, and so is the older one.)
+    await expect(page.getByTestId("my-id")).toHaveText(/^qrsend-id:2:/);
+    await expect(page.getByTestId("my-keys")).toHaveText("post-quantum keys");
     const id = await page.getByTestId("my-id").textContent();
+    await page.getByLabel(/Show the ID for versions before post-quantum keys/).check();
+    await expect(page.getByTestId("my-id")).toHaveText(/^qrsend-id:1:age1/);
+    const older = await page.getByTestId("my-id").textContent();
     await page.reload();
     await expect(page.getByTestId("my-id")).toHaveText(id!);
+    await page.getByLabel(/Show the ID for versions before post-quantum keys/).check();
+    await expect(page.getByTestId("my-id")).toHaveText(older!);
   } finally {
     await browser.close();
   }
