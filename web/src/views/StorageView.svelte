@@ -101,7 +101,7 @@
     {/each}
   </ul>
   <div class="row">
-    <button onclick={pickAll} disabled={busy || removable.length === 0}>{allPicked ? "Select none" : "Select all"}</button>
+    <button onclick={pickAll} disabled={busy || removable.length === 0}>{allPicked ? "Deselect all" : "Select all"}</button>
     <button class="danger" onclick={remove} disabled={busy || chosen.length === 0}>
       {chosen.length === 0 ? "Delete selected" : `Delete selected (${chosen.length} · ${bytes(sum(chosen))})`}
     </button>

@@ -70,7 +70,7 @@ test("left-over files are listed with their size and deleted", async ({ page }) 
 
   // All at once, the log with it.
   await page.getByRole("button", { name: "Select all" }).click();
-  await expect(page.getByRole("button", { name: "Select none" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Deselect all" })).toBeVisible();
   await expect(remove).toHaveText(/^Delete selected \(2 · /);
   page.once("dialog", (d) => d.accept());
   await remove.click();
