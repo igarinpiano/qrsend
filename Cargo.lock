@@ -2615,7 +2615,7 @@ checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "qrsend"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "qrsend-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "age",
  "age-core",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "qrsend-wasm"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "blake3",
  "getrandom 0.2.17",
