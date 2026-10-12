@@ -98,6 +98,43 @@ pub fn default_camera() -> &'static str {
     }
 }
 
+/// Whether ffmpeg, which reads cameras and most videos here, cannot be run
+/// because there is none (other failures show when it is put to use).
+pub fn ffmpeg_missing() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// How to get ffmpeg on this platform, as a sentence.
+pub fn ffmpeg_advice() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Install it with `brew install ffmpeg` (or from https://ffmpeg.org)."
+    } else if cfg!(windows) {
+        "Install it with `winget install ffmpeg` (or from https://ffmpeg.org) and open a new terminal."
+    } else {
+        "Install it with your package manager (for example `sudo apt install ffmpeg`), or from https://ffmpeg.org."
+    }
+}
+
+/// What to look at when a camera gives no picture, as a sentence.
+pub fn camera_advice() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Allow this terminal to use the camera (System Settings → Privacy & Security → Camera), \
+         or name another camera (list them with `ffmpeg -f avfoundation -list_devices true -i \"\"`)."
+    } else if cfg!(windows) {
+        "Allow desktop apps to use the camera (Settings → Privacy & security → Camera), or name \
+         another camera (list them with `ffmpeg -list_devices true -f dshow -i dummy`)."
+    } else {
+        "Check that the camera is there and that you may read it (`ls -l /dev/video*`; often the \
+         `video` group), or name another one."
+    }
+}
+
 /// ffmpeg input arguments for a camera on this platform.
 fn camera_input(
     device: &str,
@@ -219,7 +256,9 @@ impl Input {
                 let result = read_y4m(BufReader::with_capacity(1 << 20, stdout), &tx, false);
                 let _ = child.kill();
                 let _ = child.wait();
-                result.with_context(|| format!("camera {device:?} stopped"))
+                result.with_context(|| {
+                    format!("camera {device:?} stopped (what ffmpeg said of it is above)")
+                })
             }
         }
     }
@@ -235,7 +274,11 @@ fn spawn_ffmpeg(input: Vec<String>, what: &str) -> Result<Child> {
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!("reading {what} needs ffmpeg on PATH (https://ffmpeg.org); .y4m videos work without it")
+                anyhow::anyhow!(
+                    "reading {what} needs ffmpeg, which is not installed (not on PATH). {} \
+                     (.y4m videos are read without it.)",
+                    ffmpeg_advice()
+                )
             } else {
                 e.into()
             }
@@ -252,7 +295,9 @@ const MAX_SIDE: usize = 16384;
 /// Minimal YUV4MPEG2 reader (8 bits per sample).
 fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<Picture>, dedupe: bool) -> Result<()> {
     let mut line = String::new();
-    r.read_line(&mut line)?;
+    if r.read_line(&mut line)? == 0 {
+        bail!("the stream ended before its first picture");
+    }
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.first() != Some(&"YUV4MPEG2") {
         bail!("not a YUV4MPEG2 stream");

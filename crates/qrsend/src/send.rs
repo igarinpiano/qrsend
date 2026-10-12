@@ -154,7 +154,8 @@ pub struct SendArgs {
     /// (through ffmpeg) pointed at its screen, send only what it still
     /// lacks, and end when it has everything. The web app's receiver shows
     /// such codes to a sender that asks for them, which this makes the
-    /// stream do. Without an answer the transfer goes on one-way
+    /// stream do. Without an answer the transfer goes on one-way; without
+    /// ffmpeg, or with a camera that gives no picture, it does not begin
     #[arg(long, conflicts_with = "feedback_from")]
     pub two_way: bool,
     /// The camera for --two-way, as for `qrsend recv --camera`: index on
@@ -285,6 +286,17 @@ pub fn run(args: SendArgs) -> Result<()> {
         bail!(
             "--auto-speed goes by what the receiver reports: add --two-way (a camera reads its \
              feedback codes) or --feedback-from"
+        );
+    }
+    // (Asked now, before anything is packed: without ffmpeg no camera is
+    // read, and a two-way transfer that is one-way in fact helps nobody.)
+    if args.two_way && crate::input::ffmpeg_missing() {
+        bail!(
+            "--two-way reads the receiver's feedback codes with a camera, through ffmpeg, and \
+             ffmpeg is not installed (not on PATH). {} Without it: leave --two-way out (the \
+             transfer is then one-way), or let the feedback come another way (--lan, \
+             --feedback-from).",
+            crate::input::ffmpeg_advice()
         );
     }
     let fps = args
@@ -608,32 +620,51 @@ pub fn run(args: SendArgs) -> Result<()> {
     }
     // The way back from the receiver, where there is one.
     let way_back = if let Some(path) = &args.feedback_from {
-        Some(twoway::Source::Text(path.clone()))
+        Some((twoway::Source::Text(path.clone()), None))
     } else if args.two_way {
         let device = args
             .two_way_camera
             .clone()
             .unwrap_or_else(|| crate::input::default_camera().to_string());
-        eprintln!(
-            "Two-way: point camera {device:?} at the receiver's screen; it shows what it still lacks."
-        );
-        Some(twoway::Source::Pictures(Input::Camera {
-            device,
-            size: None,
-            fps: None,
-        }))
+        eprintln!("Two-way: opening camera {device:?}…");
+        Some((
+            twoway::Source::Pictures(Input::Camera {
+                device: device.clone(),
+                size: None,
+                fps: None,
+            }),
+            Some(device),
+        ))
     } else {
         None
     };
     let answered = way_back.is_some();
-    if let Some(source) = way_back {
+    if let Some((source, camera)) = way_back {
         log::line("tx", || {
             format!(
                 "two-way by={}",
                 if args.two_way { "camera" } else { "text" }
             )
         });
-        stream.with_feedback(twoway::listen(source));
+        let feedback = match (twoway::listen(source), &camera) {
+            (Ok(feedback), _) => feedback,
+            // A camera that was asked for and gives nothing ends the
+            // sending here, before a code is shown: see `twoway::listen`.
+            (Err(e), Some(device)) => {
+                return Err(e.context(format!(
+                    "--two-way: camera {device:?} gives no picture, so the receiver's feedback \
+                     codes cannot be read. {} (--two-way-camera names the camera.)",
+                    crate::input::camera_advice()
+                )));
+            }
+            (Err(e), None) => return Err(e.context("--feedback-from")),
+        };
+        if let Some(device) = &camera {
+            eprintln!(
+                "Two-way: point camera {device:?} at the receiver's screen; it shows what it still lacks."
+            );
+        }
+        stream.with_feedback(feedback);
     }
     // After an export there is no display loop to end; with --lan the
     // transfer goes on through the connection until the receiver has it all.

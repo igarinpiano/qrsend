@@ -1236,6 +1236,148 @@ fn without_an_answer_writing_stops_by_itself() {
     assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(50_000));
 }
 
+/// `--two-way` reads a camera through ffmpeg. Without ffmpeg it used to say
+/// so in one line and go on one-way, which nobody saw behind the window of
+/// codes: now nothing is packed and nothing is shown.
+#[test]
+fn two_way_without_ffmpeg_stops_before_anything_is_sent() {
+    let env = Env::new("no-ffmpeg");
+    fs::create_dir_all(env.path("empty")).unwrap();
+    let out = env
+        .command(
+            "me",
+            &[
+                "send",
+                "--plain",
+                "--text",
+                "hello",
+                "--two-way",
+                "--export-text",
+                "frames.txt",
+            ],
+        )
+        .env("PATH", env.path("empty"))
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("ffmpeg is not installed"), "{said}");
+    assert!(said.contains("--two-way"), "{said}");
+    assert!(!said.contains("Packing"), "{said}");
+    assert!(!env.path("frames.txt").exists());
+    // One-way, the same transfer needs no ffmpeg.
+    let out = env
+        .command(
+            "me",
+            &[
+                "send",
+                "--plain",
+                "--text",
+                "hello",
+                "--export-text",
+                "frames.txt",
+            ],
+        )
+        .env("PATH", env.path("empty"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A stand-in for ffmpeg on PATH: `script` is what it does when asked for
+/// pictures (asked for its version, it is simply there).
+#[cfg(unix)]
+fn stand_in_for_ffmpeg(env: &Env, script: &str) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = env.path("bin");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("ffmpeg");
+    fs::write(
+        &file,
+        format!("#!/bin/sh\ncase \"$*\" in *-version*) exit 0;; esac\n{script}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = dir.into_os_string();
+    path.push(":/usr/bin:/bin");
+    path
+}
+
+/// A camera that gives no picture (none there, no permission) ends a
+/// two-way send as well, before a code is shown.
+#[cfg(unix)]
+#[test]
+fn two_way_with_a_camera_that_gives_nothing_stops() {
+    let env = Env::new("no-camera");
+    let path = stand_in_for_ffmpeg(&env, "echo 'no such device' >&2; exit 1");
+    let out = env
+        .command(
+            "me",
+            &[
+                "send",
+                "--plain",
+                "--text",
+                "hello",
+                "--two-way",
+                "--export-text",
+                "frames.txt",
+            ],
+        )
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("gives no picture"), "{said}");
+    assert!(said.contains("--two-way-camera"), "{said}");
+    assert!(!env.path("frames.txt").exists());
+}
+
+/// With a camera that gives pictures, sending begins (here it writes what
+/// it was asked for and ends: nobody is in front of that camera).
+#[cfg(unix)]
+#[test]
+fn two_way_begins_once_the_camera_gives_a_picture() {
+    let env = Env::new("camera");
+    let path = stand_in_for_ffmpeg(
+        &env,
+        "printf 'YUV4MPEG2 W16 H16 F30:1 C444\\n'\n\
+         while :; do printf 'FRAME\\n'; head -c 768 /dev/zero; sleep 0.05; done",
+    );
+    let out = env
+        .command(
+            "me",
+            &[
+                "send",
+                "--plain",
+                "--text",
+                "hello",
+                "--two-way",
+                "--export-text",
+                "frames.txt",
+                "--frames",
+                "20",
+            ],
+        )
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("point camera"), "{said}");
+    assert_eq!(
+        fs::read_to_string(env.path("frames.txt"))
+            .unwrap()
+            .lines()
+            .count(),
+        20
+    );
+}
+
 /// `--secure`: encrypted, between trusted devices, one way, nothing left.
 #[test]
 fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {

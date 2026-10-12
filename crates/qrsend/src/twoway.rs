@@ -10,8 +10,9 @@
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::thread;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, bounded, unbounded};
 use qrsend_core::feedback::{self, Feedback};
 
@@ -28,13 +29,29 @@ pub enum Source {
     Text(PathBuf),
 }
 
-/// Reads feedback codes from `source` in the background. An input that
-/// fails (no camera, no ffmpeg) is reported once on the terminal; the
-/// transfer goes on one-way.
-pub fn listen(source: Source) -> Receiver<Feedback> {
+/// How long a camera may take to give its first picture. (The system may
+/// first ask whether the terminal may use the camera at all.)
+const CAMERA_OPENS_WITHIN: Duration = Duration::from_secs(60);
+
+/// Reads feedback codes from `source` in the background.
+///
+/// A way back that was asked for and cannot be had is an error, here and
+/// now: a file that cannot be opened, a camera that gives no picture (no
+/// ffmpeg, no such camera, no permission). Going on one-way without a word
+/// that is seen leaves someone waiting for a two-way transfer that never
+/// was one. A camera that stops later is another matter: the transfer goes
+/// on one-way, and that is said once.
+pub fn listen(source: Source) -> Result<Receiver<Feedback>> {
     let (tx, rx) = unbounded();
     match source {
         Source::Text(path) => {
+            let stdin = path.as_os_str() == "-";
+            // (Looked at, not opened, here: opening a pipe waits for the
+            // other end, and the receiver may wait for our first codes.)
+            if !stdin {
+                std::fs::metadata(&path)
+                    .with_context(|| format!("cannot read feedback from {}", path.display()))?;
+            }
             thread::spawn(move || {
                 let lines = |reader: &mut dyn BufRead| {
                     // (A damaged line is a code not read, no more.)
@@ -47,7 +64,7 @@ pub fn listen(source: Source) -> Receiver<Feedback> {
                         }
                     }
                 };
-                if path.as_os_str() == "-" {
+                if stdin {
                     lines(&mut std::io::stdin().lock());
                 } else {
                     match std::fs::File::open(&path) {
@@ -62,18 +79,17 @@ pub fn listen(source: Source) -> Receiver<Feedback> {
         }
         Source::Pictures(input) => {
             let (pictures_tx, pictures) = bounded::<Picture>(2);
+            let (ended_tx, ended) = bounded::<Result<()>>(1);
+            let (first_tx, first) = bounded::<()>(1);
             thread::spawn(move || {
-                let result: Result<()> = input.produce(pictures_tx);
-                if let Err(e) = result {
-                    eprintln!("No feedback is read: {e:#}");
-                    log::line("feedback", || "the camera gave nothing".into());
-                }
+                let _ = ended_tx.send(input.produce(pictures_tx));
             });
             thread::spawn(move || {
                 let mut said_size = false;
                 while let Ok(picture) = pictures.recv() {
                     if !said_size {
                         said_size = true;
+                        let _ = first_tx.try_send(());
                         log::line("feedback", || {
                             format!(
                                 "camera picture={}x{}",
@@ -93,9 +109,41 @@ pub fn listen(source: Source) -> Receiver<Feedback> {
                     }
                 }
             });
+            // The first picture, or the reason there is none.
+            let nothing = |why: String| {
+                log::line("feedback", || "the camera gave nothing".into());
+                anyhow!("{why}")
+            };
+            crossbeam_channel::select! {
+                recv(first) -> got => if got.is_err() {
+                    // (The pictures ended before one came: the input says why.)
+                    return Err(match ended.recv() {
+                        Ok(Err(e)) => nothing(format!("{e:#}")),
+                        _ => nothing("the input gave no picture".into()),
+                    });
+                },
+                recv(ended) -> result => match result {
+                    Ok(Err(e)) => return Err(nothing(format!("{e:#}"))),
+                    // (Pictures that ran out, as a folder of images does:
+                    // what they held is read.)
+                    _ => return Ok(rx),
+                },
+                default(CAMERA_OPENS_WITHIN) => {
+                    return Err(nothing(format!(
+                        "no picture came within {} seconds",
+                        CAMERA_OPENS_WITHIN.as_secs()
+                    )));
+                }
+            }
+            thread::spawn(move || {
+                if let Ok(Err(e)) = ended.recv() {
+                    eprintln!("No more feedback is read (the transfer goes on one-way): {e:#}");
+                    log::line("feedback", || "the camera stopped".into());
+                }
+            });
         }
     }
-    rx
+    Ok(rx)
 }
 
 /// Reads the one-time key a receiver shows (forward secrecy) from pictures:
@@ -127,7 +175,6 @@ pub fn read_one_time_key(input: Input) -> Result<qrsend_core::crypto::OneTimeKey
 mod tests {
     use super::*;
     use qrsend_core::qr;
-    use std::time::Duration;
 
     fn feedback(seq: u32, complete: bool) -> Feedback {
         Feedback {
@@ -171,7 +218,7 @@ mod tests {
             feedback(3, true).encode()
         );
         std::fs::write(&path, text).unwrap();
-        let rx = listen(Source::Text(path));
+        let rx = listen(Source::Text(path)).unwrap();
         let got: Vec<Feedback> = rx.iter().collect();
         assert_eq!(got.first(), Some(&feedback(1, false)));
         assert_eq!(got.last(), Some(&feedback(3, true)));
@@ -203,7 +250,7 @@ mod tests {
         }
         let path = scratch.0.clone();
         picture.save(&path).unwrap();
-        let rx = listen(Source::Pictures(Input::Images(vec![path])));
+        let rx = listen(Source::Pictures(Input::Images(vec![path]))).unwrap();
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(20)).ok(),
             Some(feedback(9, false))

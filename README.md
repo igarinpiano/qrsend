@@ -229,8 +229,10 @@ qrsend recv --camera --two-way             # receiver: shows them in a window
 With `--two-way` the receiver shows a code saying what it still lacks, the
 sender's camera reads it, only the missing parts are sent, and sending ends
 when everything has arrived. Either side can be the web app (its *Two-way
-transfer*). Without an answer the transfer simply goes on one-way. Over a
-channel that carries bytes, the same goes as text (`recv --feedback-to` on one
+transfer*). Without an answer the transfer simply goes on one-way. The
+sender's camera is read through ffmpeg: where ffmpeg is missing, or the camera
+gives no picture, `send --two-way` stops with an error instead of quietly
+sending one-way. Over a channel that carries bytes, the same goes as text (`recv --feedback-to` on one
 side, `send --feedback-from` on the other).
 
 ```bash
