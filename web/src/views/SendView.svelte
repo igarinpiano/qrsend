@@ -76,6 +76,8 @@
   let oneTimeText = $state("");
   let oneTimeError = $state("");
   let oneTimeScan = $state(false);
+  // Every chosen receiver's key is read, and the user asked to read one again (a receiver made a new one).
+  let oneTimeAgain = $state(false);
   let oneTimeRead = $state<{ have: number; of: number } | undefined>();
   let collector: OneTimeCollector | undefined;
   /** Gives a one-time key to the chosen receiver it belongs to. */
@@ -89,6 +91,7 @@
     oneTimeError = "";
     oneTimeText = "";
     oneTimeScan = false;
+    oneTimeAgain = false;
     oneTimeRead = undefined;
     collector = undefined;
     return true;
@@ -102,6 +105,9 @@
     }
   }
   const chosen = $derived(anyone ? [] : devices.filter((d) => selected.includes(d.fingerprint)));
+  // One key for each receiver: whose is read, and whose is still to come.
+  const oneTimeTaken = $derived(chosen.filter((d) => d.pq && oneTimeKeys[d.id]).map((d) => d.name));
+  const oneTimeWanted = $derived(chosen.filter((d) => d.pq && !oneTimeKeys[d.id]).map((d) => d.name));
 
   /** The chosen receivers that are known by their older keys only. */
   const olderChosen = $derived(
@@ -281,19 +287,43 @@
         <strong>Forward secrecy</strong> (optional): if the receiver shows a one-time key (its Receive page, or
         <code>qrsend recv --one-time-key</code>), read it here before sending. The receiver destroys that key once the
         transfer has arrived, and a recording of the codes cannot be read later, not even with its device keys.
+        {#if chosen.length > 1}With several receivers, each shows its own key: read one after the other.{/if}
       </p>
-      {#if oneTimeScan}
-        <Camera ontexts={onOneTimeCodes} />
-        {#if oneTimeRead}<p class="small" data-testid="one-time-progress">{oneTimeRead.have} of {oneTimeRead.of} codes of the key read…</p>{/if}
-        <div class="row"><button onclick={() => (oneTimeScan = false)}>Stop scanning</button></div>
-      {:else}
-        <div class="row"><button onclick={() => (oneTimeScan = true)}>Scan the receiver's one-time key</button></div>
+      {#if oneTimeTaken.length}
+        <p class="small" data-testid="one-time-state">
+          {#if oneTimeWanted.length === 0}
+            <span class="badge ok">forward secrecy</span>
+            {chosen.length === 1 ? "The receiver's one-time key is read: nothing more to scan." : "The one-time key of every chosen receiver is read: nothing more to scan."}
+          {:else}
+            <span class="badge warn">not yet</span>
+            Read: {oneTimeTaken.join(", ")}. Still without a one-time key: {oneTimeWanted.join(", ")}. Each receiver shows
+            its own key, and the transfer has forward secrecy only once all of them are read.
+          {/if}
+        </p>
       {/if}
-      <label class="field">
-        <span>…or paste it</span>
-        <input type="text" bind:value={oneTimeText} placeholder="QSK1-…" data-testid="one-time-input" />
-      </label>
-      <div class="row"><button disabled={!oneTimeText.trim()} onclick={() => takeOneTime(oneTimeText.trim())}>Use this key</button></div>
+      {#if oneTimeWanted.length || oneTimeAgain}
+        {#if oneTimeScan}
+          <Camera ontexts={onOneTimeCodes} />
+          {#if oneTimeRead}<p class="small" data-testid="one-time-progress">{oneTimeRead.have} of {oneTimeRead.of} codes of the key read…</p>{/if}
+          <div class="row"><button onclick={() => (oneTimeScan = false)}>Stop scanning</button></div>
+        {:else}
+          <div class="row">
+            <button onclick={() => (oneTimeScan = true)}>
+              {oneTimeTaken.length && oneTimeWanted.length ? "Scan the next receiver's one-time key" : "Scan the receiver's one-time key"}
+            </button>
+          </div>
+        {/if}
+        <label class="field">
+          <span>…or paste it</span>
+          <input type="text" bind:value={oneTimeText} placeholder="QSK1-…" data-testid="one-time-input" />
+        </label>
+        <div class="row"><button disabled={!oneTimeText.trim()} onclick={() => takeOneTime(oneTimeText.trim())}>Use this key</button></div>
+      {:else}
+        <div class="row">
+          <button data-testid="one-time-again" onclick={() => (oneTimeAgain = true)}>Read a key again</button>
+          <span class="muted small">(only if a receiver has made a new one)</span>
+        </div>
+      {/if}
       {#if oneTimeError}<p class="error" role="alert">{oneTimeError}</p>{/if}
     </div>
   {/if}

@@ -108,6 +108,16 @@ test("web → CLI: forward secrecy with the receiver's one-time key", async ({ p
   await page.getByRole("button", { name: "Check" }).click();
   await page.getByRole("button", { name: "Yes, trust it" }).click();
   cli(["devices", "add", browserId, "--name", "browser", "--yes"], device);
+  // (A second device, only to be chosen beside the first for a moment.)
+  const other = "fs-other";
+  const otherId = cli(["id", "--name", other, "--no-qr"], other)
+    .split("\n")
+    .find((l) => l.startsWith("ID:"))!
+    .slice(3)
+    .trim();
+  await page.getByPlaceholder("qrsend-id:…").fill(otherId);
+  await page.getByRole("button", { name: "Check" }).click();
+  await page.getByRole("button", { name: "Yes, trust it" }).click();
 
   // The receiver makes its key when it starts to receive (here from nothing).
   const nothing = path.join(WORK, "fs-nothing.txt");
@@ -127,6 +137,22 @@ test("web → CLI: forward secrecy with the receiver's one-time key", async ({ p
   await page.getByTestId("one-time-input").fill(key);
   await page.getByRole("button", { name: "Use this key" }).click();
   await expect(page.getByTestId("one-time-taken")).toBeVisible();
+  // With the only receiver's key read there is nothing left to scan, and
+  // the page says so instead of offering to scan again (which read as "one
+  // more is wanted"). Reading a key again is still possible, on request.
+  const scan = page.getByRole("button", { name: /Scan the (next )?receiver's one-time key/ });
+  await expect(page.getByTestId("one-time-state")).toContainText("nothing more to scan");
+  // A second receiver wants a key of its own: the page names who is still
+  // without one, and offers to scan the next.
+  await page.getByRole("checkbox", { name: new RegExp(other) }).check();
+  await expect(page.getByTestId("one-time-state")).toContainText(`Still without a one-time key: ${other}`);
+  await expect(page.getByRole("button", { name: "Scan the next receiver's one-time key" })).toBeVisible();
+  await page.getByRole("checkbox", { name: new RegExp(other) }).uncheck();
+  await expect(page.getByTestId("one-time-state")).toContainText("nothing more to scan");
+  await expect(scan).toHaveCount(0);
+  await expect(page.getByTestId("one-time-input")).toHaveCount(0);
+  await page.getByTestId("one-time-again").click();
+  await expect(scan).toBeVisible();
   await page.getByRole("button", { name: "Start sending" }).click();
   await expect(page.getByText("encrypted (forward secrecy, post-quantum)")).toBeVisible();
 
