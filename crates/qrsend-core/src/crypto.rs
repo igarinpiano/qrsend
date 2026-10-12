@@ -602,6 +602,66 @@ pub fn x25519_stanza_keys(age_bytes: &[u8]) -> Result<Vec<[u8; 32]>, CryptoError
     }
 }
 
+/// What keeps an encrypted transfer from being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
+    /// Every receiver's key is wrapped with both schemes: X25519 and
+    /// ML-KEM. It holds against a quantum computer as well.
+    PostQuantum,
+    /// At least one receiver's key is wrapped with X25519 alone, and
+    /// whoever breaks that reads the transfer: all of it, since there is
+    /// one key for everyone it was encrypted to.
+    Older,
+}
+
+impl Protection {
+    /// What a transfer to `recipients` gets.
+    pub fn of(recipients: &[DevicePublic]) -> Protection {
+        match recipients.iter().all(|r| r.pq.is_some()) {
+            true => Protection::PostQuantum,
+            false => Protection::Older,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Protection::PostQuantum => "pq",
+            Protection::Older => "older",
+        }
+    }
+}
+
+/// What protects an age file, going by the stanzas of its header (which is
+/// all of it that needs to be in `age_bytes`): readable without any key.
+pub fn protection(age_bytes: &[u8]) -> Result<Protection, CryptoError> {
+    struct Kinds(std::cell::Cell<(usize, usize)>);
+    impl age::Identity for Kinds {
+        fn unwrap_stanza(
+            &self,
+            stanza: &age_core::format::Stanza,
+        ) -> Option<Result<age_core::format::FileKey, age::DecryptError>> {
+            let (hybrid, other) = self.0.get();
+            // (Stanzas put in to keep readers tolerant count for nothing.)
+            if stanza.tag == pq::STANZA_TAG {
+                self.0.set((hybrid + 1, other));
+            } else if !stanza.tag.ends_with("-grease") {
+                self.0.set((hybrid, other + 1));
+            }
+            None
+        }
+    }
+    let kinds = Kinds(Default::default());
+    let dec = age::Decryptor::new_buffered(age_bytes).map_err(map_decrypt)?;
+    match dec.decrypt(iter::once(&kinds as &dyn age::Identity)) {
+        Err(age::DecryptError::NoMatchingKeys) | Ok(_) => {}
+        Err(e) => return Err(map_decrypt(e)),
+    }
+    Ok(match kinds.0.get() {
+        (hybrid, 0) if hybrid > 0 => Protection::PostQuantum,
+        _ => Protection::Older,
+    })
+}
+
 /// An age identity made of precomputed X25519 shared secrets: the result of
 /// `X25519(our secret, ephemeral key)` for each stanza, computed elsewhere.
 pub struct SharedSecrets {
@@ -1063,6 +1123,16 @@ mod tests {
             decrypt(&ct, bob_before.as_age(), 100).unwrap(),
             b"as before"
         );
+        // What protects each can be told without a key.
+        let pq = encrypt(b"for bob", &[bob.public()]).unwrap();
+        assert_eq!(protection(&pq).unwrap(), Protection::PostQuantum);
+        assert_eq!(protection(&ct).unwrap(), Protection::Older);
+        assert_eq!(Protection::of(&[bob.public()]), Protection::PostQuantum);
+        assert_eq!(
+            Protection::of(&[bob.public(), bob.public().classic()]),
+            Protection::Older
+        );
+        assert!(protection(b"not an age file").is_err());
         // Several devices, of both kinds: each opens it, a stranger does not.
         let (carol, eve) = (
             DeviceIdentity::generate("carol").unwrap(),
@@ -1073,6 +1143,8 @@ mod tests {
         for device in [&bob_before, &carol, &bob] {
             assert_eq!(decrypt(&ct, device.as_age(), 100).unwrap(), b"for three");
         }
+        // (One receiver with older keys only: that is what the whole is worth.)
+        assert_eq!(protection(&ct).unwrap(), Protection::Older);
         assert!(matches!(
             decrypt(&ct, eve.as_age(), 100),
             Err(CryptoError::NotForUs)

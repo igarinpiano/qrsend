@@ -129,7 +129,14 @@ impl SenderInfo {
             .map(|c| format!(" claims to be {c:?}"))
             .unwrap_or_default();
         match self {
-            SenderInfo::Trusted { name, .. } => format!("{} ✓", util::printable(name)),
+            SenderInfo::Trusted { name, pq } => format!(
+                "{} ✓ ({})",
+                util::printable(name),
+                match pq {
+                    true => "post-quantum signature",
+                    false => "older signature only",
+                }
+            ),
             SenderInfo::Unverified(key) => format!("unverified sender (key {key}){claimed}"),
             SenderInfo::Unsigned => format!("unsigned{claimed}"),
         }
@@ -339,11 +346,21 @@ pub fn summary(m: &Manifest) -> String {
     }
 }
 
+/// What protects the transfer a store holds, if it is encrypted and its
+/// file list is here.
+pub fn protection(store: &Store) -> Option<crypto::Protection> {
+    if store.params().flags & FLAG_ENCRYPTED == 0 || !store.has_meta() {
+        return None;
+    }
+    crypto::protection(&store.meta_bytes().ok()?).ok()
+}
+
 pub fn print_manifest_header(
     pb: &ProgressBar,
     m: &Manifest,
     p: &SessionParams,
     sender: &SenderInfo,
+    protection: Option<crypto::Protection>,
 ) {
     say(
         pb,
@@ -353,8 +370,34 @@ pub fn print_manifest_header(
         pb,
         format!("From:   {}", sender.describe(m.sender_name.as_deref())),
     );
+    // Which keys are at work is said every time: the older ones alone are a
+    // state to get out of, and nobody gets out of what they do not see.
+    if let SenderInfo::Trusted { name, pq: false } = sender {
+        say(
+            pb,
+            format!(
+                "WARNING: {} is trusted here with its older keys only, so its signature is checked \
+                 the older way only (no protection against a quantum computer). Have it show its \
+                 ID again and add that: qrsend devices add <ID>",
+                util::printable(name)
+            ),
+        );
+    }
     if p.flags & FLAG_ENCRYPTED != 0 {
-        say(pb, "Encrypted for this device.");
+        say(
+            pb,
+            match protection {
+                Some(crypto::Protection::PostQuantum) => {
+                    "Encrypted for this device, with post-quantum protection (X25519 + ML-KEM-768)."
+                }
+                _ => {
+                    "Encrypted for this device.\nWARNING: encrypted the older way only (X25519, no \
+                     protection against a quantum computer): the sender knows this device, or \
+                     another receiver of this transfer, by an ID from before post-quantum keys. \
+                     Show the sender this device's ID again: qrsend id"
+                }
+            },
+        );
     }
     say(
         pb,
@@ -744,7 +787,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                         }
                         let resumed = !s.store.done_indices().is_empty();
                         if let Some(m) = &s.manifest {
-                            print_manifest_header(&pb, m, &p, &s.sender);
+                            print_manifest_header(&pb, m, &p, &s.sender, protection(&s.store));
                         } else {
                             say(
                                 &pb,
@@ -787,7 +830,13 @@ pub fn run(args: RecvArgs) -> Result<()> {
                                         rx.reset(bad);
                                     }
                                     let m = s.manifest.as_ref().unwrap();
-                                    print_manifest_header(&pb, m, &s.store.params(), &s.sender);
+                                    print_manifest_header(
+                                        &pb,
+                                        m,
+                                        &s.store.params(),
+                                        &s.sender,
+                                        protection(&s.store),
+                                    );
                                     if secure
                                         && let Some(why) =
                                             refused_as_insecure(&s.store.params(), Some(&s.sender))

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { IdCollector, deviceIdCodes, renderText } from "../lib/core";
+  import { IdCollector, classicDeviceId, deviceIdCodes, renderText } from "../lib/core";
   import { forget, inspect, trust, trustedDevices, type DeviceInfo, type Trusted } from "../lib/devices";
   import { canKeepKeys, createIdentity, identityInfo, loadIdentity, renameIdentity, type StoredIdentity } from "../lib/keys";
   import { toDataUrl } from "../lib/qrdraw";
@@ -9,6 +9,9 @@
   import Camera from "./Camera.svelte";
 
   let me = $state<StoredIdentity | undefined>();
+  /** This device's ID as it is, and the one it shows: the same, or (for versions before post-quantum keys) its older ID. */
+  let full = $state<DeviceInfo | undefined>();
+  let older = $state(false);
   let mine = $state<DeviceInfo | undefined>();
   // The ID as QR codes: one for an ID of the older kind; about nine, shown one after the other, for one with
   // post-quantum keys (some 3 kB of keys). Whoever reads them may hold one, or step through them by hand.
@@ -48,12 +51,21 @@
   async function load() {
     me = await loadIdentity();
     if (me) {
-      mine = identityInfo(me);
-      codes = (deviceIdCodes(mine.id) as string[]).map((code) => toDataUrl(renderText(code), 5));
-      showing = 0;
+      full = identityInfo(me);
+      show();
     }
     devices = await trustedDevices();
     protectedKeys = await canKeepKeys();
+  }
+
+  /** Shows the ID with post-quantum keys, or the one for versions before them. */
+  function show() {
+    if (!full) return;
+    mine = older ? (classicDeviceId(full.id) as DeviceInfo) : full;
+    codes = (deviceIdCodes(mine.id) as string[]).map((code) => toDataUrl(renderText(code), 5));
+    showing = 0;
+    playing = true;
+    copied = false;
   }
 
   onMount(() => {
@@ -141,6 +153,13 @@
       </div>
       <div class="stack">
         <div><strong>{mine.name}</strong> <button class="link" onclick={rename}>Rename</button></div>
+        <div data-testid="my-keys">
+          {#if mine.pq}
+            <span class="badge ok">post-quantum keys</span>
+          {:else}
+            <span class="badge warn">older keys only</span>
+          {/if}
+        </div>
         <div class="small">Fingerprint<br /><span class="mono fpr">{mine.fingerprint}</span></div>
         <button
           onclick={async () => {
@@ -154,6 +173,20 @@
       <summary class="small">Show ID as text</summary>
       <code data-testid="my-id">{mine.id}</code>
     </details>
+    {#if full?.pq}
+      <label class="check small">
+        <input type="checkbox" bind:checked={older} onchange={show} />
+        <span>Show the ID for versions before post-quantum keys (0.1.10 and earlier)</span>
+      </label>
+      {#if older}
+        <p class="small warning" role="alert" data-testid="older-id-warning">
+          <strong>Older ID.</strong> This is this device with its older keys only. What a device given this ID sends here
+          is encrypted the older way only (no protection against a future quantum computer), and it checks this device's
+          signature the older way only. Use it only for a device that cannot read the full ID, and add the full one
+          there once it can.
+        </p>
+      {/if}
+    {/if}
     {#if me?.kind === "legacy"}
       <p class="small muted">This browser cannot keep these keys in its protected key store; they are stored as site data.</p>
     {/if}
@@ -200,8 +233,12 @@
                 connects directly
               </span>
             {/if}
-            {#if !d.pq}
-              <span class="badge" title="Trusted with keys from before post-quantum ones: what is sent to it is encrypted the older way. Have it show its ID again and add that.">
+            {#if d.pq}
+              <span class="badge ok" title="Known with its post-quantum keys: what is sent to it is encrypted with X25519 and ML-KEM together, and its signature is checked with Ed25519 and ML-DSA together.">
+                post-quantum
+              </span>
+            {:else}
+              <span class="badge warn" title="Trusted with keys from before post-quantum ones: what is sent to it is encrypted the older way only. Have it show its ID again and add that.">
                 older keys only
               </span>
             {/if}
@@ -213,10 +250,26 @@
     </ul>
   {/if}
 
+  {#if devices.some((d) => !d.pq)}
+    <p class="small warning" role="alert" data-testid="older-devices-warning">
+      <strong>Older keys in use.</strong> What is sent to a device marked “older keys only” is encrypted the older way
+      only, and its signature is checked the older way only (no protection against a future quantum computer). Have it
+      show its device ID again (on a current version) and add that here: its entry takes the new keys.
+    </p>
+  {/if}
+
   {#if candidate}
     <div class="confirm stack">
       <p>Does the other device show this fingerprint?</p>
       <p class="mono fpr">{candidate.fingerprint}</p>
+      {#if candidate.pq}
+        <p class="small"><span class="badge ok">post-quantum keys</span></p>
+      {:else}
+        <p class="small warning" role="alert" data-testid="older-candidate-warning">
+          <span class="badge warn">older keys only</span> This ID has no post-quantum keys: what is sent to this device
+          will be encrypted the older way only. A device on a current version shows an ID with them.
+        </p>
+      {/if}
       <label class="field">
         <span>Name</span>
         <input type="text" bind:value={candidateName} />

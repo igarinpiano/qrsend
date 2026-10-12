@@ -90,6 +90,19 @@ test("an ID with post-quantum keys is shown as several codes, and read from them
     const pictures = await idCodes(first);
     expect(pictures).toHaveLength(parts);
 
+    // The ID for versions before these keys can be shown instead: one code,
+    // the short fingerprint, and a warning for as long as it shows.
+    await expect(first.getByTestId("my-keys")).toHaveText("post-quantum keys");
+    await first.getByLabel(/Show the ID for versions before post-quantum keys/).check();
+    await expect(first.getByTestId("older-id-warning")).toBeVisible();
+    await expect(first.getByTestId("my-keys")).toHaveText("older keys only");
+    await expect(first.getByTestId("my-id")).toHaveText(/^qrsend-id:1:/);
+    await expect(first.locator(".me .fpr")).toHaveText(/^\d{4}-\d{4}-\d{4}$/);
+    await expect(first.getByTestId("my-id-turn")).toHaveCount(0);
+    await first.getByLabel(/Show the ID for versions before post-quantum keys/).uncheck();
+    await expect(first.getByTestId("older-id-warning")).toHaveCount(0);
+    await expect(first.locator(".me .fpr")).toHaveText(mine.fingerprint);
+
     // Another browser reads them with its camera, out of order and with
     // one of them late: it says how far it is, then shows the fingerprint.
     const late = [...pictures.slice(1).reverse(), ...pictures.slice(1), pictures[0]];
@@ -148,12 +161,38 @@ test("a device trusted with its older keys takes the new ones into the same reco
     await page.getByRole("button", { name: "Check" }).click();
     await page.getByRole("button", { name: "Yes, trust it" }).click();
   };
-  await add(classic);
-  await expect(page.getByText("older keys only")).toBeVisible();
+  // Before it is trusted, the page says what kind of ID this is; after,
+  // the list does, and so does the page a transfer is sent from.
+  await page.getByPlaceholder("qrsend-id:…").fill(classic);
+  await page.getByRole("button", { name: "Check" }).click();
+  await expect(page.getByTestId("older-candidate-warning")).toBeVisible();
+  await page.getByRole("button", { name: "Yes, trust it" }).click();
+  await expect(page.locator(".list li").getByText("older keys only")).toBeVisible();
+  await expect(page.getByTestId("older-devices-warning")).toBeVisible();
+  await page.goto("./#/send");
+  await page.getByRole("tab", { name: "Text" }).click();
+  await page.getByPlaceholder("Paste or type anything…").fill("for the older keys");
+  await expect(page.getByTestId("older-keys-warning")).toHaveCount(0);
+  await page.getByRole("checkbox", { name: /pq-old/ }).check();
+  await expect(page.getByTestId("older-keys-warning")).toContainText("encrypted the older way only");
+  await page.getByRole("button", { name: "Start sending" }).click();
+  await expect(page.getByText("encrypted the older way only")).toBeVisible();
+
+  await page.goto("./#/devices");
   await add(full);
   await expect(page.getByTestId("trust-note")).toContainText("now has post-quantum keys");
   await expect(page.getByText("older keys only")).toHaveCount(0);
+  await expect(page.getByTestId("older-devices-warning")).toHaveCount(0);
   await expect(page.locator(".list li")).toHaveCount(1);
+  await expect(page.locator(".list li").getByText("post-quantum")).toBeVisible();
+  await page.goto("./#/send");
+  await page.getByRole("tab", { name: "Text" }).click();
+  await page.getByPlaceholder("Paste or type anything…").fill("for the new keys");
+  await page.getByRole("checkbox", { name: /pq-old/ }).check();
+  await expect(page.getByTestId("older-keys-warning")).toHaveCount(0);
+  await page.getByRole("button", { name: "Start sending" }).click();
+  await expect(page.getByText("encrypted (post-quantum)")).toBeVisible();
+  await page.goto("./#/devices");
   // The older ID once more is refused: it would take the keys away again.
   await page.getByPlaceholder("qrsend-id:…").fill(classic);
   await page.getByRole("button", { name: "Check" }).click();

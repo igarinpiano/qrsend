@@ -260,7 +260,7 @@ fn encrypted_transfer_between_paired_devices() {
     env.ok_as("eve", &args);
     let listed = env.ok_as("eve", &["devices", "list"]);
     assert!(
-        listed.contains("bob") && !listed.contains("older keys only"),
+        listed.contains("bob") && !listed.contains("OLDER KEYS ONLY"),
         "{listed}"
     );
     // The ID for versions before those keys is one code, as it was.
@@ -269,7 +269,7 @@ fn encrypted_transfer_between_paired_devices() {
     env.ok_as("alice", &["devices", "add", "--image", "old.png", "--yes"]);
     assert!(
         env.ok_as("alice", &["devices", "list"])
-            .contains("older keys only")
+            .contains("OLDER KEYS ONLY")
     );
 }
 
@@ -347,7 +347,7 @@ fn post_quantum_keys_come_to_a_device_that_had_none() {
     assert!(added.contains("now has post-quantum keys"), "{added}");
     let listed = env.ok_as("alice", &["devices", "list"]);
     assert!(
-        listed.matches("bob").count() == 1 && !listed.contains("older keys only"),
+        listed.matches("bob").count() == 1 && !listed.contains("OLDER KEYS ONLY"),
         "{listed}"
     );
     assert!(!send("new").contains("older way"));

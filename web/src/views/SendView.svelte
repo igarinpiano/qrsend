@@ -70,6 +70,10 @@
   }
 
   const total = $derived(mode === "text" ? new TextEncoder().encode(text).length : items.reduce((s, i) => s + i.file.size, 0));
+  /** The chosen receivers that are known by their older keys only. */
+  const olderChosen = $derived(
+    anyone ? [] : devices.filter((d) => selected.includes(d.fingerprint) && !d.pq).map((d) => d.name),
+  );
   const canSend = $derived((mode === "text" ? text.length > 0 : items.length > 0) && (anyone || selected.length > 0) && !busy);
 
   function addFiles(list: FileList | null) {
@@ -209,9 +213,27 @@
   {#each devices as d (d.fingerprint)}
     <label class="check">
       <input type="checkbox" value={d.fingerprint} bind:group={selected} disabled={anyone} />
-      <span>{d.name} <span class="muted small mono">{d.fingerprint}</span></span>
+      <span>
+        {d.name}
+        {#if d.pq}
+          <span class="badge ok" title="Known with its post-quantum keys: encrypted with X25519 and ML-KEM together.">post-quantum</span>
+        {:else}
+          <span class="badge warn" title="Known by an ID from before post-quantum keys: encrypted with X25519 alone.">older keys only</span>
+        {/if}
+        <span class="muted small mono">{d.fingerprint}</span>
+      </span>
     </label>
   {/each}
+  {#if olderChosen.length}
+    <p class="small warning" role="alert" data-testid="older-keys-warning">
+      <strong>Older encryption.</strong>
+      {olderChosen.join(", ")}
+      {olderChosen.length === 1 ? "is" : "are"} trusted with keys from before post-quantum ones, so this transfer will be
+      encrypted the older way only (no protection against a future quantum computer) — for every receiver of it. Have
+      {olderChosen.length === 1 ? "it" : "them"} show the device ID again and add it on the
+      <a href="#/devices">Devices</a> page.
+    </p>
+  {/if}
   <label class="check">
     <input type="checkbox" bind:checked={anyone} />
     <span>Anyone who sees the codes <span class="badge warn">not encrypted</span></span>

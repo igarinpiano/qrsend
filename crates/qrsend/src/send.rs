@@ -359,9 +359,10 @@ pub fn run(args: SendArgs) -> Result<()> {
         }
         if !older.is_empty() {
             eprintln!(
-                "Note: {} is trusted with keys from before post-quantum ones, so this transfer \
-                 is encrypted the older way for it. Have it show its ID again (`qrsend id`) and \
-                 add that with `qrsend devices add`.",
+                "WARNING: {} is trusted with keys from before post-quantum ones, so this transfer \
+                 is encrypted the older way (X25519 alone, no protection against a quantum \
+                 computer) — for every receiver of it. Have it show its ID again (`qrsend id`) \
+                 and add that with `qrsend devices add`.",
                 older.join(", ")
             );
         }
@@ -681,11 +682,33 @@ pub fn run(args: SendArgs) -> Result<()> {
             )
         },
     );
-    if spool.info.recipients.is_empty() {
-        eprintln!("Unencrypted: anyone who can see the codes can read this transfer.");
-    } else {
-        eprintln!("Encrypted for: {}", spool.info.recipients.join(", "));
+    // (Read off what was packed: it is the same for a transfer sent again.)
+    let protection = match spool.info.recipients.is_empty() {
+        true => None,
+        false => Some(
+            qrsend_core::crypto::protection(&std::fs::read(spool.dir.join("meta.bin"))?)
+                .unwrap_or(qrsend_core::crypto::Protection::Older),
+        ),
+    };
+    match protection {
+        None => eprintln!("Unencrypted: anyone who can see the codes can read this transfer."),
+        Some(qrsend_core::crypto::Protection::PostQuantum) => eprintln!(
+            "Encrypted for: {} · post-quantum protection (X25519 + ML-KEM-768)",
+            spool.info.recipients.join(", ")
+        ),
+        Some(qrsend_core::crypto::Protection::Older) => eprintln!(
+            "Encrypted for: {} · WARNING: the older way only (X25519, no post-quantum protection)",
+            spool.info.recipients.join(", ")
+        ),
     }
+    log::line("tx", || {
+        format!("protection={}", protection.map_or("none", |p| p.word()))
+    });
+    stream.set_label(match protection {
+        None => "not encrypted",
+        Some(qrsend_core::crypto::Protection::PostQuantum) => "encrypted (post-quantum)",
+        Some(qrsend_core::crypto::Protection::Older) => "encrypted the OLDER way only",
+    });
     if let Some(only) = &only {
         eprintln!("Resending {} segment(s) from the resume code.", only.len());
     }

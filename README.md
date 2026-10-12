@@ -350,6 +350,12 @@ crates). To read or forge, both would have to be broken.
 - An identity made by an earlier version gets the new keys the first time it
   is used and keeps the old ones. Devices that trust it go on as before, with
   the older scheme alone, until they are given its ID again.
+- Which keys are at work is always shown: in the lists of devices
+  (*post-quantum* / *older keys only*), where a transfer is sent and where it
+  is received (how it is encrypted, how the signature was checked). While older
+  keys alone are in use, both sides get a warning. The web app's Devices page
+  and `qrsend id --classic` can still show the older ID, for a device that
+  cannot read the new one.
 - A device with these keys always signs with both schemes. Versions before
   0.1.11 cannot read that signature: to receive a signed transfer from an
   updated sender, update the receiver.

@@ -209,6 +209,15 @@ code,
   color: var(--warn);
 }
 
+/* Something works, but in a way worth getting out of (older keys in use). */
+.warning {
+  border-left: 3px solid var(--warn, #b26a00);
+  padding: 6px 10px;
+  margin: 6px 0;
+  background: color-mix(in srgb, var(--warn, #b26a00) 10%, transparent);
+  border-radius: 4px;
+}
+
 .error {
   color: var(--danger);
 }

@@ -286,6 +286,7 @@ qrsend id [OPTIONS]
 
 - **ID**: `qrsend-id:2:…`（約 4,300 文字。公開鍵が 3.2 kB ある）。そのままコピーして `qrsend devices add` に貼れる。
 - **フィンガープリント**: 20 桁（`1234-5678-9012-3456-7890`）。
+- **どちらの鍵が使われているかは、いつも表示される**: `qrsend id` の `Keys:` 行、`qrsend devices list` の各行（`post-quantum keys` / `OLDER KEYS ONLY`）、`send` の `Encrypted for: … · post-quantum protection` と送信中のタイトル、`recv` の `From: 名前 ✓ (post-quantum signature)` と `Encrypted for this device, with post-quantum protection`。従来の鍵だけが使われているときは、送る側・受け取る側の両方に `WARNING:` が出る（従来の方式だけで暗号化される／署名を従来の方式だけで確かめた）。
 - **QR コード**: 1 個には収まらないので、**9 個ほどに分けて順に表示する**（端末は 81 桁 × 42 行以上が必要）。Enter で表示を始め、`space` で止める／再開、`←` `→` で 1 個ずつ送る、`q` で終わる。読む側は、どの順でも、同じものを何度読んでもよい。
 
 | オプション | 説明 |

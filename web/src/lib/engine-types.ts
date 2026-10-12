@@ -23,6 +23,11 @@ export interface SendStarted {
   summary: string;
   wireBytes: number;
   encrypted: boolean;
+  /**
+   * Of an encrypted transfer: "pq" when every receiver has post-quantum keys (the key exchange is X25519 and ML-KEM
+   * together), "older" when at least one is known by its older keys only (X25519 alone, for the whole transfer).
+   */
+  protection?: "pq" | "older";
   /** Device IDs the transfer is encrypted for (empty: for anyone). */
   recipients: string[];
   /** With a resume code: how many parts (of how many) are sent. */
@@ -87,6 +92,10 @@ export interface RecvInfo {
   sender_name: string | null;
   sender_status: "trusted" | "unverified" | "unsigned" | null;
   sender: string | null;
+  /** A trusted sender is known with its post-quantum keys, so its signature was checked with both schemes. */
+  sender_pq: boolean;
+  /** Of an encrypted transfer whose file list is open: see `SendStarted.protection`. */
+  protection: "pq" | "older" | null;
   entries: { path: string; dir: boolean; size: number }[];
   frames: number;
   useful: number;
@@ -114,8 +123,13 @@ export type RecvResult =
   | { kind: "text"; session: string; text: string }
   | { kind: "files"; session: string; entries: OutEntry[] };
 
+/** Who sent a transfer and what protected it, as it was known when the transfer was read. */
+export type RecvFrom = Pick<RecvInfo, "sender_status" | "sender" | "sender_name" | "sender_pq" | "encrypted" | "protection">;
+
 export interface RecvState {
   info: RecvInfo | null;
+  /** Of a transfer that has arrived (when `info` is no more). */
+  from?: RecvFrom;
   resumeCode?: string;
   notice?: string;
   error?: string;
@@ -141,6 +155,8 @@ export interface RecvState {
 
 export interface SessionRecord {
   session: string;
+  /** Who sent it and what protected it (transfers received since 0.1.11). */
+  from?: RecvFrom;
   flags: number;
   segShift: number;
   segCount: number;

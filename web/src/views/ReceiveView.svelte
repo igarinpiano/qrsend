@@ -194,6 +194,9 @@
 
   const info = $derived(st?.info ?? undefined);
   const result = $derived(st?.result);
+  // Who sent the transfer and what protects it: known with the file list, and kept with what has arrived (by
+  // then the engine has let go of the rest).
+  const sent = $derived(info?.sender_status ? info : st?.from);
   const error = $derived(failure || st?.error || "");
   // A short transfer can be over before the sender's first notice has been
   // read. The camera then stays on a little longer, only to learn whether the
@@ -714,6 +717,51 @@
   <p class="muted small">This browser offers no file storage here (private window?), so received data is kept in memory only.</p>
 {/if}
 
+<!-- Who sent it and what protects it: shown while it arrives, and with what has arrived. -->
+{#snippet who()}
+  {#if sent?.sender_status}
+      <div class="row small">
+        <span>From:</span>
+        {#if sent.sender_status === "trusted"}
+          <span class="badge ok">{sent.sender} ✓</span>
+          {#if sent.sender_pq}
+            <span class="badge ok" data-testid="sender-keys">post-quantum signature</span>
+          {:else}
+            <span class="badge warn" data-testid="sender-keys">older signature only</span>
+          {/if}
+        {:else if sent.sender_status === "unverified"}
+          <span class="badge warn">Unverified sender</span>
+          <span class="muted">{sent.sender_name ? `claims to be “${sent.sender_name}”` : ""} key {sent.sender}</span>
+        {:else}
+          <span class="badge warn">Unsigned</span>
+          {#if sent.sender_name}<span class="muted">claims to be “{sent.sender_name}”</span>{/if}
+        {/if}
+        {#if sent.encrypted}
+          <span class="badge ok">Encrypted for this device</span>
+          {#if sent.protection === "pq"}
+            <span class="badge ok" data-testid="protection">post-quantum</span>
+          {:else if sent.protection === "older"}
+            <span class="badge warn" data-testid="protection">older encryption</span>
+          {/if}
+        {/if}
+      </div>
+      {#if sent.protection === "older" || (sent.sender_status === "trusted" && !sent.sender_pq)}
+        <p class="small warning" role="alert" data-testid="older-keys-warning">
+          <strong>Older keys in use.</strong>
+          {#if sent.protection === "older"}
+            This transfer is encrypted the older way only (no protection against a future quantum computer): the sender
+            knows this device, or another receiver of it, by an ID from before post-quantum keys. Show the sender this
+            device's ID again (<a href="#/devices">Devices</a>).
+          {/if}
+          {#if sent.sender_status === "trusted" && !sent.sender_pq}
+            {sent.sender} is trusted here with its older keys only, so its signature was checked the older way only. Have
+            it show its ID again and add that.
+          {/if}
+        </p>
+      {/if}
+    {/if}
+{/snippet}
+
 {#if info?.session && !result}
   <div class="card stack">
     <div class="row spread">
@@ -722,21 +770,7 @@
       </strong>
       <span class="badge">{info.session}</span>
     </div>
-    {#if info.sender_status}
-      <div class="row small">
-        <span>From:</span>
-        {#if info.sender_status === "trusted"}
-          <span class="badge ok">{info.sender} ✓</span>
-        {:else if info.sender_status === "unverified"}
-          <span class="badge warn">Unverified sender</span>
-          <span class="muted">{info.sender_name ? `claims to be “${info.sender_name}”` : ""} key {info.sender}</span>
-        {:else}
-          <span class="badge warn">Unsigned</span>
-          {#if info.sender_name}<span class="muted">claims to be “{info.sender_name}”</span>{/if}
-        {/if}
-        {#if info.encrypted}<span class="badge ok">Encrypted for this device</span>{/if}
-      </div>
-    {/if}
+    {@render who()}
     <div class="progress" aria-label="Progress"><div style:width="{pct}%"></div></div>
     <div class="row spread small muted">
       <span data-testid="remaining">
@@ -772,6 +806,7 @@
       <span class="badge ok">Already received</span> This transfer arrived in full before: this is the copy from your Inbox.
     </p>
   {/if}
+  <div class="stack" data-testid="received-from">{@render who()}</div>
   <Result {result} />
   <p class="small muted">Kept in your <a href="#/inbox">Inbox</a> until you delete it.</p>
 {/if}

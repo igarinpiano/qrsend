@@ -187,6 +187,13 @@ pub fn id(args: IdArgs) -> Result<()> {
     }
     println!("Device:      {}", public.name);
     println!("Fingerprint: {}", public.fingerprint());
+    println!(
+        "Keys:        {}",
+        match public.pq {
+            Some(_) => "post-quantum (X25519 + ML-KEM-768, Ed25519 + ML-DSA-65)",
+            None => "OLDER ONLY (X25519, Ed25519)",
+        }
+    );
     println!("ID:          {id}");
     // One code of text for the older kind of ID; several for one with
     // post-quantum keys, which is some 3 kB of keys.
@@ -224,8 +231,9 @@ pub fn id(args: IdArgs) -> Result<()> {
     eprintln!("and check that it shows the same fingerprint.");
     if args.classic && me.has_pq() {
         eprintln!(
-            "This is the ID for versions before post-quantum keys. Whatever reads the full ID \
-             (`qrsend id`) should be given that one."
+            "WARNING: this is the ID for versions before post-quantum keys. What a device given \
+             this ID sends here is encrypted the older way only (no protection against a quantum \
+             computer). Whatever can read the full ID (`qrsend id`) should be given that one."
         );
     }
     if codes.len() > 1 && on_terminal {
@@ -299,8 +307,8 @@ pub fn devices(cmd: DevicesCmd) -> Result<()> {
                     util::printable(&d.name),
                     public.fingerprint(),
                     match public.pq {
-                        Some(_) => "",
-                        None => "  (older keys only: no post-quantum protection)",
+                        Some(_) => "  post-quantum keys",
+                        None => "  OLDER KEYS ONLY: no post-quantum protection (add its ID again)",
                     }
                 );
             }
@@ -331,8 +339,9 @@ pub fn devices(cmd: DevicesCmd) -> Result<()> {
             }
             if public.pq.is_none() {
                 eprintln!(
-                    "This is an ID without post-quantum keys: what is sent to this device will be \
-                     encrypted the older way. (A device on a current version shows the full ID.)"
+                    "WARNING: this is an ID without post-quantum keys: what is sent to this \
+                     device will be encrypted the older way only, and its signature checked the \
+                     older way only. (A device on a current version shows the full ID.)"
                 );
             }
             match identity::add_device(&public, name.as_deref())? {

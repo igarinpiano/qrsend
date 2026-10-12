@@ -145,6 +145,7 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       bodyLen: number;
       summary: string;
       encrypted: boolean;
+      protection?: "pq" | "older";
     };
     job.free();
 
@@ -181,6 +182,7 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       bytesPerCode: params.symbolSize,
       codesPerPass: session.framesPerPass,
       encrypted: info.encrypted,
+      protection: info.protection ?? "none",
       signed: !!me,
       recipients: req.recipients.length,
       storage: store.persistent ? "opfs" : "memory",
@@ -190,6 +192,7 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       summary: info.summary,
       wireBytes: info.bodyLen + info.metaLen,
       encrypted: info.encrypted,
+      protection: info.protection ?? undefined,
       recipients: req.recipients,
       resumed,
       signed: !!me,
@@ -342,6 +345,7 @@ function state(s: RecvSession): RecvState {
   const info = s.record?.extracted ? null : (s.r.info() as RecvInfo);
   return {
     info,
+    from: s.record?.from,
     resumeCode: s.record?.extracted ? undefined : (s.r.resumeCode() ?? undefined),
     notice: s.notice,
     error: s.error,
@@ -471,6 +475,14 @@ async function extract(s: RecvSession): Promise<RecvResult | undefined> {
     out.close();
 
     rec.kind = kind;
+    rec.from = {
+      sender_status: info.sender_status,
+      sender: info.sender,
+      sender_name: info.sender_name,
+      sender_pq: info.sender_pq,
+      encrypted: info.encrypted,
+      protection: info.protection,
+    };
     rec.entries = kind === "files" ? entries : undefined;
     rec.textSize = textSize;
     rec.complete = true;

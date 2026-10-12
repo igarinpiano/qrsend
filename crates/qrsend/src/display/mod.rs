@@ -126,6 +126,9 @@ pub struct FrameStream {
     /// The receiver's feedback codes, read off its screen or however else
     /// they come (two-way transfer, see `crate::twoway`), and the notice
     /// that asks for them, mixed into the stream.
+    /// What protects the transfer, in a word: shown with its progress for
+    /// as long as it is sent.
+    label: &'static str,
     feedback: Option<Receiver<Feedback>>,
     asking: bool,
     /// The colors the codes are stacked in (bit 0 red, 1 green, 2 blue; 0:
@@ -169,6 +172,7 @@ impl FrameStream {
             link: None,
             link_up: false,
             finished: false,
+            label: "",
             feedback: None,
             asking: false,
             colors: Colors::default(),
@@ -197,6 +201,10 @@ impl FrameStream {
     pub fn with_feedback(&mut self, feedback: Receiver<Feedback>) {
         self.asking = true;
         self.feedback = Some(feedback);
+    }
+
+    pub fn set_label(&mut self, label: &'static str) {
+        self.label = label;
     }
 
     /// Stacks three codes in red, green and blue from now on (color codes,
@@ -488,13 +496,15 @@ impl FrameStream {
         let rate = self.symbol_size() as f64 * per_second;
         if self.link_up {
             return format!(
-                "sending over the network · the screen adds ~{}/s · running {}",
+                "{} · sending over the network · the screen adds ~{}/s · running {}",
+                self.label,
                 util::human_bytes(rate as u64),
                 util::human_duration(self.started.elapsed().as_secs_f64())
             );
         }
         format!(
-            "pass {} · {} of {} codes, {} left ({}) · {:.1} fps × {} · ~{}/s · running {}",
+            "{} · pass {} · {} of {} codes, {} left ({}) · {:.1} fps × {} · ~{}/s · running {}",
+            self.label,
             self.pass() + 1,
             shown,
             per_pass,

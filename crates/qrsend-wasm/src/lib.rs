@@ -199,6 +199,15 @@ fn device_info(p: &DevicePublic) -> DeviceInfo {
     }
 }
 
+/// The ID a device had before post-quantum keys (the one versions before
+/// them read), of the device with this ID: `{ name, fingerprint, id, … }`.
+#[wasm_bindgen(js_name = classicDeviceId)]
+pub fn classic_device_id(id: &str) -> JsResult<JsValue> {
+    to_js(&device_info(
+        &DevicePublic::parse(id).map_err(js_err)?.classic(),
+    ))
+}
+
 /// Parses a `qrsend-id:…` string: `{ name, fingerprint, id }`.
 #[wasm_bindgen(js_name = parseDeviceId)]
 pub fn parse_device_id(id: &str) -> JsResult<JsValue> {
@@ -524,6 +533,9 @@ struct SendInfo {
     body_len: f64,
     summary: String,
     encrypted: bool,
+    /// Of an encrypted transfer: "pq" (every receiver has post-quantum
+    /// keys) or "older" (at least one is known by its older keys only).
+    protection: Option<&'static str>,
 }
 
 /// Packs a transfer. Usage: configure recipients, add entries (file contents
@@ -718,6 +730,7 @@ impl SendJob {
             body_len: manifest.body.length as f64,
             summary: summary(&manifest),
             encrypted: flags != 0,
+            protection: (flags != 0).then(|| crypto::Protection::of(&self.recipients).word()),
         });
         Ok(Uint8Array::from(&meta[..]))
     }
@@ -1445,6 +1458,12 @@ struct Info {
     /// "trusted" | "unverified" | "unsigned"
     sender_status: Option<&'static str>,
     sender: Option<String>,
+    /// A trusted sender is known here with its post-quantum keys (and so
+    /// signed with both schemes); false: with its older keys only.
+    sender_pq: bool,
+    /// Of an encrypted transfer whose file list is open: "pq" or "older"
+    /// (see `SendInfo`).
+    protection: Option<&'static str>,
     entries: Vec<EntryInfo>,
     frames: f64,
     useful: f64,
@@ -1468,6 +1487,8 @@ pub struct Receive {
     trusted: Vec<DevicePublic>,
     manifest: Option<Manifest>,
     signer: Option<[u8; 32]>,
+    /// What protects the transfer, if it is encrypted (known with the file list).
+    protection: Option<crypto::Protection>,
     completed: Vec<(u32, Vec<u8>)>,
     /// Session whose sender asked for feedback codes.
     feedback_for: Option<u32>,
@@ -1492,6 +1513,7 @@ impl Receive {
             trusted: Vec::new(),
             manifest: None,
             signer: None,
+            protection: None,
             completed: Vec::new(),
             feedback_for: None,
             feedback_by_sound: false,
@@ -1688,6 +1710,10 @@ impl Receive {
         }
         self.manifest = Some(m);
         self.signer = opened.signer;
+        self.protection = match encrypted {
+            true => crypto::protection(meta).ok(),
+            false => None,
+        };
         Ok(None)
     }
 
@@ -1730,13 +1756,13 @@ impl Receive {
     pub fn info(&self) -> JsResult<JsValue> {
         let p = self.rx.params();
         let m = self.manifest.as_ref();
-        let (sender_status, sender) = match (m, self.signer) {
-            (None, _) => (None, None),
-            (Some(_), None) => (Some("unsigned"), None),
+        let (sender_status, sender, sender_pq) = match (m, self.signer) {
+            (None, _) => (None, None, false),
+            (Some(_), None) => (Some("unsigned"), None, false),
             (Some(_), Some(key)) => {
                 match self.trusted.iter().find(|t| t.verifying.to_bytes() == key) {
-                    Some(t) => (Some("trusted"), Some(t.name.clone())),
-                    None => (Some("unverified"), Some(crypto::key_id(&key))),
+                    Some(t) => (Some("trusted"), Some(t.name.clone()), t.pq.is_some()),
+                    None => (Some("unverified"), Some(crypto::key_id(&key)), false),
                 }
             }
         };
@@ -1763,6 +1789,8 @@ impl Receive {
             sender_name: m.and_then(|m| m.sender_name.clone()),
             sender_status,
             sender,
+            sender_pq,
+            protection: m.and(self.protection).map(|p| p.word()),
             entries: m
                 .map(|m| {
                     m.entries

@@ -6,6 +6,7 @@ import {
   FAKE_TEXT,
   WORK,
   cli,
+  cliBoth,
   SECRET_TEXT,
   encryptedVideo,
   filesVideo,
@@ -114,7 +115,7 @@ test("CLI → web: many segments are stored, verified and saved byte for byte", 
 });
 
 /** Stores an identity the way version 0.1.0 did (a secret string) and the trusted CLI device. */
-async function adoptIdentity(page: Page) {
+async function adoptIdentity(page: Page, knownSender?: string) {
   const ids = readIds();
   await page.goto("./#/");
   // The app creates its database when the home page asks for the inbox.
@@ -146,7 +147,7 @@ async function adoptIdentity(page: Page) {
       });
       db.close();
     },
-    { secret: ids.webSecret, cliId: ids.cli },
+    { secret: ids.webSecret, cliId: knownSender ?? ids.cli },
   );
   return ids;
 }
@@ -176,6 +177,47 @@ test("CLI → web: decrypts with non-extractable keys migrated from an older ide
 
     await page.goto("./#/receive");
     await expect(page.getByTestId("received-text")).toHaveText(SECRET_TEXT, { timeout: 60_000 });
+    // Both devices know each other with their post-quantum keys, and the
+    // page says so: how it was encrypted, and how the signature was checked.
+    await expect(page.getByTestId("protection")).toHaveText("post-quantum");
+    await expect(page.getByTestId("sender-keys")).toHaveText("post-quantum signature");
+    await expect(page.getByTestId("older-keys-warning")).toHaveCount(0);
+  });
+});
+
+// A sender that knows this browser by its ID from before post-quantum keys
+// encrypts the older way; a sender this browser knows by such an ID is
+// checked the older way. Both are said, as warnings, where the transfer is
+// received.
+test("CLI → web: older keys in use are warned of", async ({ playwright, baseURL }) => {
+  const ids = readIds();
+  const classic = (device: string) =>
+    cli(["id", "--classic", "--no-qr"], device)
+      .split("\n")
+      .find((l) => l.startsWith("ID:"))!
+      .slice(3)
+      .trim();
+  const video = path.join(WORK, "older.y4m");
+  cli(["id", "--name", "older-cli", "--no-qr"], "older-cli");
+  cli(["devices", "add", classic("webdev"), "--yes", "--name", "web"], "older-cli");
+  const sent = cliBoth(
+    ["send", "--to", "web", "--text", SECRET_TEXT, "--density", "low", "--scale", "4", "--export-video", video, "--passes", "3"],
+    "older-cli",
+  );
+  expect(sent.stderr).toContain("WARNING");
+  expect(sent.stderr).toContain("the older way only");
+  await withCamera({ playwright, baseURL }, video, async (page) => {
+    // This browser knows that sender by its older ID as well.
+    await adoptIdentity(page, classic("older-cli"));
+    await page.goto("./#/devices");
+    await expect(page.getByTestId("older-devices-warning")).toBeVisible();
+    await page.goto("./#/receive");
+    await expect(page.getByTestId("received-text")).toHaveText(SECRET_TEXT, { timeout: 60_000 });
+    await expect(page.getByTestId("protection")).toHaveText("older encryption");
+    await expect(page.getByTestId("sender-keys")).toHaveText("older signature only");
+    await expect(page.getByTestId("older-keys-warning")).toContainText("encrypted the older way only");
+    await expect(page.getByTestId("older-keys-warning")).toContainText("its signature was checked the older way only");
+    expect(ids.web).toMatch(/^qrsend-id:2:/);
   });
 });
 
