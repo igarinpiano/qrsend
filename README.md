@@ -256,8 +256,8 @@ rules, and makes an error of any option that goes against one of them:
 
 | | Sending | Receiving |
 |---|---|---|
-| Encrypted, between trusted devices | Only with `--to`, to devices on the trusted list, signed | Only what is encrypted for this device and signed by a trusted one; anything else is refused and removed |
-| One way only | No network connection is offered, no feedback is read | No network connection is made, nothing is told back |
+| Encrypted, between trusted devices, with forward secrecy | Only with `--to`, to devices on the trusted list with post-quantum keys, signed, and to the receiver's one-time key (`--one-time-key`) | Shows a one-time key first; takes only what is encrypted to it and to this device, signed by a trusted one; anything else is refused and removed |
+| One way only (but for the one-time key) | No network connection is offered, no feedback is read | No network connection is made, nothing is told back |
 | Nothing left behind | Neither the packed transfer nor a log | No log, nothing in the inbox (a transfer that stops halfway starts over), nothing on the clipboard |
 
 ## Web app
@@ -360,8 +360,16 @@ crates). To read or forge, both would have to be broken.
   0.1.11 cannot read that signature: to receive a signed transfer from an
   updated sender, update the receiver.
 
-Not covered: forward secrecy (see [docs/POST-QUANTUM.md](docs/POST-QUANTUM.md),
-in Japanese, for the plan and what is done).
+**Forward secrecy** is there for the asking: the receiver shows a one-time key
+before the transfer (`qrsend recv --one-time-key`, or *Show a one-time key* on
+the web app's Receive page: three or four codes, or a line of text), the sender
+encrypts to it as well (`qrsend send --one-time-key …`, or the Send page), and
+the receiver destroys it once the transfer has arrived. After that a recording
+of the codes cannot be read, not even with the receiver's device keys.
+`--secure` sends and takes nothing without it.
+
+See [docs/POST-QUANTUM.md](docs/POST-QUANTUM.md) (in Japanese) for the plan and
+what is done.
 
 ## How it works
 
@@ -391,7 +399,8 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] Two-way mode in the CLI: feedback codes read by a camera (`send --two-way`) and shown in a window (`recv --two-way`), or as text over any byte channel (`--feedback-from` / `--feedback-to`)
 - [x] Color codes shown by the CLI (`send --color`) and automatic speed from feedback (`send --auto-speed`)
 - [x] Post-quantum keys beside the older ones: ML-KEM-768 with X25519, ML-DSA-65 with Ed25519 (unreleased)
-- [ ] Sound in the CLI; auto-tuning the code size; forward secrecy
+- [x] Forward secrecy with a one-time key; a 256-bit key for the connection between two command lines (unreleased)
+- [ ] Sound in the CLI; auto-tuning the code size
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
 

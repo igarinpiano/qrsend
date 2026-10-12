@@ -17,7 +17,8 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use qrsend_core::crypto::{
-    self, DeviceIdentity, DevicePublic, IdRead, IdReader, OpenMetaError, SharedSecrets, Signed,
+    self, DeviceIdentity, DevicePublic, IdRead, IdReader, OneTimeKey, OneTimeRead, OneTimeReader,
+    OpenMetaError, SharedSecrets, Signed,
 };
 use qrsend_core::direct::{self, DirectSender, Record};
 use qrsend_core::fec;
@@ -31,7 +32,7 @@ use qrsend_core::manifest::{
 use qrsend_core::payload::{
     BodyDigest, BodyHasher, PackOptions, Packed, Packer, UnpackSink, segment_hash,
 };
-use qrsend_core::pq::{self, PqPublic, PqSecret};
+use qrsend_core::pq::{self, OnceSecret, PqPublic, PqSecret};
 use qrsend_core::qr::{self, Ec, QrParams};
 use qrsend_core::receiver::{Event, Receiver, SessionParams};
 use qrsend_core::resume::ResumeCode;
@@ -299,6 +300,105 @@ pub fn pq_generate() -> JsResult<Object> {
 #[wasm_bindgen(js_name = pqSign)]
 pub fn pq_sign(seeds: &[u8], message: &[u8]) -> JsResult<Vec<u8>> {
     Ok(pq_secret(seeds)?.sign(message))
+}
+
+// One-time keys (forward secrecy, PROTOCOL §9.2): the receiver shows one
+// before a transfer, the sender encrypts to it as well, and the receiver
+// destroys its secret half once the transfer has arrived.
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A new one-time key of the device with these public keys: `{ secret, id,
+/// text, codes }` (the secret half to keep until the transfer has arrived;
+/// its name; what the sender is shown, as a line of text and as codes).
+#[wasm_bindgen(js_name = oneTimeGenerate)]
+pub fn one_time_generate(x25519_public: &[u8], ed25519_public: &[u8]) -> JsResult<Object> {
+    let owner = DevicePublic::from_raw(
+        "",
+        &key32(x25519_public, "X25519 key")?,
+        &key32(ed25519_public, "Ed25519 key")?,
+    )
+    .map_err(js_err)?
+    .once_owner();
+    let secret = OnceSecret::generate().map_err(js_err)?;
+    let key = OneTimeKey {
+        owner,
+        public: secret.public(),
+    };
+    let codes: Array = key
+        .codes(ID_CODES.capacity_chars())
+        .map_err(js_err)?
+        .iter()
+        .map(|c| JsValue::from_str(c))
+        .collect();
+    let o = Object::new();
+    set(&o, "secret", Uint8Array::from(&secret.to_bytes()[..]));
+    set(&o, "id", JsValue::from_str(&hex(&key.public.id())));
+    set(&o, "text", JsValue::from_str(&key.to_text()));
+    set(&o, "codes", codes);
+    Ok(o)
+}
+
+/// The name (see `oneTimeGenerate`) of the one-time key with this secret half.
+#[wasm_bindgen(js_name = oneTimeId)]
+pub fn one_time_id(secret: &[u8]) -> JsResult<String> {
+    let secret = OnceSecret::from_bytes(secret).ok_or_else(|| js_err("bad one-time key"))?;
+    Ok(hex(&secret.public().id()))
+}
+
+/// The names of the one-time keys an encrypted file (its start is enough)
+/// was made for: what the receiver destroys once the transfer has arrived.
+#[wasm_bindgen(js_name = oneTimeUsed)]
+pub fn one_time_used(age_bytes: &[u8]) -> Array {
+    crypto::once_used(age_bytes)
+        .iter()
+        .map(|id| JsValue::from_str(&hex(id)))
+        .collect()
+}
+
+/// Whether this one-time key (as text) is that of the device with this ID.
+#[wasm_bindgen(js_name = oneTimeBelongs)]
+pub fn one_time_belongs(key: &str, device_id: &str) -> bool {
+    match (OneTimeKey::from_text(key), DevicePublic::parse(device_id)) {
+        (Ok(key), Ok(device)) => device.with_once(&key).is_ok(),
+        _ => false,
+    }
+}
+
+/// Puts a one-time key together from the codes a camera reads (or takes it
+/// as text).
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct OneTimeCollector {
+    reader: OneTimeReader,
+}
+
+#[derive(Serialize)]
+struct OneTimeProgress {
+    /// The key as text, once all of it is here.
+    key: Option<String>,
+    have: usize,
+    of: usize,
+}
+
+#[wasm_bindgen]
+impl OneTimeCollector {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> OneTimeCollector {
+        OneTimeCollector::default()
+    }
+
+    /// Takes a code: `{ key, have, of }`.
+    pub fn add(&mut self, text: &str) -> JsResult<JsValue> {
+        let (key, have, of) = match self.reader.add(text) {
+            OneTimeRead::Whole(key) => (Some(key.to_text()), 1, 1),
+            OneTimeRead::Part { have, of } => (None, have, of),
+            OneTimeRead::Other => (None, 0, 0),
+        };
+        to_js(&OneTimeProgress { key, have, of })
+    }
 }
 
 /// The codes a device ID is shown as: one for an ID of the older kind,
@@ -572,13 +672,19 @@ impl SendJob {
     }
 
     /// Encrypt for this device ID. Call before adding content.
+    /// `one_time_key`: the one-time key the device showed for this
+    /// transfer (as text), to encrypt to as well (forward secrecy).
     #[wasm_bindgen(js_name = addRecipient)]
-    pub fn add_recipient(&mut self, device_id: &str) -> JsResult<()> {
+    pub fn add_recipient(&mut self, device_id: &str, one_time_key: Option<String>) -> JsResult<()> {
         if self.packer.is_some() {
             return Err(js_err("recipients must be added before content"));
         }
-        self.recipients
-            .push(DevicePublic::parse(device_id).map_err(js_err)?);
+        let mut device = DevicePublic::parse(device_id).map_err(js_err)?;
+        if let Some(key) = one_time_key {
+            let key = OneTimeKey::from_text(&key).map_err(js_err)?;
+            device = device.with_once(&key).map_err(js_err)?;
+        }
+        self.recipients.push(device);
         Ok(())
     }
 
@@ -1544,7 +1650,21 @@ impl Receive {
             our_public: key32(x25519_public, "X25519 key")?,
             secrets: Vec::new(),
             pq: pq_seeds.as_deref().map(pq_secret).transpose()?,
+            once: Vec::new(),
         });
+        Ok(())
+    }
+
+    /// A one-time key this device showed and is not done with: what was
+    /// encrypted to it opens with it. (After the keys were set.)
+    #[wasm_bindgen(js_name = addOneTime)]
+    pub fn add_one_time(&mut self, secret: &[u8]) -> JsResult<()> {
+        let secret = OnceSecret::from_bytes(secret).ok_or_else(|| js_err("bad one-time key"))?;
+        match &mut self.keys {
+            Keys::Shared(shared) => shared.once.push(secret),
+            Keys::Legacy(identity) => identity.hold_once(secret),
+            Keys::None => {}
+        }
         Ok(())
     }
 

@@ -89,6 +89,59 @@ test("web → CLI: encrypted for a paired device and signed by the browser's key
   expect(other.stderr).toContain("encrypted for another device");
 });
 
+// Forward secrecy: the command line shows a one-time key before it receives,
+// the browser encrypts to it as well, and the command line destroys the key
+// once the transfer has arrived. The same pictures, kept, open no more.
+test("web → CLI: forward secrecy with the receiver's one-time key", async ({ page }) => {
+  const message = "Browser to CLI, and gone afterwards";
+  const device = "fs-cli";
+  const id = cli(["id", "--name", device, "--no-qr"], device)
+    .split("\n")
+    .find((l) => l.startsWith("ID:"))!
+    .slice(3)
+    .trim();
+  await page.goto("./#/devices");
+  await page.getByRole("button", { name: "Create device ID" }).click();
+  await page.getByText("Show ID as text").click();
+  const browserId = (await page.getByTestId("my-id").textContent())!;
+  await page.getByPlaceholder("qrsend-id:…").fill(id);
+  await page.getByRole("button", { name: "Check" }).click();
+  await page.getByRole("button", { name: "Yes, trust it" }).click();
+  cli(["devices", "add", browserId, "--name", "browser", "--yes"], device);
+
+  // The receiver makes its key when it starts to receive (here from nothing).
+  const nothing = path.join(WORK, "fs-nothing.txt");
+  fs.writeFileSync(nothing, "");
+  const shown = cliBoth(["recv", "--one-time-key", "--text", nothing], device);
+  const key = shown.stderr.split("\n").find((l) => l.startsWith("QSK1-"))!;
+  expect(key.length).toBeGreaterThan(1500);
+
+  await page.goto("./#/send");
+  await page.getByRole("tab", { name: "Text" }).click();
+  await page.getByPlaceholder("Paste or type anything…").fill(message);
+  await page.getByRole("checkbox", { name: new RegExp(device) }).check();
+  // A key that is not that device's is not taken.
+  await page.getByTestId("one-time-input").fill(key.slice(0, -6) + "AAAAAA");
+  await page.getByRole("button", { name: "Use this key" }).click();
+  await expect(page.getByText("belongs to none of the chosen devices")).toBeVisible();
+  await page.getByTestId("one-time-input").fill(key);
+  await page.getByRole("button", { name: "Use this key" }).click();
+  await expect(page.getByTestId("one-time-taken")).toBeVisible();
+  await page.getByRole("button", { name: "Start sending" }).click();
+  await expect(page.getByText("encrypted (forward secrecy, post-quantum)")).toBeVisible();
+
+  const dir = path.join(WORK, "web-forward");
+  expect(await captureFrames(page, dir, 24)).toBeGreaterThan(6);
+  const received = cliBoth(["recv", "--images", dir], device);
+  expect(received.stdout).toContain(message);
+  expect(received.stderr).toContain("with forward secrecy");
+  expect(received.stderr).toContain("The one-time key of this transfer is destroyed");
+  // Read again from the same pictures: the key is gone, and with it the way in.
+  const again = cliBoth(["recv", "--images", dir], device);
+  expect(again.status).not.toBe(0);
+  expect(again.stderr).toContain("encrypted for another device");
+});
+
 // A sending browser also makes an offer that needs no answer shown to its
 // camera: the receiver's certificate follows from a seed in the offer
 // (PROTOCOL §12.5). The CLI reads it off the pictures and connects to the

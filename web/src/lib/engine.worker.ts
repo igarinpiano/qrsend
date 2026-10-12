@@ -5,7 +5,18 @@
 // packed bodies, read segments and write extracted files, and those calls are
 // served synchronously from OPFS files. Data therefore flows disk → core →
 // disk in small pieces; nothing large is held in memory, on either side.
-import { Identity, Receive, SendJob, SendSession, linkSplit, quietModules, ready, stanzaKeys } from "./core";
+import {
+  Identity,
+  Receive,
+  SendJob,
+  SendSession,
+  linkSplit,
+  oneTimeGenerate,
+  oneTimeUsed,
+  quietModules,
+  ready,
+  stanzaKeys,
+} from "./core";
 import * as db from "./db";
 import { trustedDevices } from "./devices";
 import type {
@@ -100,7 +111,7 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       body.write(written, chunk);
       written += chunk.length;
     });
-    for (const id of req.recipients) job.addRecipient(id);
+    for (const id of req.recipients) job.addRecipient(id, req.oneTimeKeys?.[id]);
     const me = await loadIdentity();
     if (me) job.setSenderName(identityInfo(me).name);
 
@@ -145,7 +156,7 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
       bodyLen: number;
       summary: string;
       encrypted: boolean;
-      protection?: "pq" | "older";
+      protection?: "fs" | "pq" | "older";
     };
     job.free();
 
@@ -495,6 +506,11 @@ async function extract(s: RecvSession): Promise<RecvResult | undefined> {
     s.body?.close();
     s.body = undefined;
     await store.remove(dir(rec.session, "body"));
+    // Unpacked, and the packed transfer gone: the one-time key it was encrypted to has done its work, and from
+    // here on nothing in this browser opens the transfer as it was sent.
+    if (info.encrypted) {
+      await destroyOneTime(await readWhole(store, dir(rec.session, "meta"))).catch(() => {});
+    }
     await store.remove(dir(rec.session, "meta"));
     return await resultFromRecord(rec);
   } catch (e) {
@@ -512,7 +528,53 @@ async function attachIdentity(s: RecvSession): Promise<void> {
   s.me = await loadIdentity();
   if (s.me?.kind === "legacy") s.r.setIdentity(Identity.parse(s.me.secret));
   else if (s.me) s.r.setPublicKey(s.me.x25519Public, s.me.pq?.seeds);
+  // The one-time keys shown and not yet done with: what was encrypted to one of them opens with it.
+  for (const key of await pendingOneTime()) s.r.addOneTime(key.secret);
   for (const d of await trustedDevices()) s.r.addTrusted(d.id, d.name);
+}
+
+// One-time keys (forward secrecy). The secret half of each is kept here until the transfer it was shown for has
+// arrived, and destroyed then; one that nobody used, or whose transfer never finished, is destroyed after a day.
+interface OneTime {
+  id: string;
+  secret: Uint8Array;
+  made: number;
+}
+const ONE_TIME_KEPT_MS = 24 * 3600 * 1000;
+
+async function pendingOneTime(): Promise<OneTime[]> {
+  const all = (await db.get<OneTime[]>("kv", "one-time")) ?? [];
+  const kept = all.filter((k) => Date.now() - k.made < ONE_TIME_KEPT_MS);
+  if (kept.length !== all.length) await db.put("kv", kept, "one-time");
+  return kept;
+}
+
+async function oneTimeKey(): Promise<{ text: string; codes: string[] }> {
+  await ready();
+  const me = await loadIdentity();
+  if (!me) throw new Error("A one-time key goes with a device ID: create one on the Devices page first.");
+  const keys =
+    me.kind === "webcrypto"
+      ? { x: me.x25519Public, ed: me.ed25519Public }
+      : (() => {
+          const k = Identity.parse(me.secret).rawKeys() as { x25519Public: Uint8Array; ed25519Public: Uint8Array };
+          return { x: k.x25519Public, ed: k.ed25519Public };
+        })();
+  const made = oneTimeGenerate(keys.x, keys.ed) as { secret: Uint8Array; id: string; text: string; codes: string[] };
+  await db.put("kv", [...(await pendingOneTime()), { id: made.id, secret: made.secret, made: Date.now() }], "one-time");
+  // (A transfer being received right now may be the one it is for.)
+  receiving?.r.addOneTime(made.secret);
+  logLine("rx", "one-time key made", { codes: made.codes.length });
+  return { text: made.text, codes: made.codes };
+}
+
+/** The transfer has arrived: the one-time keys it was encrypted to are of no use any more. */
+async function destroyOneTime(meta: Uint8Array): Promise<void> {
+  const used = oneTimeUsed(meta) as string[];
+  if (!used.length) return;
+  const kept = (await pendingOneTime()).filter((k) => !used.includes(k.id));
+  await db.put("kv", kept, "one-time");
+  logLine("rx", "one-time key destroyed");
 }
 
 /** Loads what was stored for a session into a fresh receiver. */
@@ -800,6 +862,7 @@ const api: EngineApi = {
   outBlob,
   storageList,
   storageRemove,
+  oneTimeKey,
 };
 
 // One call at a time: handlers await storage and crypto, and must not interleave.

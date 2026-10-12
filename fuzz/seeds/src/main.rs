@@ -199,6 +199,11 @@ fn main() {
     write(&root, "codes", "id-classic", device.classic().to_id_string().as_bytes());
     write(&root, "codes", "id-bytes", &device.to_bytes().unwrap());
     write(&root, "codes", "id-parts", device.id_codes(600).unwrap().join("\n").as_bytes());
+    // A one-time key (forward secrecy): as bytes, as text, and in parts.
+    let (_, once) = DeviceIdentity::generate("seed").unwrap().new_once().unwrap();
+    write(&root, "codes", "one-time-bytes", &once.to_bytes());
+    write(&root, "codes", "one-time", once.to_text().as_bytes());
+    write(&root, "codes", "one-time-parts", once.codes(600).unwrap().join("\n").as_bytes());
 
     // sound: a feedback message as a microphone would hear it.
     for (n, rate) in [(0u8, 8_000.0), (3, 48_000.0)] {

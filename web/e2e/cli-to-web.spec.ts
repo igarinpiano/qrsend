@@ -1,6 +1,7 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
+import { blank, writeY4m } from "./video";
 import { execFileSync } from "node:child_process";
 import {
   FAKE_TEXT,
@@ -218,6 +219,65 @@ test("CLI → web: older keys in use are warned of", async ({ playwright, baseUR
     await expect(page.getByTestId("older-keys-warning")).toContainText("encrypted the older way only");
     await expect(page.getByTestId("older-keys-warning")).toContainText("its signature was checked the older way only");
     expect(ids.web).toMatch(/^qrsend-id:2:/);
+  });
+});
+
+// Forward secrecy the other way: the browser shows a one-time key, the
+// command line encrypts to it as well, and the browser destroys the key once
+// the transfer has arrived.
+test("CLI → web: forward secrecy with the browser's one-time key", async ({ playwright, baseURL }) => {
+  const video = path.join(WORK, "forward.y4m");
+  writeY4m(video, [blank()]);
+  await withCamera({ playwright, baseURL }, video, async (page) => {
+    await adoptIdentity(page);
+    await page.goto("./#/receive");
+    await page.getByTestId("one-time-show").click();
+    // Three or four codes, turning; and the same as a line of text.
+    await expect(page.getByTestId("one-time-code")).toHaveAttribute("data-parts", /^[34]$/);
+    const key = (await page.getByTestId("one-time-text").textContent())!;
+    expect(key).toMatch(/^QSK1-/);
+    const pending = () =>
+      page.evaluate(
+        () =>
+          new Promise<number>((resolve) => {
+            const req = indexedDB.open("qrsend");
+            req.onsuccess = () => {
+              const get = req.result.transaction("kv").objectStore("kv").get("one-time");
+              get.onsuccess = () => resolve((get.result ?? []).length);
+            };
+          }),
+      );
+    expect(await pending()).toBe(1);
+    const sent = cliBoth(
+      ["send", "--to", "webdev", "--one-time-key", key, "--text", SECRET_TEXT, "--density", "low", "--scale", "4", "--export-video", video, "--passes", "3"],
+      "cli",
+    );
+    expect(sent.stderr).toContain("forward secrecy and post-quantum protection");
+    // (The test's camera plays the file it was started with: the page is
+    // opened anew for the video that exists now. The key was kept, so the
+    // page that showed it need not be the one that receives.)
+    const context = page.context();
+    await page.close();
+    const receiving = await context.newPage();
+    await receiving.goto("./#/receive");
+    await expect(receiving.getByTestId("received-text")).toHaveText(SECRET_TEXT, { timeout: 60_000 });
+    await expect(receiving.getByTestId("protection")).toHaveText("forward secrecy · post-quantum");
+    await expect(receiving.getByTestId("older-keys-warning")).toHaveCount(0);
+    // Arrived: the key is destroyed.
+    await expect
+      .poll(() =>
+        receiving.evaluate(
+          () =>
+            new Promise<number>((resolve) => {
+              const req = indexedDB.open("qrsend");
+              req.onsuccess = () => {
+                const get = req.result.transaction("kv").objectStore("kv").get("one-time");
+                get.onsuccess = () => resolve((get.result ?? []).length);
+              };
+            }),
+        ),
+      )
+      .toBe(0);
   });
 });
 

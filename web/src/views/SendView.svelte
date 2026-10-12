@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ready, symbolSize } from "../lib/core";
+  import { OneTimeCollector, oneTimeBelongs, ready, symbolSize } from "../lib/core";
   import { trustedDevices, type Trusted } from "../lib/devices";
   import { engine, onEngineEvent } from "../lib/engine";
   import type { SendItem, SendStarted } from "../lib/engine-types";
   import { bytes } from "../lib/format";
   import { featureOn } from "../lib/prefs";
+  import Camera from "./Camera.svelte";
   import Player from "./Player.svelte";
 
   let { params }: { params: URLSearchParams } = $props();
@@ -70,6 +71,38 @@
   }
 
   const total = $derived(mode === "text" ? new TextEncoder().encode(text).length : items.reduce((s, i) => s + i.file.size, 0));
+  // Forward secrecy: the one-time keys the chosen receivers showed (by device ID), read with the camera or pasted.
+  let oneTimeKeys = $state<Record<string, string>>({});
+  let oneTimeText = $state("");
+  let oneTimeError = $state("");
+  let oneTimeScan = $state(false);
+  let oneTimeRead = $state<{ have: number; of: number } | undefined>();
+  let collector: OneTimeCollector | undefined;
+  /** Gives a one-time key to the chosen receiver it belongs to. */
+  function takeOneTime(key: string): boolean {
+    const owner = devices.find((d) => selected.includes(d.fingerprint) && d.pq && oneTimeBelongs(key, d.id));
+    if (!owner) {
+      oneTimeError = "This one-time key belongs to none of the chosen devices (or to one known by its older keys only).";
+      return false;
+    }
+    oneTimeKeys = { ...oneTimeKeys, [owner.id]: key };
+    oneTimeError = "";
+    oneTimeText = "";
+    oneTimeScan = false;
+    oneTimeRead = undefined;
+    collector = undefined;
+    return true;
+  }
+  function onOneTimeCodes(texts: string[]) {
+    collector ??= new OneTimeCollector();
+    for (const text of texts) {
+      const read = collector.add(text) as { key?: string; have: number; of: number };
+      if (read.key) return void takeOneTime(read.key);
+      if (read.of > 1) oneTimeRead = { have: read.have, of: read.of };
+    }
+  }
+  const chosen = $derived(anyone ? [] : devices.filter((d) => selected.includes(d.fingerprint)));
+
   /** The chosen receivers that are known by their older keys only. */
   const olderChosen = $derived(
     anyone ? [] : devices.filter((d) => selected.includes(d.fingerprint) && !d.pq).map((d) => d.name),
@@ -136,7 +169,8 @@
       info = await engine.sendStart({
         items: mode === "text" ? [] : sendItems(),
         text: mode === "text" ? text : undefined,
-        recipients: anyone ? [] : selected.map((fp) => devices.find((dev) => dev.fingerprint === fp)!.id),
+        recipients: chosen.map((d) => d.id),
+        oneTimeKeys: Object.fromEntries(chosen.filter((d) => oneTimeKeys[d.id]).map((d) => [d.id, oneTimeKeys[d.id]])),
         density: d.version ? { version: d.version, ec: d.ec } : null,
         redundancy: 0.1,
         resume: resume.trim() || undefined,
@@ -220,6 +254,9 @@
         {:else}
           <span class="badge warn" title="Known by an ID from before post-quantum keys: encrypted with X25519 alone.">older keys only</span>
         {/if}
+        {#if oneTimeKeys[d.id] && selected.includes(d.fingerprint)}
+          <span class="badge ok" data-testid="one-time-taken">one-time key ✓</span>
+        {/if}
         <span class="muted small mono">{d.fingerprint}</span>
       </span>
     </label>
@@ -238,6 +275,28 @@
     <input type="checkbox" bind:checked={anyone} />
     <span>Anyone who sees the codes <span class="badge warn">not encrypted</span></span>
   </label>
+  {#if chosen.some((d) => d.pq)}
+    <div class="stack forward" data-testid="forward-secrecy">
+      <p class="small">
+        <strong>Forward secrecy</strong> (optional): if the receiver shows a one-time key (its Receive page, or
+        <code>qrsend recv --one-time-key</code>), read it here before sending. The receiver destroys that key once the
+        transfer has arrived, and a recording of the codes cannot be read later, not even with its device keys.
+      </p>
+      {#if oneTimeScan}
+        <Camera ontexts={onOneTimeCodes} />
+        {#if oneTimeRead}<p class="small" data-testid="one-time-progress">{oneTimeRead.have} of {oneTimeRead.of} codes of the key read…</p>{/if}
+        <div class="row"><button onclick={() => (oneTimeScan = false)}>Stop scanning</button></div>
+      {:else}
+        <div class="row"><button onclick={() => (oneTimeScan = true)}>Scan the receiver's one-time key</button></div>
+      {/if}
+      <label class="field">
+        <span>…or paste it</span>
+        <input type="text" bind:value={oneTimeText} placeholder="QSK1-…" data-testid="one-time-input" />
+      </label>
+      <div class="row"><button disabled={!oneTimeText.trim()} onclick={() => takeOneTime(oneTimeText.trim())}>Use this key</button></div>
+      {#if oneTimeError}<p class="error" role="alert">{oneTimeError}</p>{/if}
+    </div>
+  {/if}
   {#if devices.length === 0}
     <p class="muted small">To encrypt, first pair the receiving device on the <a href="#/devices">Devices</a> page.</p>
   {/if}
@@ -340,5 +399,10 @@
   }
   input[type="range"] {
     width: 100%;
+  }
+  .forward {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    margin-top: 8px;
   }
 </style>

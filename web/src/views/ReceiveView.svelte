@@ -27,6 +27,8 @@
   import { toDataUrl } from "../lib/qrdraw";
   import { feedbackWav } from "../lib/sound";
   import Camera from "./Camera.svelte";
+  import CodeTurn from "./CodeTurn.svelte";
+  import { copyText } from "../lib/save";
   import Result from "./Result.svelte";
   import ResumeCode from "./ResumeCode.svelte";
   import Showcase from "./Showcase.svelte";
@@ -194,6 +196,20 @@
 
   const info = $derived(st?.info ?? undefined);
   const result = $derived(st?.result);
+  // Forward secrecy: a one-time key shown to the sender before it packs. Its secret half is kept by the engine
+  // until the transfer has arrived, and destroyed then.
+  let oneTime = $state.raw<{ text: string; codes: string[] } | undefined>();
+  let oneTimeError = $state("");
+  let oneTimeCopied = $state(false);
+  async function showOneTime() {
+    oneTimeError = "";
+    try {
+      oneTime = await engine.oneTimeKey();
+      log("rx", "one-time key shown");
+    } catch (e) {
+      oneTimeError = e instanceof Error ? e.message : String(e);
+    }
+  }
   // Who sent the transfer and what protects it: known with the file list, and kept with what has arrived (by
   // then the engine has let go of the rest).
   const sent = $derived(info?.sender_status ? info : st?.from);
@@ -717,6 +733,35 @@
   <p class="muted small">This browser offers no file storage here (private window?), so received data is kept in memory only.</p>
 {/if}
 
+{#if !info?.session && !result}
+  <div class="card stack" data-testid="forward-secrecy">
+    {#if oneTime}
+      <p class="small">
+        <strong>One-time key.</strong> Show it to the sender before it starts (its Send page reads these codes, or takes
+        the text). This device destroys the key once the transfer has arrived: after that, a recording of the codes
+        cannot be read even with this device's keys.
+      </p>
+      <CodeTurn codes={oneTime.codes} alt="One-time key for the sender" testid="one-time-code" />
+      <div class="row">
+        <button
+          onclick={async () => {
+            await copyText(oneTime!.text);
+            oneTimeCopied = true;
+          }}>{oneTimeCopied ? "Copied" : "Copy as text"}</button
+        >
+      </div>
+      <code class="small one-time-text" data-testid="one-time-text">{oneTime.text}</code>
+    {:else}
+      <p class="small">
+        <strong>Forward secrecy</strong> (optional, for an encrypted transfer): show the sender a one-time key first, and
+        nobody can read a recording of this transfer later, not even with this device's keys.
+      </p>
+      <div class="row"><button onclick={showOneTime} data-testid="one-time-show">Show a one-time key</button></div>
+      {#if oneTimeError}<p class="error" role="alert">{oneTimeError}</p>{/if}
+    {/if}
+  </div>
+{/if}
+
 <!-- Who sent it and what protects it: shown while it arrives, and with what has arrived. -->
 {#snippet who()}
   {#if sent?.sender_status}
@@ -738,7 +783,9 @@
         {/if}
         {#if sent.encrypted}
           <span class="badge ok">Encrypted for this device</span>
-          {#if sent.protection === "pq"}
+          {#if sent.protection === "fs"}
+            <span class="badge ok" data-testid="protection">forward secrecy · post-quantum</span>
+          {:else if sent.protection === "pq"}
             <span class="badge ok" data-testid="protection">post-quantum</span>
           {:else if sent.protection === "older"}
             <span class="badge warn" data-testid="protection">older encryption</span>
@@ -806,7 +853,7 @@
       <span class="badge ok">Already received</span> This transfer arrived in full before: this is the copy from your Inbox.
     </p>
   {/if}
-  <div class="stack" data-testid="received-from">{@render who()}</div>
+  <div class="stack received-from" data-testid="received-from">{@render who()}</div>
   <Result {result} />
   <p class="small muted">Kept in your <a href="#/inbox">Inbox</a> until you delete it.</p>
 {/if}
@@ -831,5 +878,15 @@
   .stage.sideways > :global(*) {
     flex: 1;
     min-width: 0;
+  }
+  /* (The row above a received transfer keeps clear of its card.) */
+  .received-from {
+    margin-bottom: 12px;
+  }
+  .one-time-text {
+    display: block;
+    max-height: 4.5em;
+    overflow: auto;
+    word-break: break-all;
   }
 </style>

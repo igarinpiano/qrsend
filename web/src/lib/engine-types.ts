@@ -11,6 +11,8 @@ export interface SendRequest {
   text?: string;
   /** Device IDs to encrypt for; empty = unencrypted. */
   recipients: string[];
+  /** The one-time keys receivers showed for this transfer (forward secrecy), by device ID. */
+  oneTimeKeys?: Record<string, string>;
   /** null = choose from the transfer size. */
   density: { version: number; ec: string } | null;
   redundancy: number;
@@ -24,10 +26,11 @@ export interface SendStarted {
   wireBytes: number;
   encrypted: boolean;
   /**
-   * Of an encrypted transfer: "pq" when every receiver has post-quantum keys (the key exchange is X25519 and ML-KEM
-   * together), "older" when at least one is known by its older keys only (X25519 alone, for the whole transfer).
+   * Of an encrypted transfer: "fs" when every receiver also showed a one-time key (forward secrecy), "pq" when every
+   * receiver has post-quantum keys (the key exchange is X25519 and ML-KEM together), "older" when at least one is
+   * known by its older keys only (X25519 alone, for the whole transfer).
    */
-  protection?: "pq" | "older";
+  protection?: "fs" | "pq" | "older";
   /** Device IDs the transfer is encrypted for (empty: for anyone). */
   recipients: string[];
   /** With a resume code: how many parts (of how many) are sent. */
@@ -95,7 +98,7 @@ export interface RecvInfo {
   /** A trusted sender is known with its post-quantum keys, so its signature was checked with both schemes. */
   sender_pq: boolean;
   /** Of an encrypted transfer whose file list is open: see `SendStarted.protection`. */
-  protection: "pq" | "older" | null;
+  protection: "fs" | "pq" | "older" | null;
   entries: { path: string; dir: boolean; size: number }[];
   frames: number;
   useful: number;
@@ -252,6 +255,11 @@ export interface EngineApi {
   storageList(): Promise<StorageItem[]>;
   /** Removes things by their `id` (a transfer in the inbox leaves the inbox too). */
   storageRemove(ids: string[]): Promise<void>;
+  /**
+   * Makes a one-time key for a transfer to come (forward secrecy) and keeps its secret half until that transfer has
+   * arrived: what to show the sender, as a line of text and as codes.
+   */
+  oneTimeKey(): Promise<{ text: string; codes: string[] }>;
 }
 
 export type EngineEvent =

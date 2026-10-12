@@ -613,7 +613,7 @@
           {#if info.resumed}<span data-testid="resumed">Only what is missing ({info.resumed.parts} of {info.resumed.of} parts) ·</span>{/if}
           Pass {pass + 1} · {inPass} of {info.framesPerPass} codes, {left} left ({duration(left / (fps * perTick))}) · {cols}×{rows}{layers > 1 ? ` ×${layers} colors` : ""} ·
           ~{bytes(rate)}/s
-          {info.protection === "pq" ? "· encrypted (post-quantum)" : info.encrypted ? "· encrypted the older way only" : "· not encrypted"}
+          {info.protection === "fs" ? "· encrypted (forward secrecy, post-quantum)" : info.protection === "pq" ? "· encrypted (post-quantum)" : info.encrypted ? "· encrypted the older way only" : "· not encrypted"}
         {/if}
       </span>
     </div>
