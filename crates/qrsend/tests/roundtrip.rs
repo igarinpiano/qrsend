@@ -969,14 +969,17 @@ fn two_way_over_a_lossy_byte_channel() {
     assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(400_000));
     assert!(last.starts_with("QSF1-"), "{last}");
     assert!(said.contains("The receiver has everything"), "{said}");
-    // No number of frames was asked for: it stopped because it was told to.
-    // (How many it wrote by then says little: a pipe takes them far faster
-    // than the receiver's word comes back.)
+    // No number of frames was asked for: it stopped because it was told to,
+    // and before it had buried the receiver under passes on end (with a
+    // third lost, one and a half times the data gets there; a sender that
+    // did not wait for the receiver's word wrote eight times as much).
     let wrote: u64 = said
         .lines()
         .find_map(|l| l.strip_prefix("Wrote ")?.split(' ').next()?.parse().ok())
         .unwrap();
-    assert!(wrote >= 400_000 / 1024, "{wrote}");
+    let needed = 400_000 / 1024;
+    assert!(wrote >= needed, "{wrote}");
+    assert!(wrote < needed * 5, "{wrote}");
 }
 
 /// Color codes: three codes in every place, a third of the pictures.

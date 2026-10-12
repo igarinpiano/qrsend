@@ -135,9 +135,11 @@ pub struct FrameStream {
     /// Finds the fastest way to show the codes from what the receiver
     /// reports (`--auto-speed`).
     tuner: Option<Tuner>,
-    /// When a feedback code last came that way, and whether one ever did.
+    /// When a feedback code last came that way, whether one ever did, and
+    /// how many have.
     heard: Option<Instant>,
     answered: bool,
+    reports: u64,
     /// … and nothing since for long enough to stop waiting for answers.
     quiet: bool,
 }
@@ -173,6 +175,7 @@ impl FrameStream {
             tuner: None,
             heard: None,
             answered: false,
+            reports: 0,
             quiet: false,
         }
     }
@@ -180,6 +183,12 @@ impl FrameStream {
     /// A feedback code of this transfer came at some point.
     pub fn answered(&self) -> bool {
         self.answered
+    }
+
+    /// How many feedback codes of this transfer have come so far.
+    pub fn reports(&mut self) -> u64 {
+        self.poll();
+        self.reports
     }
 
     /// Asks the receiver for feedback (a notice mixed into the stream) and
@@ -300,6 +309,7 @@ impl FrameStream {
             }
             self.heard = Some(Instant::now());
             self.answered = true;
+            self.reports += 1;
             self.quiet = false;
             if complete && !self.finished {
                 log::line("tx", || "the receiver has everything".into());

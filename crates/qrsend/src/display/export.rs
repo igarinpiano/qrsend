@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use image::GrayImage;
@@ -209,6 +210,17 @@ pub fn video(
 /// stops after this many passes: a way back that brings nothing (a file, a
 /// receiver that never started) must not mean writing without end.
 pub const UNANSWERED_PASSES: u64 = 3;
+/// Whenever a pass's worth of frames has gone out since the receiver last
+/// said something, the sender waits this long at most for its word: longer
+/// before the first one (the receiver may only just have started), briefly
+/// after that (it reports many times a second). A channel like a pipe
+/// takes frames far faster than a report comes back; without the wait, a
+/// sender would have written its three passes and given the receiver up
+/// before the first report could arrive, and would bury a receiver that
+/// does answer under frames it no longer needs. It is a pause, not a
+/// condition: when nothing comes, sending goes on.
+const FIRST_WORD: Duration = Duration::from_secs(2);
+const NEXT_WORD: Duration = Duration::from_millis(200);
 
 /// Writes frames as text, one per line ("-" = standard output): `count` of
 /// them, or (none) until the receiver reports that it has everything, which
@@ -222,10 +234,33 @@ pub fn text(stream: &mut FrameStream, path: &Path, count: Option<u64>) -> Result
         ))
     };
     let mut written = 0;
-    let unanswered = stream.frames_per_pass().max(1) * UNANSWERED_PASSES;
+    let pass = stream.frames_per_pass().max(1);
+    // Frames written since the receiver's last report, and the reports so far.
+    let (mut since, mut reports) = (0u64, 0u64);
     while count.is_none_or(|n| written < n) && !stream.finished() {
-        if count.is_none() && written >= unanswered && !stream.answered() {
-            break;
+        if count.is_none() {
+            if since >= pass {
+                let patience = if stream.answered() {
+                    NEXT_WORD
+                } else {
+                    FIRST_WORD
+                };
+                let until = Instant::now() + patience;
+                while stream.reports() == reports && !stream.finished() && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                since = 0;
+                if stream.finished() {
+                    break;
+                }
+            }
+            let now = stream.reports();
+            if now != reports {
+                (reports, since) = (now, 0);
+            }
+            if written >= pass * UNANSWERED_PASSES && !stream.answered() {
+                break;
+            }
         }
         let line = stream.next_text()?;
         // With a receiver that answers, a line held back in a buffer is a
@@ -237,9 +272,9 @@ pub fn text(stream: &mut FrameStream, path: &Path, count: Option<u64>) -> Result
         if let Err(e) = sent {
             // A receiver that has everything stops reading, and its last
             // word may still be on its way back.
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
-            while count.is_none() && !stream.finished() && std::time::Instant::now() < until {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            let until = Instant::now() + Duration::from_secs(1);
+            while count.is_none() && !stream.finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
             }
             if count.is_none() && stream.finished() {
                 return Ok(written);
@@ -247,6 +282,7 @@ pub fn text(stream: &mut FrameStream, path: &Path, count: Option<u64>) -> Result
             return Err(e.into());
         }
         written += 1;
+        since += 1;
     }
     out.flush()?;
     Ok(written)
