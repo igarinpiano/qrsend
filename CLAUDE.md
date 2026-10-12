@@ -4,6 +4,7 @@ QR コードのストリームでテキスト・ファイル・フォルダを�
 
 - 構想・決定事項: `docs/CONCEPT.md`
 - ワイヤ形式の仕様: `docs/PROTOCOL.md`（**プロトコルに触れる変更は必ずここも更新する**）
+- CLI の全コマンド・全オプションの解説: `docs/CLI.md`（**コマンドやオプションを足したら必ずここにも書く**。`crates/qrsend/tests/reference.rs` が `--help` に出るものを全部この文書の該当する見出しの下で探すので、書き忘れるとテストが落ちる。消したオプションの記述が残っていても落ちないので、消すときは自分で直す）
 
 ## ユーザーについて
 
@@ -53,7 +54,10 @@ web/                 Svelte 5 + Vite + TS の PWA
 npm/                 npm 配布用: assemble.py（機種別パッケージの対応表）と launcher.js
 fuzz/                cargo-fuzz のターゲット（frame / codes / meta / payload / receiver / sound。他人から届くものを読む所すべて）と seeds/（正しい入力を書き出す種の生成器）。メインのワークスペースには入れていない（nightly が要る）
 deny.toml            cargo-deny の設定（RustSec の勧告・ライセンス・取得元）
+assets/              アイコンの原画（ユーザー作。qrsendIcon-1024@1x.png はダーク版、Icon Composer からの書き出し）
 ```
+
+- **macOS の Dock のアイコン**（2026-10-12、ユーザーの質問:「ターミナルで送ろうとしたらアプリっぽい形で起動した。Dock のアイコン（exec）は固定なのか」）: ウィンドウを開くプログラムは Dock に並び、.app でない実行ファイルには macOS が既定の「exec」を出す。`display/window.rs` の `dock_icon` が、実行ファイルに埋め込んだ PNG（`crates/qrsend/assets/dock-icon.png`）を `NSApplication.setApplicationIconImage` に渡して差し替える（objc2 の `msg_send!` だけ。objc2 は ctrlc 経由でもともと入っている）。`.icon`（Icon Composer）や `.icns` は .app 用で、実行ファイル 1 つの形では使えない。**渡した画像はそのまま出る**（macOS は角を丸めも枠に入れもしない）ので、ほかのアイコンと同じ余白（1024 のうち 824）を自分で付ける: 原画を差し替えたら `scripts/dock-icon.sh`（Chrome で 512 px・8 bit・sRGB に縮小。原画は 16 bit の Display P3 で 2.2 MB あり、そのままは埋め込めない）。確認は `applicationIconImage` を読み戻して画像に書き出すところまで（Dock そのものの見た目は画面を撮れず未確認）。ライト版は無い（ユーザー: 共通にしかできないならダークを使う。起動時にシステムの外観で選ぶことはできるが、表示中の切り替えには追従しない）。Web 版のアイコン（`web/public/icon.svg` ほか）は以前のまま。Windows / Linux のウィンドウのアイコンは未設定。
 
 ## コマンド
 
@@ -146,6 +150,7 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
   - **見分け方**（`web/src/lib/addresses.ts`、CLI は `net::address_kind` / `path_between`）: 回線の種類を OS に尋ねる方法は iPhone のブラウザに無い（`navigator.connection` が無い）。代わりにアドレスで「同じネットワークか、インターネット経由か」を判定する: プライベート / リンクローカル / ループバック、または先頭 64 ビットが同じ IPv6 どうしなら同じネットワーク（携帯回線は端末ごとに別の /64）。`.local` の名前は同じネットワークからしか引けないので同じネットワーク扱い。**判定できるのは「同じネットワークか否か」で、「Wi-Fi か携帯か」そのものではない**（別々の Wi-Fi にいる 2 台のインターネット経由も「Cellular」側に入る）。
   - **設定**（ユーザーの指定、2026-10-09）: Feature preview の「Local network boost」はチェックボックスではなくプルダウン（システム標準の `<select>`）で「Off」「Wi-Fi」「Wi-Fi & Cellular Data」。保存値は `qrsend.preview.lan` = 無し / `wifi` / `any`（以前の `1` は `wifi` として読む。`prefs.ts` の `choices` / `featureChoice`）。「Wi-Fi」では offer に `ONE_NETWORK` フラグ（PROTOCOL §12.1）を立て、受信側が自分のアドレスを調べてから「同じネットワークにありうる」アドレスだけを使う（`LanReceiver.take`。相手の候補は後から `addIceCandidate` で渡す）。送信側も answer のアドレスを絞り、つながった経路がインターネット経由なら使わずに閉じて、その転送では offer を出さない（`refused`。フラグを知らない 0.1.4 の受信側への備え）。CLI の受信側もフラグに従う（自分の IPv6 を知らないので、グローバルな IPv6 は一律に使わない）。表示は経路に合わせて「+ local network」/「+ internet (direct)」、受信側のバッジも同じ。
   - プルダウンの見た目（2026-10-10、実機の iPhone で崩れた）: 全体の CSS（`app.css`）が `select { width: 100% }` なので、横並びの中に置くと `<select>` がカードの幅を全部取り、機能名が枠の外へ押し出された。Preview では名前を先に置いて幅を確保し、メニューは中身の幅（`width: auto; max-width: 100%`）、並ばないときは下へ折り返す（`flex-wrap`）。e2e（`preview.spec.ts`）は幅 280〜1440 の 6 通りで「名前とメニューがカードの中にある・横スクロールが出ない」を確かめ、他のページも幅 320 で横スクロールが出ないことを見る。新しく `<select>` を置くときは、全幅が既定であることに注意する。
+  - 一覧の余白（2026-10-12、実機の iPhone の Inbox で、一覧の中身がカードの左右の枠に付いていた）: `<ul class="list card">` と 2 つを 1 つの要素に付けると、後に書いてある `.list { padding: 0 }` が `.card` の余白を消す。`app.css` に `.list.card` の余白を足した（Inbox と Storage。Storage は行ごとに自前の余白で埋めていたのをやめた）。カードの中に一覧を置く形（Devices）は元から問題ない。e2e（`storage.spec.ts` の `clearOfTheBorder`）が、行の中身と枠の間が 12px 以上あることを見る。
   - ログ: 接続時に `path chosen own="v6 global host" other="…" over=internet thereAndBackMs=…` を記録する（アドレスそのものは記録せず種類だけ）。ヘッダの `network` は回線の種類（`connection.type`、Chrome 系のみ）と速さの区分（`effectiveType`。Wi-Fi でも「4g」と出るので種類の証拠にならない）。preview は `lan=wifi` のように値も出す。
   - はまった所: 経路を調べる `await` を `channel.onopen` に入れたら、その間に届いた受信側の挨拶（`B1`）を、あとから走る初期化が消していた（送信側がテキストで送り、CLI の受信側が何も確認を返さず 8 秒で切断。3 回に 1 回ほど発生）。「受信側ごとに尋ね直す値」の初期化は `await` の前に置く。e2e のページのログは `localStorage["qrsend.debug.log"]="1"` でコンソールにも出せる（`spawnSync` で Node が止まっている間のコンソール出力は、戻ってから届く）。
   - **実機では未確認**: 「Wi-Fi」で携帯回線どうしがつながらなくなること、「Wi-Fi & Cellular Data」で従来どおりつながること、同じ Wi-Fi の IPv6 どうしが同じネットワークと判定されること。

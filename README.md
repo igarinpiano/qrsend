@@ -37,6 +37,9 @@ are static and have no window display (`--display terminal`).
 
 ## Usage
 
+`qrsend <command> --help` explains every option. All commands and options in
+one place, in Japanese: [docs/CLI.md](docs/CLI.md).
+
 ### Pair devices (once)
 
 Every device has a key pair. On the **receiving** device:

@@ -20,6 +20,20 @@ async function leaveBehind(page: Page, area: "recv" | "send", name: string, size
 }
 
 const rows = (page: Page) => page.getByRole("listitem");
+
+/** What a list that is a card of its own shows keeps clear of the card's
+ *  border. (Seen on a phone: the rows of the inbox touched it left and right.) */
+async function clearOfTheBorder(page: Page) {
+  const gaps = await page.evaluate(() => {
+    const card = document.querySelector("ul.list.card")!.getBoundingClientRect();
+    return [...document.querySelectorAll("ul.list.card > li *")]
+      .map((e) => e.getBoundingClientRect())
+      .filter((box) => box.width > 0)
+      .map((box) => Math.min(box.left - card.left, card.right - box.right));
+  });
+  expect(gaps.length).toBeGreaterThan(0);
+  expect(Math.min(...gaps)).toBeGreaterThanOrEqual(12);
+}
 const total = (page: Page) => page.getByTestId("storage-total");
 
 test("left-over files are listed with their size and deleted", async ({ page }) => {
@@ -35,6 +49,7 @@ test("left-over files are listed with their size and deleted", async ({ page }) 
   await expect(rows(page).nth(1)).toContainText("4.88 KiB");
   await expect(rows(page).nth(2)).toContainText("Diagnostic log");
   await expect(total(page)).toContainText("KiB");
+  await clearOfTheBorder(page);
 
   // Nothing picked, nothing to delete. One picked: that one goes, after a question.
   const remove = page.getByRole("button", { name: /^Delete selected/ });
@@ -176,6 +191,8 @@ test("a transfer that stopped halfway is deleted with all that was kept of it", 
     // Leaving the page keeps it, unfinished, for later.
     await page.goto("./#/inbox");
     await expect(page.getByRole("link", { name: "Continue" })).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await clearOfTheBorder(page);
     await page.getByRole("link", { name: "See what takes the room" }).click();
     const unfinished = rows(page).filter({ hasText: "Received in part" });
     await expect(unfinished).toHaveCount(1);

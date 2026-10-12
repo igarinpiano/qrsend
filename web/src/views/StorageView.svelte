@@ -126,12 +126,10 @@
 </p>
 
 <style>
-  /* (A list's card has no padding of its own.) */
   .thing {
     display: flex;
     gap: 12px;
     align-items: center;
-    padding: 0 14px;
     cursor: pointer;
   }
   .thing input {

@@ -19,6 +19,8 @@ pub fn run(stream: &mut FrameStream, mut fps: f64, grid: GridSpec, min_scale: us
     };
     let mut window = Window::new("QRSend", 900, 900, opts)
         .context("cannot open a window (try --display terminal)")?;
+    #[cfg(target_os = "macos")]
+    dock_icon();
     window.set_target_fps(120);
 
     let modules = stream.params.modules();
@@ -83,4 +85,46 @@ pub fn run(stream: &mut FrameStream, mut fps: f64, grid: GridSpec, min_scale: us
         }
     }
     Ok(())
+}
+
+/// Gives the window QRSend's icon in the Dock. A program that opens a window
+/// without being an application bundle (as one run from a terminal is) gets
+/// the system's stand-in there, the dark square that says "exec".
+#[cfg(target_os = "macos")]
+fn dock_icon() {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    // The artwork (assets/qrsendIcon-1024@1x.png) with the margin the
+    // system's own icons keep: the system shows what it is handed as it is.
+    // Made by scripts/dock-icon.sh.
+    static ICON: &[u8] = include_bytes!("../../assets/dock-icon.png");
+
+    let classes = (
+        AnyClass::get(c"NSData"),
+        AnyClass::get(c"NSImage"),
+        AnyClass::get(c"NSApplication"),
+    );
+    let (Some(data), Some(image), Some(app)) = classes else {
+        return;
+    };
+    // (The window is there, so this is the main thread and the application
+    // exists. What is made here is released here: the application keeps the
+    // image it is given.)
+    unsafe {
+        let data: *mut AnyObject = msg_send![data, alloc];
+        let data: *mut AnyObject = msg_send![
+            data,
+            initWithBytes: ICON.as_ptr().cast::<std::ffi::c_void>(),
+            length: ICON.len(),
+        ];
+        let image: *mut AnyObject = msg_send![image, alloc];
+        let image: *mut AnyObject = msg_send![image, initWithData: data];
+        if !image.is_null() {
+            let app: *mut AnyObject = msg_send![app, sharedApplication];
+            let _: () = msg_send![app, setApplicationIconImage: image];
+            let _: () = msg_send![image, release];
+        }
+        let _: () = msg_send![data, release];
+    }
 }

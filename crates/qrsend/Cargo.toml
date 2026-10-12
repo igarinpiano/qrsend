@@ -36,6 +36,10 @@ str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# For the window's icon in the Dock. (ctrlc brings this crate in anyway.)
+objc2 = { version = "0.6.4", optional = true }
+
 [features]
 default = ["window", "webrtc"]
 # A network connection between this program and a browser (WebRTC through
@@ -43,4 +47,4 @@ default = ["window", "webrtc"]
 # cannot link.
 webrtc = ["dep:str0m", "dep:sha2"]
 # Native window display for `qrsend send` (minifb).
-window = ["dep:minifb"]
+window = ["dep:minifb", "dep:objc2"]

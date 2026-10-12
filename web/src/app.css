@@ -241,6 +241,12 @@ code,
   border-bottom: none;
 }
 
+/* A list that is a card itself (not one inside a card): `.list` takes the
+   card's padding away, so its rows would touch the border. */
+.list.card {
+  padding: 6px 16px;
+}
+
 .ellipsis {
   overflow: hidden;
   text-overflow: ellipsis;
