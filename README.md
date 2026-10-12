@@ -202,14 +202,63 @@ qrsend recv --camera -o ~/Downloads        # receiver: reads the offer, connects
 No address to type and nothing to pair: the code carries a key, everything on
 the connection is encrypted with it, and only someone who saw the sender's
 screen can connect. The sender stops by itself once the receiver reports that
-everything arrived. (`recv --no-lan` keeps to the codes. On macOS the firewall
-may ask whether `qrsend` may accept incoming connections.)
+everything arrived. (`recv --no-lan` keeps to the codes.)
+
+The receiver is the one to connect, so a firewall on the sending machine that
+turns it away leaves both sides waiting without a word. On macOS, `send --lan`
+checks the firewall when it starts; if connections to `qrsend` would be turned
+away, it asks whether to allow them and, with a yes, changes the rule itself
+(through `sudo`, which asks for your password). It cannot be done without
+asking: changing the firewall takes an administrator's rights, and `qrsend` is
+not signed with an Apple Developer ID, which is what lets some applications
+through from the moment they are installed.
 
 A receiving **web app** connects as well: `--lan` also offers the kind of
 connection a browser can make (WebRTC), and the browser takes it up by itself
 once its camera has read the code. Nothing has to be shown back to the sender.
 The other way round works the same: when the web app sends with *Local network
 boost* on, `qrsend recv` reads its offer and connects to the browser.
+
+### Two-way
+
+```bash
+qrsend send big.iso --plain --two-way      # sender: reads the receiver's feedback codes with a camera
+qrsend recv --camera --two-way             # receiver: shows them in a window
+```
+
+With `--two-way` the receiver shows a code saying what it still lacks, the
+sender's camera reads it, only the missing parts are sent, and sending ends
+when everything has arrived. Either side can be the web app (its *Two-way
+transfer*). Without an answer the transfer simply goes on one-way. Over a
+channel that carries bytes, the same goes as text (`recv --feedback-to` on one
+side, `send --feedback-from` on the other).
+
+```bash
+qrsend send big.iso --plain --two-way --auto-speed   # speed and codes per picture follow the reports
+qrsend send big.iso --plain --color                  # three codes in one: red, green and blue
+```
+
+With `--auto-speed` the reports also choose how many pictures are shown a
+second and how many codes a picture holds: one change at a time, kept if more
+gets through. `--color` stacks three codes in every place, one per color, for
+a camera that tells the colors apart; with a receiver that answers, colors its
+camera cannot use are given up along the way.
+
+### The strictest way: `--secure`
+
+```bash
+qrsend send secret.pdf --to phone --secure
+qrsend recv --camera --secure
+```
+
+`--secure` (or `QRSEND_SECURE=1` in the environment) holds a transfer to three
+rules, and makes an error of any option that goes against one of them:
+
+| | Sending | Receiving |
+|---|---|---|
+| Encrypted, between trusted devices | Only with `--to`, to devices on the trusted list, signed | Only what is encrypted for this device and signed by a trusted one; anything else is refused and removed |
+| One way only | No network connection is offered, no feedback is read | No network connection is made, nothing is told back |
+| Nothing left behind | Neither the packed transfer nor a log | No log, nothing in the inbox (a transfer that stops halfway starts over), nothing on the clipboard |
 
 ## Web app
 
@@ -309,7 +358,10 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] More transports side by side: text over any byte channel (CLI), color codes, screen capture, local network (web app, feature preview)
 - [x] Sound as a back channel (web app, feature preview)
 - [x] A direct network connection between two CLIs, started by a code (`send --lan`), and between the CLI and a browser in either direction
-- [ ] Two-way mode and sound in the CLI; auto-tuning the code size
+- [x] The strictest way in one option: `--secure` (encrypted between trusted devices, one way only, nothing left behind)
+- [x] Two-way mode in the CLI: feedback codes read by a camera (`send --two-way`) and shown in a window (`recv --two-way`), or as text over any byte channel (`--feedback-from` / `--feedback-to`)
+- [x] Color codes shown by the CLI (`send --color`) and automatic speed from feedback (`send --auto-speed`)
+- [ ] Sound in the CLI; auto-tuning the code size
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
 

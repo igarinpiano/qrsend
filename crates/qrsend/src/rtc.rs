@@ -56,6 +56,12 @@ const IDLE: Duration = Duration::from_secs(3);
 /// least once a second, whatever it is doing).
 const SILENT: Duration = Duration::from_secs(10);
 
+/// While nobody has taken an offer up, it is announced anew this often: the
+/// same offer under another number. A browser tries an offer once per
+/// number, and what stood in its way the first time (a firewall the user was
+/// just being asked about, a network not yet joined) may be gone by now.
+const ANNOUNCE_AGAIN: Duration = Duration::from_secs(20);
+
 /// Says what the connection is doing when `QRSEND_TRACE` is set (for
 /// finding out why one does not come about).
 fn trace(what: impl FnOnce() -> String) {
@@ -180,7 +186,7 @@ pub fn proof(key: &[u8; 16], certificate: &[u8]) -> String {
 struct Sockets {
     list: Vec<(SocketAddr, Arc<UdpSocket>)>,
     /// (to, from, datagram)
-    incoming: Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
+    incoming: Receiver<Datagram>,
 }
 
 impl Sockets {
@@ -242,34 +248,30 @@ fn addresses(given: Option<&str>) -> Result<Vec<IpAddr>> {
     })
 }
 
-/// A connection in the making, toward whoever reads the offer.
+/// A connection offered to whoever reads the offer. Nothing of the
+/// connection itself exists yet: its handshake gives up half a minute after
+/// it is set up, so one set up with the offer would end, and the offer with
+/// it, whether or not anyone had come (a receiver that read the offer late in
+/// that time found a connection about to give up). It is set up when someone
+/// knocks ([`Offered::begin`]).
 struct Offered {
-    rtc: Rtc,
-    channel: ChannelId,
+    credentials: IceCreds,
+    certificate: DtlsCert,
     key: [u8; 16],
     /// What goes into the link codes: the key, then the description.
     payload: Vec<u8>,
 }
 
 fn offer(sockets: &Sockets) -> Result<Offered> {
-    let mut rtc = RtcConfig::new()
-        .set_fingerprint_verification(false)
-        .build(Instant::now());
-    for (address, _) in &sockets.list {
-        rtc.add_local_candidate(Candidate::host(*address, "udp")?);
-    }
-    let mut api = rtc.direct_api();
-    api.set_ice_controlling(true);
-    let local = api.local_ice_credentials();
+    let certificate = str0m::crypto::from_feature_flags()
+        .dtls_provider
+        .generate_certificate()
+        .context("no certificate for the connection")?;
+    let credentials = IceCreds::new();
     let description = Description {
-        ufrag: local.ufrag,
-        pwd: local.pass,
-        fingerprint: api
-            .local_dtls_fingerprint()
-            .bytes
-            .as_slice()
-            .try_into()
-            .context("certificate fingerprint")?,
+        ufrag: credentials.ufrag.clone(),
+        pwd: credentials.pass.clone(),
+        fingerprint: Sha256::digest(&certificate.certificate).into(),
         candidates: sockets
             .list
             .iter()
@@ -281,26 +283,103 @@ fn offer(sockets: &Sockets) -> Result<Offered> {
     let key: [u8; 16] = rand::random();
     let mut payload = key.to_vec();
     payload.extend_from_slice(&description.to_bytes());
-    api.set_remote_ice_credentials(answer_credentials(&payload));
-    // Whoever connects is checked by what it sends first (see `proof`); the
-    // library wants to be told some fingerprint regardless.
-    api.set_remote_fingerprint(Fingerprint {
-        hash_func: "sha-256".into(),
-        bytes: vec![0; 32],
-    });
-    // The receiver, answering, takes the active part.
-    api.start_dtls(false)?;
-    api.start_sctp(false);
-    let channel = api.create_data_channel(ChannelConfig {
-        label: "qrsend".into(),
-        ..Default::default()
-    });
     Ok(Offered {
-        rtc,
-        channel,
+        credentials,
+        certificate,
         key,
         payload,
     })
+}
+
+/// A datagram as it came: (to, from, contents).
+type Datagram = (SocketAddr, SocketAddr, Vec<u8>);
+
+/// What the library takes a datagram as; none for what it cannot be.
+fn input(datagram: &Datagram) -> Option<Input<'_>> {
+    let (to, from, data) = datagram;
+    Some(Input::Receive(
+        Instant::now(),
+        Receive {
+            proto: Protocol::Udp,
+            source: *from,
+            destination: *to,
+            contents: data.as_slice().try_into().ok()?,
+        },
+    ))
+}
+
+impl Offered {
+    /// This side of the connection, as the offer describes it.
+    fn begin(&self, sockets: &Sockets) -> Result<(Rtc, ChannelId)> {
+        let mut rtc = RtcConfig::new()
+            .set_fingerprint_verification(false)
+            .set_local_ice_credentials(self.credentials.clone())
+            .set_dtls_cert(self.certificate.clone())
+            .build(Instant::now());
+        for (address, _) in &sockets.list {
+            rtc.add_local_candidate(Candidate::host(*address, "udp")?);
+        }
+        let mut api = rtc.direct_api();
+        api.set_ice_controlling(true);
+        api.set_remote_ice_credentials(answer_credentials(&self.payload));
+        // Whoever connects is checked by what it sends first (see `proof`); the
+        // library wants to be told some fingerprint regardless.
+        api.set_remote_fingerprint(Fingerprint {
+            hash_func: "sha-256".into(),
+            bytes: vec![0; 32],
+        });
+        // The receiver, answering, takes the active part.
+        api.start_dtls(false)?;
+        api.start_sctp(false);
+        let channel = api.create_data_channel(ChannelConfig {
+            label: "qrsend".into(),
+            ..Default::default()
+        });
+        Ok((rtc, channel))
+    }
+
+    /// Waits for a receiver to knock: for the first datagram that belongs to
+    /// a connection made from this offer. Returns that connection and the
+    /// datagram; none when nothing can come any more. `still_waiting` is
+    /// called every [`ANNOUNCE_AGAIN`] in the meantime.
+    fn knocked(
+        &self,
+        sockets: &Sockets,
+        mut still_waiting: impl FnMut(),
+    ) -> Option<(Rtc, ChannelId, Datagram)> {
+        let mut said = Instant::now();
+        loop {
+            if said.elapsed() >= ANNOUNCE_AGAIN {
+                still_waiting();
+                said = Instant::now();
+            }
+            let datagram = match sockets.incoming.recv_timeout(Duration::from_secs(1)) {
+                Ok(datagram) => datagram,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
+            };
+            // A check of the path (STUN), which is what a receiver sends
+            // first: anything else is not worth setting a connection up for.
+            // And it names this offer (the user name in such a check begins
+            // with the fragment the offer gave): nothing is set up for
+            // someone who has not read the offer, however much they send.
+            let data = &datagram.2;
+            let name = format!("{}:", self.credentials.ufrag);
+            if data.len() < 20
+                || data[0] > 1
+                || data[4..8] != [0x21, 0x12, 0xa4, 0x42]
+                || !data.windows(name.len()).any(|w| w == name.as_bytes())
+            {
+                continue;
+            }
+            let Ok((rtc, channel)) = self.begin(sockets) else {
+                return None;
+            };
+            if input(&datagram).is_some_and(|i| rtc.accepts(&i)) {
+                return Some((rtc, channel, datagram));
+            }
+        }
+    }
 }
 
 /// Offers a connection to a receiving browser and serves whoever takes it,
@@ -354,10 +433,22 @@ where
     thread::spawn(move || {
         let mut last: Option<Feedback> = None;
         loop {
+            // (Until someone comes, there is nothing to serve and nothing
+            // to give up on: the offer holds as long as it is shown.)
+            let again = || {
+                let _ = announce(&offered, &events);
+            };
+            let Some((rtc, channel, first)) = offered.knocked(&sockets, again) else {
+                return;
+            };
+            trace(|| "a receiver knocked".into());
+            log::line("link", || {
+                "WebRTC: a receiver's first packet arrived".into()
+            });
             let Ok(source) = source() else { return };
             let direct = DirectSender::new(layout, source, last.as_ref());
-            let feedback = Connection::new(offered, direct, &sockets, &events)
-                .run()
+            let feedback = Connection::new(rtc, channel, offered.key, direct, &sockets, &events)
+                .run(first)
                 .unwrap_or_else(|e| {
                     trace(|| format!("the connection failed: {e:#}"));
                     log::line("link", || {
@@ -421,16 +512,18 @@ struct Connection<'a, S> {
 
 impl<'a, S: SegmentSource> Connection<'a, S> {
     fn new(
-        offered: Offered,
+        rtc: Rtc,
+        channel: ChannelId,
+        key: [u8; 16],
         direct: DirectSender<S>,
         sockets: &'a Sockets,
         events: &'a Sender<LinkEvent>,
     ) -> Self {
         let now = Instant::now();
         Connection {
-            rtc: offered.rtc,
-            channel: offered.channel,
-            key: offered.key,
+            rtc,
+            channel,
+            key,
             direct,
             sockets,
             events,
@@ -449,8 +542,32 @@ impl<'a, S: SegmentSource> Connection<'a, S> {
         }
     }
 
+    /// Takes in a datagram that came for this connection.
+    fn take(&mut self, datagram: Datagram) -> Result<()> {
+        self.ends = Some((datagram.0, datagram.1));
+        if !self.open {
+            trace(|| {
+                format!(
+                    "{} B from {} at {}",
+                    datagram.2.len(),
+                    datagram.1,
+                    datagram.0
+                )
+            });
+        }
+        // (Whatever is not part of this connection is not for it.)
+        if let Some(input) = input(&datagram)
+            && self.rtc.accepts(&input)
+        {
+            self.rtc.handle_input(input)?;
+        }
+        Ok(())
+    }
+
     /// Runs until the connection ends; returns the receiver's last feedback.
-    fn run(mut self) -> Result<Option<Feedback>> {
+    /// `first`: the datagram the connection was set up for.
+    fn run(mut self, first: Datagram) -> Result<Option<Feedback>> {
+        self.take(first)?;
         loop {
             if self.last.as_ref().is_some_and(|f| f.complete) {
                 break;
@@ -483,27 +600,7 @@ impl<'a, S: SegmentSource> Connection<'a, S> {
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(50));
             match self.sockets.incoming.recv_timeout(wait) {
-                Ok((to, from, data)) => {
-                    self.ends = Some((to, from));
-                    if !self.open {
-                        trace(|| format!("{} B from {from} at {to}", data.len()));
-                    }
-                    // (Whatever is not part of this connection is not for it.)
-                    if let Ok(contents) = data.as_slice().try_into() {
-                        let input = Input::Receive(
-                            Instant::now(),
-                            Receive {
-                                proto: Protocol::Udp,
-                                source: from,
-                                destination: to,
-                                contents,
-                            },
-                        );
-                        if self.rtc.accepts(&input) {
-                            self.rtc.handle_input(input)?;
-                        }
-                    }
-                }
+                Ok(datagram) => self.take(datagram)?,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     self.rtc.handle_input(Input::Timeout(Instant::now()))?;
                 }

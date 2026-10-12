@@ -152,12 +152,14 @@ test("web → CLI: color codes are told apart", async ({ page }) => {
   const dir = path.join(WORK, "web-color");
   fs.rmSync(dir, { recursive: true, force: true });
   expect(await captureFrames(page, dir, 40)).toBeGreaterThan(20);
-  // A few pictures are enough to notice (and too few to finish, so the
-  // receiver is still there to say so).
+  // Two pictures are enough to notice (and too few to finish, so the
+  // receiver is still there to say so). Every color of the first pictures
+  // is read, not only what shows in black and white: six pictures, which
+  // once left the transfer unfinished, now complete it.
   const few = path.join(WORK, "web-color-few");
   fs.rmSync(few, { recursive: true, force: true });
   fs.mkdirSync(few);
-  for (const f of fs.readdirSync(dir).sort().slice(0, 6)) fs.copyFileSync(path.join(dir, f), path.join(few, f));
+  for (const f of fs.readdirSync(dir).sort().slice(0, 2)) fs.copyFileSync(path.join(dir, f), path.join(few, f));
   const start = cliBoth(["recv", "--images", few], "cli");
   expect(start.status).toBe(2);
   expect(start.stderr).toContain("Color codes: reading red, green and blue apart");

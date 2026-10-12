@@ -313,6 +313,7 @@
       log("rx", "offer to this device", { id: msg.id });
       silent ??= receiver();
       silentOffer = msg.id;
+      openTried = false;
       await silent.acceptKnown(msg, mine.certificate);
     } catch (e) {
       console.warn("offer to this device:", e);
@@ -322,6 +323,13 @@
   // An offer to whoever reads it (a command-line sender's): taken up
   // without showing anything, like the one above.
   let openOffered = false;
+  /** The attempt in the making answers such an offer. */
+  let openTried = false;
+  /**
+   * Such an offer was taken up and nothing came back from the sender. This device can do no more about it: the
+   * sender waits to be connected to, and what turns a connection away there (its firewall, as a rule) tells nobody.
+   */
+  let openUnreached = $state(false);
   async function openOffer(msg: LinkMessage) {
     openOffered = true;
     tcpOffered = false;
@@ -332,6 +340,7 @@
     try {
       silent ??= receiver();
       silentOffer = msg.id;
+      openTried = true;
       await silent.acceptOpen(msg);
     } catch (e) {
       console.warn("open offer:", e);
@@ -352,6 +361,11 @@
       path: (path) => {
         if (linked === made) linkPath = path;
       },
+      unreached: () => {
+        if (made !== silent || !openTried || linked) return;
+        log("rx", "the sender's open offer was taken up, and the sender was not reached");
+        openUnreached = true;
+      },
       state: (state) => {
         if (state === "closed") {
           // An attempt that never connected changes nothing.
@@ -365,6 +379,7 @@
           linked = made;
           linkPath = made.path;
           linkedOffer = made === silent ? silentOffer : lanOffer;
+          openUnreached = false;
           log("rx", "connected", { by: made === silent ? "offer to this device" : "answer code", lasting: made.lasting });
           for (const other of [lan, silent]) if (other !== made) other?.stop();
           introducedSelf = false;
@@ -658,6 +673,12 @@
   <p class="small muted" data-testid="colors-advice">
     The sender shows color codes, but this camera does not tell the colors apart. The transfer still arrives, more
     slowly than it could: turning off Color codes on the sender is faster.
+  </p>
+{:else if openUnreached && !result}
+  <p class="small muted" data-testid="open-offer-unreached">
+    The sender (a command-line program) offers a network connection, but it could not be reached. Most often a
+    firewall on the sender turns the connection away (the sender says so when it starts, where it can tell); the two
+    devices may also be on different networks. The camera carries on.
   </p>
 {:else if tcpOffered && !result}
   <p class="small muted" data-testid="tcp-offer">

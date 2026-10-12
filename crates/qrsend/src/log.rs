@@ -256,6 +256,7 @@ fn one_line(text: &str) -> String {
 /// system's), fit for the log: what went wrong, without whom it names. Every
 /// word that holds a network address (with a port or without, in brackets,
 /// in a longer expression) or a name on the local network is left out.
+#[cfg_attr(not(feature = "webrtc"), allow(dead_code))]
 pub fn discreet(text: &str) -> String {
     let v4 = |word: &str| {
         word.split(|c: char| !(c.is_ascii_digit() || c == '.'))

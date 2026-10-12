@@ -1,8 +1,11 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import fs from "node:fs";
+import path from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   FAKE_TEXT,
+  WORK,
+  cli,
   SECRET_TEXT,
   encryptedVideo,
   filesVideo,
@@ -53,6 +56,23 @@ test("CLI → web: receives text through the camera", async ({ playwright, baseU
     // Reopening from the inbox reads it back from storage.
     await page.getByRole("button", { name: "Open" }).click();
     await expect(page.getByTestId("received-text")).toHaveText(FAKE_TEXT);
+  });
+});
+
+// A command-line sender that reads feedback (`send --two-way`, or
+// `--feedback-from` as here) asks for it in its stream; the browser needs no
+// setting to answer: it shows what it still lacks, and at the end that it
+// has everything.
+test("CLI → web: a sender that asks for feedback is answered", async ({ playwright, baseURL }) => {
+  const video = path.join(WORK, "asks.y4m");
+  const nobody = path.join(WORK, "nobody.txt");
+  fs.writeFileSync(nobody, "");
+  const message = "Asked by the command line";
+  cli(["send", "--plain", "--text", message, "--density", "low", "--feedback-from", nobody, "--export-video", video, "--frames", "40", "--fps", "8"]);
+  await withCamera({ playwright, baseURL }, video, async (page) => {
+    await page.goto("./#/receive");
+    await expect(page.getByTestId("received-text")).toHaveText(message, { timeout: 40_000 });
+    await expect(page.getByTestId("feedback")).toHaveAttribute("data-code", /^QSF1-/);
   });
 });
 

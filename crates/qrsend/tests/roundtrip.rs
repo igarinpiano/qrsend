@@ -39,6 +39,7 @@ impl Env {
             .env("QRSEND_CACHE_DIR", self.path(&format!("{device}/cache")))
             .env("QRSEND_CONFIG_DIR", self.path(&format!("{device}/config")))
             .env_remove("QRSEND_LOG")
+            .env_remove("QRSEND_SECURE")
             .env_remove("QRSEND_NO_KEEP");
         command
     }
@@ -884,4 +885,372 @@ fn only_the_last_logs_are_kept() {
     assert_eq!(env.ok(&["log", "list"]).matches(" UTC  ").count(), 10);
     assert!(env.ok(&["log", "clear"]).contains("Removed 10 log(s)."));
     assert!(!env.path("me/cache/logs").exists());
+}
+
+/// Two-way over a channel that carries bytes: the receiver says what it
+/// still lacks, and the sender, which would otherwise write frames without
+/// end, stops when the receiver has everything.
+#[test]
+fn two_way_over_a_lossy_byte_channel() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+
+    let env = Env::new("two-way");
+    fs::write(env.path("data.bin"), noise(400_000)).unwrap();
+    let mut sender = env
+        .command(
+            "me",
+            &[
+                "send",
+                "--plain",
+                "data.bin",
+                "--seg-shift",
+                "16",
+                "--export-text",
+                "-",
+                "--feedback-from",
+                "-",
+            ],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut receiver = env
+        .command(
+            "you",
+            &["recv", "--text", "-", "--feedback-to", "-", "-o", "out"],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The way there loses every third line; the way back loses nothing.
+    let (frames, mut to_receiver) = (
+        sender.stdout.take().unwrap(),
+        receiver.stdin.take().unwrap(),
+    );
+    let there = std::thread::spawn(move || {
+        for (i, line) in BufReader::new(frames)
+            .lines()
+            .map_while(|l| l.ok())
+            .enumerate()
+        {
+            if i % 3 != 1 && writeln!(to_receiver, "{line}").is_err() {
+                break;
+            }
+        }
+    });
+    let (reports, mut to_sender) = (
+        receiver.stdout.take().unwrap(),
+        sender.stdin.take().unwrap(),
+    );
+    let back = std::thread::spawn(move || {
+        let mut last = String::new();
+        for line in BufReader::new(reports).lines().map_while(|l| l.ok()) {
+            let _ = writeln!(to_sender, "{line}");
+            last = line;
+        }
+        last
+    });
+    let sent = sender.wait_with_output().unwrap();
+    let received = receiver.wait_with_output().unwrap();
+    there.join().unwrap();
+    let last = back.join().unwrap();
+    let said = String::from_utf8_lossy(&sent.stderr).into_owned();
+    assert!(
+        received.status.success(),
+        "{}",
+        String::from_utf8_lossy(&received.stderr)
+    );
+    assert!(sent.status.success(), "{said}");
+    assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(400_000));
+    assert!(last.starts_with("QSF1-"), "{last}");
+    assert!(said.contains("The receiver has everything"), "{said}");
+    // No number of frames was asked for: it stopped because it was told to.
+    // (How many it wrote by then says little: a pipe takes them far faster
+    // than the receiver's word comes back.)
+    let wrote: u64 = said
+        .lines()
+        .find_map(|l| l.strip_prefix("Wrote ")?.split(' ').next()?.parse().ok())
+        .unwrap();
+    assert!(wrote >= 400_000 / 1024, "{wrote}");
+}
+
+/// Color codes: three codes in every place, a third of the pictures.
+#[test]
+fn color_codes_are_written_and_read_back() {
+    let env = Env::new("color");
+    fs::write(env.path("data.bin"), noise(120_000)).unwrap();
+    let count = |dir: &str, more: &[&str]| {
+        let args: Vec<&str> = [
+            "send",
+            "--plain",
+            "data.bin",
+            "--grid",
+            "2",
+            "--export-frames",
+            dir,
+        ]
+        .iter()
+        .chain(more)
+        .copied()
+        .collect();
+        env.ok(&args);
+        frames(&env.path(dir)).len()
+    };
+    let (plain, color) = (count("bw", &[]), count("rgb", &["--color"]));
+    assert!(
+        color * 3 <= plain + 2 && color * 3 + 2 >= plain,
+        "{color} for {plain}"
+    );
+    let out = env.run(&["recv", "--images", "rgb", "-o", "out"]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("Color codes: reading red, green and blue apart"),
+        "{said}"
+    );
+    assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(120_000));
+
+    // Where they do not apply, the options say so.
+    for (args, why) in [
+        (
+            &["--color", "--export-video", "v.y4m"][..],
+            "--color applies to",
+        ),
+        (
+            &["--color", "--export-text", "t.txt"][..],
+            "--color applies to",
+        ),
+        (
+            &["--auto-speed", "--export-frames", "x"][..],
+            "--auto-speed applies to a window",
+        ),
+    ] {
+        let args: Vec<&str> = ["send", "--plain", "--text", "x"]
+            .iter()
+            .chain(args)
+            .copied()
+            .collect();
+        let out = env.run(&args);
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            !out.status.success() && said.contains(why),
+            "{args:?}: {said}"
+        );
+    }
+}
+
+/// A way back that brings nothing must not mean writing without end.
+#[test]
+fn without_an_answer_writing_stops_by_itself() {
+    let env = Env::new("unanswered");
+    fs::write(env.path("data.bin"), noise(50_000)).unwrap();
+    fs::write(env.path("nobody.txt"), "").unwrap();
+    let out = env.run(&[
+        "send",
+        "--plain",
+        "data.bin",
+        "--export-text",
+        "frames.txt",
+        "--feedback-from",
+        "nobody.txt",
+    ]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("No feedback came from the receiver"),
+        "{said}"
+    );
+    // Three passes of some fifty frames each, and what it takes is all there.
+    let lines = fs::read_to_string(env.path("frames.txt"))
+        .unwrap()
+        .lines()
+        .count();
+    assert!((100..400).contains(&lines), "{lines}");
+    env.ok(&["recv", "--text", "frames.txt", "-o", "out"]);
+    assert_eq!(fs::read(env.path("out/data.bin")).unwrap(), noise(50_000));
+}
+
+/// `--secure`: encrypted, between trusted devices, one way, nothing left.
+#[test]
+fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {
+    let env = Env::new("secure");
+    let (alice, bob) = (device_id(&env, "alice"), device_id(&env, "bob"));
+    let dave = device_id(&env, "dave");
+    env.ok_as("alice", &["devices", "add", &bob, "--yes"]);
+    env.ok_as("bob", &["devices", "add", &alice, "--yes"]);
+    env.ok_as("dave", &["devices", "add", &bob, "--yes"]);
+
+    // Sending: whatever opens a way in or leaves something behind is refused.
+    let refused = |device: &str, args: &[&str], why: &str| {
+        let out = env.run_as(device, args);
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            !out.status.success() && said.contains(why),
+            "{args:?}: {said}"
+        );
+    };
+    let send = |more: &[&str]| -> Vec<String> {
+        ["send", "--secure", "--text", "x", "--export-frames", "no"]
+            .iter()
+            .chain(more)
+            .map(|s| s.to_string())
+            .collect()
+    };
+    for (more, why) in [
+        (&["--plain"][..], "encrypted transfers only"),
+        (&[][..], "encrypted transfers only"),
+        (&["--to", "bob", "--lan"][..], "nothing through the network"),
+        (
+            &["--to", "bob", "--two-way"][..],
+            "takes nothing in from the receiver",
+        ),
+        (
+            &["--to", "bob", "--feedback-from", "x"][..],
+            "takes nothing in from the receiver",
+        ),
+        (&["--to", "bob", "--log", "log.txt"][..], "keeps no log"),
+        // An ID in full is no way round the list of trusted devices.
+        (&["--to", dave.as_str()][..], "trusted devices only"),
+    ] {
+        let args = send(more);
+        refused(
+            "alice",
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            why,
+        );
+    }
+    let out = env.run_as(
+        "alice",
+        &[
+            "send",
+            "--secure",
+            "--to",
+            &bob,
+            "--text",
+            "for bob",
+            "--export-frames",
+            "f",
+        ],
+    );
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success() && said.contains("Not kept (--secure)"),
+        "{said}"
+    );
+    // Neither the packed transfer nor a log stays behind.
+    assert!(
+        env.ok_as("alice", &["cache", "list"])
+            .contains("No cached send sessions")
+    );
+    assert!(!env.path("alice/cache/logs").exists());
+
+    // Receiving: from a trusted device, encrypted for this one; and no log.
+    assert_eq!(
+        env.ok_as("bob", &["recv", "--secure", "--images", "f"])
+            .trim_end(),
+        "for bob"
+    );
+    assert!(!env.path("bob/cache/logs").exists());
+    for (option, why) in [
+        (&["--keep"][..], "keeps nothing in the inbox"),
+        (&["--copy"][..], "clipboard"),
+        (
+            &["--feedback-to", "back.txt"][..],
+            "tells the sender nothing",
+        ),
+        (&["--two-way"][..], "tells the sender nothing"),
+        (&["--log", "log.txt"][..], "keeps no log"),
+    ] {
+        let args: Vec<&str> = ["recv", "--secure", "--images", "f"]
+            .iter()
+            .chain(option)
+            .copied()
+            .collect();
+        refused("bob", &args, why);
+    }
+    // A transfer that stops halfway leaves nothing behind either: without
+    // the option what arrived is kept and can be added to, with it not.
+    fs::write(env.path("more.bin"), noise(300_000)).unwrap();
+    env.ok_as(
+        "alice",
+        &[
+            "send",
+            "more.bin",
+            "--to",
+            "bob",
+            "--seg-shift",
+            "16",
+            "--export-frames",
+            "h",
+        ],
+    );
+    fs::create_dir_all(env.path("half")).unwrap();
+    for (i, frame) in frames(&env.path("h")).iter().enumerate() {
+        if i % 2 == 0 {
+            fs::copy(frame, env.path("half").join(frame.file_name().unwrap())).unwrap();
+        }
+    }
+    let out = env.run_as("bob", &["recv", "--images", "half", "-o", "o"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--resume"));
+    assert!(env.ok_as("bob", &["inbox", "list"]).contains("more.bin"));
+    let out = env.run_as("bob", &["recv", "--secure", "--images", "half", "-o", "o"]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(
+        said.contains("Not kept (--secure)") && !said.contains("--resume"),
+        "{said}"
+    );
+    assert!(!env.ok_as("bob", &["inbox", "list"]).contains("more.bin"));
+    // Encrypted for bob, but by a device bob does not trust.
+    env.ok_as(
+        "dave",
+        &[
+            "send",
+            "--to",
+            "bob",
+            "--text",
+            "from dave",
+            "--export-frames",
+            "d",
+        ],
+    );
+    refused(
+        "bob",
+        &["recv", "--secure", "--images", "d"],
+        "its sender is not a trusted device",
+    );
+    // Nothing of it stays behind, and without the option it is taken as ever.
+    assert!(!env.ok_as("bob", &["inbox", "list"]).contains("text"));
+    assert_eq!(
+        env.ok_as("bob", &["recv", "--images", "d"]).trim_end(),
+        "from dave"
+    );
+    // Not encrypted at all; the environment's word counts as the option does.
+    env.ok_as(
+        "alice",
+        &[
+            "send",
+            "--plain",
+            "--text",
+            "for anyone",
+            "--export-frames",
+            "p",
+        ],
+    );
+    let out = env
+        .command("bob", &["recv", "--images", "p"])
+        .env("QRSEND_SECURE", "1")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success() && said.contains("it is not encrypted"),
+        "{said}"
+    );
 }

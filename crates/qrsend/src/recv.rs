@@ -1,5 +1,6 @@
 //! `qrsend recv`: scan frames, rebuild segments, save and extract.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,8 @@ use qrsend_core::payload::segment_hash;
 use qrsend_core::receiver::{Event, Receiver, SessionParams};
 use qrsend_core::resume::ResumeCode;
 
+#[cfg(feature = "window")]
+use crate::display;
 use crate::extract::{self, Conflict, ExtractOptions, Outcome};
 use crate::input::{Input, Picture, image_paths};
 #[cfg(feature = "webrtc")]
@@ -28,6 +31,17 @@ use crate::{decode, identity, log, net, util};
 
 #[derive(clap::Args)]
 pub struct RecvArgs {
+    /// The strictest way to receive: only transfers encrypted for this
+    /// device and signed by a trusted one are taken (anything else is
+    /// refused, and what was stored of it removed); one way only (no network
+    /// connection is made, nothing is told back to the sender); and nothing
+    /// is left besides what is saved (no log, nothing kept in the inbox,
+    /// not even of a transfer that stopped halfway, which then starts over;
+    /// nothing put on the clipboard). Options that go against any of
+    /// this are errors. Setting QRSEND_SECURE=1 in the environment makes
+    /// this the rule
+    #[arg(long, env = "QRSEND_SECURE", value_parser = clap::builder::FalseyValueParser::new())]
+    pub secure: bool,
     /// Read frames from image files or directories of images (PNG/JPEG)
     #[arg(long, num_args = 1.., value_name = "PATH", conflicts_with = "video")]
     pub images: Vec<PathBuf>,
@@ -74,6 +88,18 @@ pub struct RecvArgs {
     /// (`qrsend send --lan`); read the codes only
     #[arg(long)]
     pub no_lan: bool,
+    /// Two-way transfer over whatever carries bytes: write feedback codes
+    /// (what is still missing, and at the end that everything arrived) as
+    /// text, one per line, to FILE ("-": standard output), for a sender
+    /// started with `qrsend send --feedback-from`
+    #[arg(long, value_name = "FILE", conflicts_with = "stdout")]
+    pub feedback_to: Option<PathBuf>,
+    /// Two-way transfer with a sender that has a camera (the web app with
+    /// "Two-way transfer" on, or `qrsend send --two-way`): show feedback
+    /// codes in a window for that camera to read. The sender then sends
+    /// only what is still missing and stops when everything has arrived
+    #[arg(long)]
+    pub two_way: bool,
     /// Decoder threads (default: all cores)
     #[arg(long)]
     pub threads: Option<usize>,
@@ -136,6 +162,20 @@ pub fn open_meta(
         },
     };
     Ok((opened.manifest, sender))
+}
+
+/// Why `--secure` does not take a transfer, if it does not: it takes
+/// what is encrypted for this device and signed by a device it trusts.
+/// `sender`: who signed, once the file list is open.
+fn refused_as_insecure(p: &SessionParams, sender: Option<&SenderInfo>) -> Option<&'static str> {
+    if p.flags & FLAG_ENCRYPTED == 0 {
+        return Some("it is not encrypted");
+    }
+    match sender {
+        Some(SenderInfo::Unsigned) => Some("it is not signed"),
+        Some(SenderInfo::Unverified(_)) => Some("its sender is not a trusted device"),
+        Some(SenderInfo::Trusted(_)) | None => None,
+    }
 }
 
 /// A receive session: the on-disk store plus the decoded manifest.
@@ -341,14 +381,22 @@ fn read_text(path: &std::path::Path, tx: crossbeam_channel::Sender<Vec<String>>)
         )?))
     };
     let mut batch = Vec::new();
+    // Passed on by the batch when lines come fast, and one by one when they
+    // come slowly (a serial line): a sender that waits for this side's
+    // report should not wait for a batch to fill.
+    let mut passed = Instant::now();
     // A damaged line (bytes that are not text) is just a lost frame.
     for line in BufRead::split(reader, b'\n') {
         let line = String::from_utf8_lossy(&line?).trim().to_string();
         if !line.is_empty() {
             batch.push(line);
         }
-        if batch.len() >= 32 && tx.send(std::mem::take(&mut batch)).is_err() {
-            return Ok(());
+        if batch.len() >= 32 || (!batch.is_empty() && passed.elapsed() >= Duration::from_millis(50))
+        {
+            passed = Instant::now();
+            if tx.send(std::mem::take(&mut batch)).is_err() {
+                return Ok(());
+            }
         }
     }
     let _ = tx.send(batch);
@@ -356,7 +404,47 @@ fn read_text(path: &std::path::Path, tx: crossbeam_channel::Sender<Vec<String>>)
 }
 
 pub fn run(args: RecvArgs) -> Result<()> {
-    log::start(args.log.as_deref(), "recv")?;
+    let secure = args.secure;
+    if secure {
+        // Each of these would open a way out, or leave something behind.
+        let against = [
+            (
+                args.feedback_to.is_some(),
+                "--feedback-to",
+                "it tells the sender nothing",
+            ),
+            (args.two_way, "--two-way", "it tells the sender nothing"),
+            (
+                args.keep,
+                "--keep",
+                "it keeps nothing in the inbox once it is saved",
+            ),
+            (
+                args.copy,
+                "--copy",
+                "the clipboard is open to every program",
+            ),
+            (args.log.is_some(), "--log", "it keeps no log"),
+        ];
+        if let Some((_, option, why)) = against.iter().find(|(given, ..)| *given) {
+            bail!("--secure and {option} do not go together: {why}");
+        }
+    } else {
+        log::start(args.log.as_deref(), "recv")?;
+    }
+    // (Nothing is taken from the network that way, nor asked of it.)
+    let no_lan = args.no_lan || secure;
+    // Refuses a transfer that `--secure` does not take, and forgets
+    // what was stored of it.
+    let refuse = |why: &str, store: Option<&Store>| -> anyhow::Error {
+        if let Some(store) = store {
+            let _ = std::fs::remove_dir_all(&store.dir);
+        }
+        anyhow::anyhow!(
+            "this transfer is refused: {why}, and --secure takes only transfers encrypted \
+             for this device and signed by a trusted one"
+        )
+    };
     if args.camera_fps.is_some_and(|f| !(f.is_finite() && f > 0.0)) {
         bail!("--camera-fps must be a positive number");
     }
@@ -413,7 +501,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
             args.camera_size
                 .map_or("default".into(), |(w, h)| format!("{w}x{h}")),
             args.camera_fps.map_or("default".into(), |f| f.to_string()),
-            !args.no_lan
+            !no_lan
         )
     });
     let (ftx, frx) = bounded::<Picture>(threads * 2);
@@ -491,6 +579,9 @@ pub fn run(args: RecvArgs) -> Result<()> {
     // For the log: codes read (frames and others), and what was last logged.
     let (mut codes_read, mut offers_read) = (0u64, 0u64);
     let mut logged = (Instant::now(), 0u64, 0u64);
+    // For the sender of a two-way transfer: pictures read a second and the
+    // size of a dot in them, looked at once a second.
+    let mut camera_seen = (Instant::now(), 0u64);
     // When a browser's usual offer was first read.
     let mut usual_offer: Option<Instant> = None;
     let mut said_color = false;
@@ -498,6 +589,36 @@ pub fn run(args: RecvArgs) -> Result<()> {
     let mut link_reported = 0u64;
     let mut last_report = Instant::now();
     let mut codes_open = true;
+    // The way back to a sender that reads feedback as text.
+    let mut way_back: Option<Box<dyn std::io::Write>> = match &args.feedback_to {
+        None => None,
+        Some(path) if path.as_os_str() == "-" => Some(Box::new(std::io::stdout())),
+        Some(path) => Some(Box::new(std::fs::File::create(path).map_err(|e| {
+            anyhow::anyhow!("cannot write feedback to {}: {e}", path.display())
+        })?)),
+    };
+    // What was last said that way, and when: said again once a second while
+    // nothing changes, so that the sender does not take silence for a
+    // receiver that is gone.
+    let mut said_back: (Option<Instant>, usize, u64) = (None, 0, 0);
+    // And for a sender that reads it with a camera: a window with the code.
+    #[cfg(feature = "window")]
+    let mut answer = match args.two_way {
+        true => {
+            eprintln!(
+                "Two-way: a window shows what is still missing; let the sender's camera see it."
+            );
+            Some(display::answer::Answer::open()?)
+        }
+        false => None,
+    };
+    #[cfg(not(feature = "window"))]
+    if args.two_way {
+        bail!(
+            "this build has no window to show feedback codes in; over a channel that carries \
+             bytes, --feedback-to does the same"
+        );
+    }
     let (no_codes, no_messages) = (never::<Vec<String>>(), never::<Vec<u8>>());
     let report_due = tick(net::REPLY_EVERY);
 
@@ -513,6 +634,15 @@ pub fn run(args: RecvArgs) -> Result<()> {
                         if text.starts_with(link::PREFIX) {
                             offers_read += 1;
                             offered.push(text);
+                        } else if text.starts_with(qrsend_core::feedback::NOTICE_PREFIX) {
+                            // The sender says in which colors its codes are
+                            // stacked: more than one, and every picture is
+                            // read color by color, whatever it looks like.
+                            if let Ok(notice) = qrsend_core::feedback::SenderNotice::decode(&text)
+                                && rx.params().is_none_or(|p| p.session_id == notice.session_id)
+                            {
+                                colors.told(notice.colors.count_ones() >= 2);
+                            }
                         } else if let Ok(frame) = Frame::from_qr_text(&text) {
                             frames.push(frame);
                         }
@@ -569,7 +699,18 @@ pub fn run(args: RecvArgs) -> Result<()> {
                                 p.flags & qrsend_core::frame::FLAG_ENCRYPTED != 0
                             )
                         });
+                        if secure && let Some(why) = refused_as_insecure(&p, None) {
+                            pb.finish_and_clear();
+                            return Err(refuse(why, None));
+                        }
                         let s = Session::open(Store::open_or_create(p)?)?;
+                        if secure
+                            && s.manifest.is_some()
+                            && let Some(why) = refused_as_insecure(&p, Some(&s.sender))
+                        {
+                            pb.finish_and_clear();
+                            return Err(refuse(why, Some(&s.store)));
+                        }
                         for i in s.store.done_indices() {
                             rx.mark_done(i);
                         }
@@ -619,6 +760,13 @@ pub fn run(args: RecvArgs) -> Result<()> {
                                     }
                                     let m = s.manifest.as_ref().unwrap();
                                     print_manifest_header(&pb, m, &s.store.params(), &s.sender);
+                                    if secure
+                                        && let Some(why) =
+                                            refused_as_insecure(&s.store.params(), Some(&s.sender))
+                                    {
+                                        pb.finish_and_clear();
+                                        return Err(refuse(why, Some(&s.store)));
+                                    }
                                 }
                                 Err(e) => {
                                     rx.reset(0);
@@ -680,6 +828,17 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 last_log = Instant::now();
             }
             pb.set_message(line);
+        }
+        if camera_seen.0.elapsed() >= Duration::from_secs(1) {
+            let (at, then) = camera_seen;
+            let pictures = decoded.0.load(Ordering::Relaxed);
+            camera_seen = (Instant::now(), pictures);
+            let reads = (pictures - then) as f64 / at.elapsed().as_secs_f64();
+            rx.set_camera(qrsend_core::feedback::Camera {
+                reads_tenths: (reads * 10.0) as u32,
+                dot_tenths: (lattice.lock().unwrap().dot_px() * 10.0) as u32,
+                colors: 0,
+            });
         }
         if !said_color && colors.in_color() {
             said_color = true;
@@ -749,7 +908,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
             }
             let seeded = cfg!(feature = "webrtc") && message.kind == link::KIND_SEEDED_OFFER;
             if !(message.kind == link::KIND_TCP_OFFER || seeded)
-                || args.no_lan
+                || no_lan
                 || !ours
                 || link.is_some()
                 || tries >= TRIES
@@ -821,6 +980,49 @@ pub fn run(args: RecvArgs) -> Result<()> {
                 .replies
                 .send(format!("A{link_taken}\n{}", feedback.encode()));
         }
+        // The same report for a sender that reads it as text: when it
+        // changes (ten times a second at most), and once a second anyway.
+        if let Some(out) = &mut way_back {
+            let (at, done, left) = said_back;
+            let now = (
+                rx.completed_count(),
+                rx.progress().map_or(0, |p| p.remaining_symbols),
+            );
+            let since = at.map(|at| at.elapsed());
+            let changed = now != (done, left);
+            if since
+                .is_none_or(|s| s >= Duration::from_secs(1) || (changed && s >= net::REPLY_EVERY))
+                && let Some(feedback) = rx.feedback(false)
+            {
+                said_back = (Some(Instant::now()), now.0, now.1);
+                // (A sender that went away is no reason to stop receiving.)
+                if writeln!(out, "{}", feedback.encode())
+                    .and_then(|()| out.flush())
+                    .is_err()
+                {
+                    way_back = None;
+                }
+            }
+        }
+        #[cfg(feature = "window")]
+        if let Some(window) = &mut answer {
+            let code = match window.due() {
+                true => rx.feedback(false).map(|f| f.encode()),
+                false => None,
+            };
+            if !window.show(code) {
+                answer = None;
+                log::line("rx", || "feedback window closed".into());
+                say(
+                    &pb,
+                    "The feedback window was closed: receiving one-way from here on.",
+                );
+            }
+            // (Quitting the window's application ends the run as Ctrl-C does.)
+            if display::stop_asked() {
+                stop.store(true, Ordering::SeqCst);
+            }
+        }
         if rx.is_complete() || stop.load(Ordering::Relaxed) {
             break 'outer;
         }
@@ -855,11 +1057,28 @@ pub fn run(args: RecvArgs) -> Result<()> {
             rx.completed_count(),
             rx.segment_total()
         );
-        eprintln!("{}", resume_hint(id, &s.store.missing()));
+        if secure {
+            // Nothing is left behind, an unfinished transfer no more than a
+            // finished one. (It could be finished only for as long as the
+            // sender still has what it packed, which a sender that keeps to
+            // the same rule has not once it ends.)
+            let _ = std::fs::remove_dir_all(&s.store.dir);
+            eprintln!(
+                "Not kept (--secure): what arrived of this transfer is removed. To receive it, \
+                 start again while the sender is showing it."
+            );
+        } else {
+            eprintln!("{}", resume_hint(id, &s.store.missing()));
+        }
         log::line("end", || "not complete: kept in the inbox".into());
         std::process::exit(2);
     }
-    // Everything is verified and stored: a sender on the network may stop.
+    // Everything is verified and stored: a sender may stop.
+    if let Some(out) = &mut way_back
+        && let Some(feedback) = rx.feedback(true)
+    {
+        let _ = writeln!(out, "{}", feedback.encode()).and_then(|()| out.flush());
+    }
     if let Some(l) = link.take() {
         if let Some(feedback) = rx.feedback(true) {
             let _ = l
@@ -877,6 +1096,15 @@ pub fn run(args: RecvArgs) -> Result<()> {
     };
     match extract::finalize(&s.store, &manifest, s.me.as_ref(), &opts) {
         Ok(outcome) => {
+            // Saved: the sender's camera gets a few seconds to read that
+            // everything arrived, so that it stops by itself.
+            #[cfg(feature = "window")]
+            if let Some(window) = &mut answer
+                && let Some(feedback) = rx.feedback(true)
+            {
+                eprintln!("Everything arrived: showing the sender so for a moment…");
+                window.hold(feedback.encode(), Duration::from_secs(4));
+            }
             let text = match &outcome {
                 Outcome::Text(t) => Some(t.clone()),
                 _ => None,

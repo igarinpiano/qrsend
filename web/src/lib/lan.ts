@@ -792,6 +792,8 @@ export interface ReceiverHooks {
   state(state: "connected" | "closed"): void;
   /** Over what the connection runs: one network, or the internet (known a moment after it is up). */
   path?(path: Path): void;
+  /** An attempt was given up without anything having come back from the sender. */
+  unreached?(): void;
 }
 
 export class LanReceiver {
@@ -905,6 +907,8 @@ export class LanReceiver {
       const was = this.channel;
       this.channel = undefined;
       if (was) this.hooks.state("closed");
+      // (Given up before anything came back: the sender was not reached.)
+      else if (pc.connectionState === "failed") this.hooks.unreached?.();
     });
     pc.ondatachannel = (e) => {
       const channel = e.channel;

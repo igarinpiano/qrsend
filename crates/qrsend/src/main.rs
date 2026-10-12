@@ -5,6 +5,7 @@ mod decode;
 mod devices;
 mod display;
 mod extract;
+mod firewall;
 mod identity;
 mod inbox;
 mod input;
@@ -18,6 +19,7 @@ mod send;
 mod spool;
 mod storage;
 mod store;
+mod twoway;
 mod util;
 
 use anyhow::Result;
@@ -92,6 +94,7 @@ fn main() {
         }
         std::process::exit(1);
     }
+    send::end_if_interrupted();
 }
 
 fn run() -> Result<()> {

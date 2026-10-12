@@ -168,6 +168,21 @@ fn inside(f: &LumaFrame, q: &Quad) -> bool {
 pub struct Lattice {
     size: (usize, usize),
     cells: Vec<(Quad, usize)>,
+    /// How many pixels of the picture a dot of the codes last found took
+    /// (0: none found yet). The sender of a two-way transfer goes by it.
+    dot: f64,
+}
+
+impl Lattice {
+    pub fn dot_px(&self) -> f64 {
+        self.dot
+    }
+}
+
+/// Pixels per dot of a code with corners `q` and `modules` dots a side.
+fn dot_of(q: &Quad, modules: usize) -> f64 {
+    let side = |a: (f64, f64), b: (f64, f64)| (b.0 - a.0).hypot(b.1 - a.1);
+    (side(q[0], q[1]) + side(q[0], q[3])) / 2.0 / modules.max(1) as f64
 }
 
 fn try_lattice(f: &LumaFrame, lattice: &Lattice) -> Option<Vec<String>> {
@@ -196,11 +211,17 @@ pub fn detect_cached(f: &LumaFrame, cache: &std::sync::Mutex<Lattice>) -> Vec<St
         return texts;
     }
     let (texts, cells) = detect_with_cells(f);
-    if cells.len() >= 2 {
-        *cache.lock().unwrap() = Lattice {
-            size: (f.width, f.height),
-            cells,
-        };
+    if let Some((q, modules)) = cells.first() {
+        let dot = dot_of(q, *modules);
+        let mut cache = cache.lock().unwrap();
+        cache.dot = dot;
+        if cells.len() >= 2 {
+            *cache = Lattice {
+                size: (f.width, f.height),
+                cells,
+                dot,
+            };
+        }
     }
     texts
 }
@@ -214,18 +235,31 @@ pub struct ColorWatch {
     seen: AtomicU32,
     /// Pictures in a row whose three colors all held the same codes.
     alike: AtomicU32,
+    /// The sender said so itself (a notice in its stream).
+    told: AtomicBool,
 }
 
 /// How often a picture read in black and white is also taken apart into its
 /// colors, to notice a stream of color codes.
 const COLOR_PROBE_EVERY: u32 = 12;
+/// At the start every picture is taken apart: a short stream read from
+/// files shows each picture once, and what a picture read in black and
+/// white alone held in its other colors would be lost for good.
+const COLOR_PROBE_FIRST: u32 = 12;
 /// This many pictures in a row with the same codes in every color: the
 /// stream is black and white (again).
 const COLOR_OFF_AFTER: u32 = 24;
 
 impl ColorWatch {
     pub fn in_color(&self) -> bool {
-        self.on.load(Ordering::Relaxed)
+        self.on.load(Ordering::Relaxed) || self.told.load(Ordering::Relaxed)
+    }
+
+    /// The sender says whether it stacks codes in colors (PROTOCOL §11.1):
+    /// to a camera that does not keep them apart the pictures do not show
+    /// it, and what they show is gone by otherwise.
+    pub fn told(&self, in_color: bool) {
+        self.told.store(in_color, Ordering::Relaxed);
     }
 }
 
@@ -244,8 +278,9 @@ pub fn detect_picture(
         plain = detect_cached(&p.luma, cache);
         // Brightness is mostly green: a color code often reads as its green
         // layer alone, so codes being found does not settle it.
-        let probe =
-            n.is_multiple_of(COLOR_PROBE_EVERY) || (plain.is_empty() && n.is_multiple_of(3));
+        let probe = n < COLOR_PROBE_FIRST
+            || n.is_multiple_of(COLOR_PROBE_EVERY)
+            || (plain.is_empty() && n.is_multiple_of(3));
         if !probe {
             return plain;
         }

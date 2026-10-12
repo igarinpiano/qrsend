@@ -75,10 +75,25 @@ impl Canvas {
 pub fn png_frames(stream: &mut FrameStream, dir: &Path, count: u64, canvas: Canvas) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     for i in 0..count {
-        let px = canvas.render(stream)?;
-        let img = GrayImage::from_raw(canvas.width as u32, canvas.height as u32, px)
-            .expect("buffer size");
-        img.save(dir.join(format!("frame-{i:06}.png")))?;
+        let name = dir.join(format!("frame-{i:06}.png"));
+        let colors = stream.colors();
+        if colors == 0 {
+            let px = canvas.render(stream)?;
+            let img = GrayImage::from_raw(canvas.width as u32, canvas.height as u32, px)
+                .expect("buffer size");
+            img.save(name)?;
+            continue;
+        }
+        // Color codes: as many codes in every place as there are colors.
+        let layers = colors.count_ones() as usize;
+        let codes = stream.next_matrices(canvas.codes() * layers)?;
+        let (w, h) = (canvas.width, canvas.height);
+        let px = super::paint(&codes, colors, canvas.cols, canvas.rows, w, h)
+            .into_iter()
+            .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, p as u8])
+            .collect();
+        let img = image::RgbImage::from_raw(w as u32, h as u32, px).expect("buffer size");
+        img.save(name)?;
     }
     Ok(())
 }
@@ -190,8 +205,15 @@ pub fn video(
     result
 }
 
-/// Writes `count` frames as text, one per line ("-" = standard output).
-pub fn text(stream: &mut FrameStream, path: &Path, count: u64) -> Result<()> {
+/// Without a count, and without a word from the receiver so far, writing
+/// stops after this many passes: a way back that brings nothing (a file, a
+/// receiver that never started) must not mean writing without end.
+pub const UNANSWERED_PASSES: u64 = 3;
+
+/// Writes frames as text, one per line ("-" = standard output): `count` of
+/// them, or (none) until the receiver reports that it has everything, which
+/// takes a way back from it (`--feedback-from`). Returns how many it wrote.
+pub fn text(stream: &mut FrameStream, path: &Path, count: Option<u64>) -> Result<u64> {
     let mut out: Box<dyn Write> = if path.as_os_str() == "-" {
         Box::new(BufWriter::new(std::io::stdout().lock()))
     } else {
@@ -199,9 +221,33 @@ pub fn text(stream: &mut FrameStream, path: &Path, count: u64) -> Result<()> {
             File::create(path).with_context(|| format!("cannot create {}", path.display()))?,
         ))
     };
-    for _ in 0..count {
-        writeln!(out, "{}", stream.next_text()?)?;
+    let mut written = 0;
+    let unanswered = stream.frames_per_pass().max(1) * UNANSWERED_PASSES;
+    while count.is_none_or(|n| written < n) && !stream.finished() {
+        if count.is_none() && written >= unanswered && !stream.answered() {
+            break;
+        }
+        let line = stream.next_text()?;
+        // With a receiver that answers, a line held back in a buffer is a
+        // line it cannot answer to.
+        let sent = writeln!(out, "{line}").and_then(|()| match count {
+            None => out.flush(),
+            Some(_) => Ok(()),
+        });
+        if let Err(e) = sent {
+            // A receiver that has everything stops reading, and its last
+            // word may still be on its way back.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while count.is_none() && !stream.finished() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            if count.is_none() && stream.finished() {
+                return Ok(written);
+            }
+            return Err(e.into());
+        }
+        written += 1;
     }
     out.flush()?;
-    Ok(())
+    Ok(written)
 }

@@ -133,6 +133,19 @@ pub fn resolve(spec: &str) -> Result<DevicePublic> {
     bail!("no trusted device {spec:?} (known: {})", known.join(", "))
 }
 
+/// Whether an ID given in full (`qrsend-id:…`) is that of a trusted device.
+pub fn is_trusted(id: &str) -> bool {
+    let Ok(given) = DevicePublic::parse(id) else {
+        return false;
+    };
+    devices().is_ok_and(|list| {
+        list.iter().any(|d| {
+            d.public()
+                .is_ok_and(|p| p.fingerprint() == given.fingerprint())
+        })
+    })
+}
+
 /// Name of the trusted device with this signing key, if any.
 pub fn trusted_name(verifying: &[u8; 32]) -> Option<String> {
     devices()
