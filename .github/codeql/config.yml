@@ -1,0 +1,23 @@
+# What CodeQL looks at and with which rules (.github/workflows/security.yml).
+# Everything left out here is left out for a reason written next to it: an
+# alert nobody can act on hides the one that matters.
+name: QRSend
+
+# The browser tests are not shipped and run on a developer's machine or in
+# CI. They keep their working files at a fixed place under the temporary
+# directory (several processes share it), which js/insecure-temporary-file
+# reports for every file written there: 19 alerts on the first run.
+paths-ignore:
+  - web/e2e
+
+query-filters:
+  # The rule takes anything named "session" for a credential. A session here
+  # is the number of a transfer: public, carried unencrypted in every code on
+  # the screen, and printed on purpose ("To resend later: qrsend send
+  # --session …"). Every such line was reported, and every new one would be.
+  # What must not be written anywhere (file names, contents, device IDs,
+  # addresses) is kept out of the logs by the program's own rules and their
+  # tests (crates/qrsend/src/log.rs, web/e2e: "the diagnostic log tells how a
+  # transfer went, not what was in it").
+  - exclude:
+      id: rust/cleartext-logging
