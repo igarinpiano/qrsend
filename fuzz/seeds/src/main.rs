@@ -180,6 +180,7 @@ fn main() {
         port: 40123,
         key: [9; 16],
         addresses: vec!["192.168.1.20".into(), "fd00::1".into()],
+        more: Some([7; 16]),
     };
     write(&root, "codes", "tcp-offer", &offer.to_bytes());
     let parts = link::split(0x51, link::KIND_TCP_OFFER, 1, &offer.to_bytes(), 40).unwrap();

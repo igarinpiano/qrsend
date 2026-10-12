@@ -177,6 +177,15 @@ pub struct SendArgs {
     /// given up along the way). In a window and with --export-frames
     #[arg(long)]
     pub color: bool,
+    /// Forward secrecy: encrypt to the one-time key the receiver shows for
+    /// this transfer as well (`qrsend recv --one-time-key`, or the web
+    /// app's Receive page). The receiver destroys that key once the
+    /// transfer has arrived; after that nobody can read a recording of the
+    /// codes, not even with the receiver's device keys. KEY is the key as
+    /// text (QSK1-…), or `camera` (or `camera:DEVICE`) to read its codes
+    /// off the receiver's screen. Once per receiver that showed one
+    #[arg(long, value_name = "KEY", requires = "to")]
+    pub one_time_key: Vec<String>,
     /// Two-way transfer over whatever carries bytes: read the receiver's
     /// feedback codes as text, one per line, from FILE ("-": standard
     /// input), as `qrsend recv --feedback-to` writes them. With
@@ -338,11 +347,36 @@ pub fn run(args: SendArgs) -> Result<()> {
                  (see `qrsend devices`), or --plain to send unencrypted"
             );
         }
-        let recipients = args
+        let mut recipients = args
             .to
             .iter()
             .map(|t| identity::resolve(t))
             .collect::<Result<Vec<_>>>()?;
+        // The one-time keys the receivers showed, each to its receiver.
+        for given in &args.one_time_key {
+            let key = match given.strip_prefix("camera") {
+                Some(device) if device.is_empty() || device.starts_with(':') => {
+                    let device = match device.strip_prefix(':') {
+                        Some(d) => d.to_string(),
+                        None => crate::input::default_camera().to_string(),
+                    };
+                    eprintln!(
+                        "Point camera {device:?} at the receiver's screen: it shows its one-time key."
+                    );
+                    twoway::read_one_time_key(Input::Camera {
+                        device,
+                        size: None,
+                        fps: None,
+                    })?
+                }
+                _ => qrsend_core::crypto::OneTimeKey::from_text(given)
+                    .context("--one-time-key: not a one-time key (QSK1-…) nor `camera`")?,
+            };
+            let Some(to) = recipients.iter_mut().find(|r| r.once_owner() == key.owner) else {
+                bail!("this one-time key belongs to none of the receivers named with --to");
+            };
+            *to = to.clone().with_once(&key)?;
+        }
         // Whoever is trusted with its older keys only is encrypted to the
         // older way: worth saying, since one step mends it.
         let older: Vec<String> = recipients
@@ -364,6 +398,14 @@ pub fn run(args: SendArgs) -> Result<()> {
                  computer) — for every receiver of it. Have it show its ID again (`qrsend id`) \
                  and add that with `qrsend devices add`.",
                 older.join(", ")
+            );
+        }
+        if secure && let Some(without) = recipients.iter().find(|r| r.once.is_none()) {
+            bail!(
+                "--secure sends with forward secrecy only, and there is no one-time key of {}: \
+                 have it show one (`qrsend recv --secure`, or the web app's Receive page) and \
+                 give it with --one-time-key",
+                util::printable(&without.name)
             );
         }
         // Sign whenever this device has (or, when encrypting, gets) an identity.
@@ -692,9 +734,19 @@ pub fn run(args: SendArgs) -> Result<()> {
     };
     match protection {
         None => eprintln!("Unencrypted: anyone who can see the codes can read this transfer."),
-        Some(qrsend_core::crypto::Protection::PostQuantum) => eprintln!(
-            "Encrypted for: {} · post-quantum protection (X25519 + ML-KEM-768)",
+        Some(qrsend_core::crypto::Protection::ForwardSecret) => eprintln!(
+            "Encrypted for: {} · forward secrecy and post-quantum protection (one-time key, \
+             X25519 + ML-KEM-768)",
             spool.info.recipients.join(", ")
+        ),
+        Some(qrsend_core::crypto::Protection::PostQuantum) => eprintln!(
+            "Encrypted for: {} · post-quantum protection (X25519 + ML-KEM-768){}",
+            spool.info.recipients.join(", "),
+            if args.one_time_key.is_empty() {
+                " · no forward secrecy (no one-time key of the receiver was given)"
+            } else {
+                ""
+            }
         ),
         Some(qrsend_core::crypto::Protection::Older) => eprintln!(
             "Encrypted for: {} · WARNING: the older way only (X25519, no post-quantum protection)",
@@ -706,6 +758,9 @@ pub fn run(args: SendArgs) -> Result<()> {
     });
     stream.set_label(match protection {
         None => "not encrypted",
+        Some(qrsend_core::crypto::Protection::ForwardSecret) => {
+            "encrypted (forward secrecy, post-quantum)"
+        }
         Some(qrsend_core::crypto::Protection::PostQuantum) => "encrypted (post-quantum)",
         Some(qrsend_core::crypto::Protection::Older) => "encrypted the OLDER way only",
     });

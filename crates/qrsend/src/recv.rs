@@ -94,6 +94,14 @@ pub struct RecvArgs {
     /// started with `qrsend send --feedback-from`
     #[arg(long, value_name = "FILE", conflicts_with = "stdout")]
     pub feedback_to: Option<PathBuf>,
+    /// Forward secrecy: before reading, make a one-time key and show it for
+    /// the sender (as text, and as codes for its camera). The sender
+    /// encrypts to it as well (`qrsend send --one-time-key`, or the web
+    /// app's Send page), and this device destroys it once the transfer has
+    /// arrived: after that a recording of the codes cannot be read even
+    /// with this device's keys. A key nobody used is destroyed after a day
+    #[arg(long)]
+    pub one_time_key: bool,
     /// Two-way transfer with a sender that has a camera (the web app with
     /// "Two-way transfer" on, or `qrsend send --two-way`): show feedback
     /// codes in a window for that camera to read. The sender then sends
@@ -189,11 +197,15 @@ pub fn open_meta(
 /// Why `--secure` does not take a transfer, if it does not: it takes
 /// what is encrypted for this device and signed by a device it trusts.
 /// `sender`: who signed, once the file list is open.
-fn refused_as_insecure(p: &SessionParams, sender: Option<&SenderInfo>) -> Option<&'static str> {
+fn refused_as_insecure(
+    p: &SessionParams,
+    sender: Option<&SenderInfo>,
+    protection: Option<crypto::Protection>,
+) -> Option<&'static str> {
     if p.flags & FLAG_ENCRYPTED == 0 {
         return Some("it is not encrypted");
     }
-    match sender {
+    let by_sender = match sender {
         Some(SenderInfo::Unsigned) => Some("it is not signed"),
         Some(SenderInfo::Unverified(_)) => Some("its sender is not a trusted device"),
         Some(SenderInfo::Trusted { pq: false, .. }) => Some(
@@ -201,7 +213,17 @@ fn refused_as_insecure(p: &SessionParams, sender: Option<&SenderInfo>) -> Option
              its ID again, and add that)",
         ),
         Some(SenderInfo::Trusted { pq: true, .. }) | None => None,
+    };
+    if by_sender.is_some() {
+        return by_sender;
     }
+    // (Known with the file list, as the sender is.)
+    if sender.is_some() && protection != Some(crypto::Protection::ForwardSecret) {
+        return Some(
+            "it was not encrypted to the one-time key this device showed (no forward secrecy)",
+        );
+    }
+    None
 }
 
 /// A receive session: the on-disk store plus the decoded manifest.
@@ -223,6 +245,13 @@ impl Session {
         let mut me = identity::load()?;
         if let (true, Some(me)) = (strict, &mut me) {
             me.require_pq();
+        }
+        // The one-time keys shown and not yet done with: what was encrypted
+        // to one of them opens with it.
+        if let Some(me) = &mut me {
+            for (_, secret) in crate::once::pending() {
+                me.hold_once(secret);
+            }
         }
         let mut s = Session {
             store,
@@ -387,8 +416,13 @@ pub fn print_manifest_header(
         say(
             pb,
             match protection {
+                Some(crypto::Protection::ForwardSecret) => {
+                    "Encrypted for this device, with forward secrecy and post-quantum protection \
+                     (one-time key, X25519 + ML-KEM-768)."
+                }
                 Some(crypto::Protection::PostQuantum) => {
-                    "Encrypted for this device, with post-quantum protection (X25519 + ML-KEM-768)."
+                    "Encrypted for this device, with post-quantum protection (X25519 + ML-KEM-768). \
+                     No forward secrecy: the sender was given no one-time key (recv --one-time-key)."
                 }
                 _ => {
                     "Encrypted for this device.\nWARNING: encrypted the older way only (X25519, no \
@@ -474,6 +508,44 @@ fn read_text(path: &std::path::Path, tx: crossbeam_channel::Sender<Vec<String>>)
     Ok(())
 }
 
+/// Makes a one-time key for the transfer to come, keeps its secret half and
+/// shows the other: as text, and (on a terminal) as codes for the sender's
+/// camera.
+fn show_one_time_key() -> Result<()> {
+    use std::io::{BufRead, IsTerminal};
+    let Some(me) = identity::load()? else {
+        bail!(
+            "a one-time key goes with a device ID, and this device has none yet (run `qrsend id`)"
+        );
+    };
+    let (secret, key) = me.new_once()?;
+    crate::once::keep(&secret)?;
+    eprintln!(
+        "One-time key for the sender (forward secrecy; destroyed when the transfer has arrived):"
+    );
+    eprintln!("{}", key.to_text());
+    eprintln!(
+        "Give it to the sender: `qrsend send … --one-time-key <the line above>` (or \
+         `--one-time-key camera`), or the web app's Send page."
+    );
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        return Ok(());
+    }
+    eprint!("Press Enter to show it as codes for the sender's camera (q: the text is enough): ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if answer.trim().eq_ignore_ascii_case("q") {
+        return Ok(());
+    }
+    let codes = key
+        .codes(crate::devices::ID_CODES.capacity_chars())?
+        .iter()
+        .map(|c| qrsend_core::qr::render(c, crate::devices::ID_CODES))
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::devices::show_codes("One-time key", &codes)
+}
+
 pub fn run(args: RecvArgs) -> Result<()> {
     let secure = args.secure;
     if secure {
@@ -482,9 +554,13 @@ pub fn run(args: RecvArgs) -> Result<()> {
             (
                 args.feedback_to.is_some(),
                 "--feedback-to",
-                "it tells the sender nothing",
+                "it tells the sender nothing but its one-time key",
             ),
-            (args.two_way, "--two-way", "it tells the sender nothing"),
+            (
+                args.two_way,
+                "--two-way",
+                "it tells the sender nothing but its one-time key",
+            ),
             (
                 args.keep,
                 "--keep",
@@ -505,6 +581,11 @@ pub fn run(args: RecvArgs) -> Result<()> {
     }
     // (Nothing is taken from the network that way, nor asked of it.)
     let no_lan = args.no_lan || secure;
+    // Forward secrecy starts here: the sender has to be shown the key
+    // before it packs. The strictest way takes nothing without it.
+    if args.one_time_key || secure {
+        show_one_time_key()?;
+    }
     // Refuses a transfer that `--secure` does not take, and forgets
     // what was stored of it.
     let refuse = |why: &str, store: Option<&Store>| -> anyhow::Error {
@@ -770,14 +851,15 @@ pub fn run(args: RecvArgs) -> Result<()> {
                                 p.flags & qrsend_core::frame::FLAG_ENCRYPTED != 0
                             )
                         });
-                        if secure && let Some(why) = refused_as_insecure(&p, None) {
+                        if secure && let Some(why) = refused_as_insecure(&p, None, None) {
                             pb.finish_and_clear();
                             return Err(refuse(why, None));
                         }
                         let s = Session::open_as(Store::open_or_create(p)?, secure)?;
                         if secure
                             && s.manifest.is_some()
-                            && let Some(why) = refused_as_insecure(&p, Some(&s.sender))
+                            && let Some(why) =
+                                refused_as_insecure(&p, Some(&s.sender), protection(&s.store))
                         {
                             pb.finish_and_clear();
                             return Err(refuse(why, Some(&s.store)));
@@ -838,8 +920,11 @@ pub fn run(args: RecvArgs) -> Result<()> {
                                         protection(&s.store),
                                     );
                                     if secure
-                                        && let Some(why) =
-                                            refused_as_insecure(&s.store.params(), Some(&s.sender))
+                                        && let Some(why) = refused_as_insecure(
+                                            &s.store.params(),
+                                            Some(&s.sender),
+                                            protection(&s.store),
+                                        )
                                     {
                                         pb.finish_and_clear();
                                         return Err(refuse(why, Some(&s.store)));
@@ -1195,7 +1280,20 @@ pub fn run(args: RecvArgs) -> Result<()> {
             if args.keep {
                 eprintln!("Kept in the inbox as {}.", session_hex(id));
             } else {
+                // Saved, and nothing of it kept: the one-time key it was
+                // encrypted to is of no use any more, and from here on
+                // nothing on this machine opens the transfer as it was sent.
+                let used = s
+                    .store
+                    .meta_bytes()
+                    .map(|meta| crypto::once_used(&meta))
+                    .unwrap_or_default();
                 s.store.remove()?;
+                if !used.is_empty() {
+                    crate::once::destroy(&used);
+                    log::line("rx", || "one-time key destroyed".into());
+                    eprintln!("The one-time key of this transfer is destroyed.");
+                }
             }
             Ok(())
         }

@@ -219,7 +219,7 @@ pub const UNANSWERED_PASSES: u64 = 3;
 /// before the first report could arrive, and would bury a receiver that
 /// does answer under frames it no longer needs. It is a pause, not a
 /// condition: when nothing comes, sending goes on.
-const FIRST_WORD: Duration = Duration::from_secs(2);
+const FIRST_WORD: Duration = Duration::from_secs(4);
 const NEXT_WORD: Duration = Duration::from_millis(200);
 
 /// Writes frames as text, one per line ("-" = standard output): `count` of

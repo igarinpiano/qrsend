@@ -71,6 +71,21 @@ impl Drop for Env {
     }
 }
 
+/// The one-time key a device shows before a transfer (forward secrecy): it
+/// is made and kept when the device starts to receive, here from nothing.
+fn one_time_key(env: &Env, device: &str) -> String {
+    fs::create_dir_all(env.path("nothing")).unwrap();
+    image::GrayImage::from_pixel(64, 64, image::Luma([255]))
+        .save(env.path("nothing/blank.png"))
+        .unwrap();
+    let out = env.run_as(device, &["recv", "--one-time-key", "--images", "nothing"]);
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .find(|l| l.starts_with("QSK1-"))
+        .expect("a one-time key")
+        .to_string()
+}
+
 fn noise(len: usize) -> Vec<u8> {
     let mut x = 0x9E37_79B9_7F4A_7C15u64;
     (0..len)
@@ -351,11 +366,13 @@ fn post_quantum_keys_come_to_a_device_that_had_none() {
         "{listed}"
     );
     assert!(!send("new").contains("older way"));
-    assert_eq!(
-        env.ok_as("bob", &["recv", "--secure", "--images", "new"])
-            .trim_end(),
-        "for bob"
+    let out = env.run_as("bob", &["recv", "--images", "new"]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        said.contains("with post-quantum protection") && said.contains("No forward secrecy"),
+        "{said}"
     );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), "for bob");
     // The older ID once more adds nothing, and says so.
     let out = env.run_as("alice", &["devices", "add", &bob_classic, "--yes"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("adds nothing"));
@@ -1250,6 +1267,10 @@ fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {
         (&[][..], "encrypted transfers only"),
         (&["--to", "bob", "--lan"][..], "nothing through the network"),
         (
+            &["--to", "bob", "--one-time-key", "QSK1-NOT-A-KEY"][..],
+            "not a one-time key",
+        ),
+        (
             &["--to", "bob", "--two-way"][..],
             "takes nothing in from the receiver",
         ),
@@ -1268,6 +1289,23 @@ fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {
             why,
         );
     }
+    // Without the receiver's one-time key there is no forward secrecy, and
+    // the strictest way does not send without it.
+    refused(
+        "alice",
+        &[
+            "send",
+            "--secure",
+            "--to",
+            "bob",
+            "--text",
+            "x",
+            "--export-frames",
+            "no",
+        ],
+        "forward secrecy only",
+    );
+    let key = one_time_key(&env, "bob");
     let out = env.run_as(
         "alice",
         &[
@@ -1275,6 +1313,8 @@ fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {
             "--secure",
             "--to",
             &bob,
+            "--one-time-key",
+            &key,
             "--text",
             "for bob",
             "--export-frames",
@@ -1286,6 +1326,10 @@ fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {
         out.status.success() && said.contains("Not kept (--secure)"),
         "{said}"
     );
+    assert!(
+        said.contains("forward secrecy and post-quantum protection"),
+        "{said}"
+    );
     // Neither the packed transfer nor a log stays behind.
     assert!(
         env.ok_as("alice", &["cache", "list"])
@@ -1293,21 +1337,53 @@ fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {
     );
     assert!(!env.path("alice/cache/logs").exists());
 
-    // Receiving: from a trusted device, encrypted for this one; and no log.
+    // Receiving: from a trusted device, encrypted for this one and to its
+    // one-time key; and no log. Afterwards the key is destroyed: the same
+    // codes, recorded, open no more, even on bob's own machine.
+    let logs = || fs::read_dir(env.path("bob/cache/logs")).map_or(0, |d| d.count());
+    let logs_before = logs();
+    let out = env.run_as("bob", &["recv", "--secure", "--images", "f"]);
+    assert_eq!(logs(), logs_before);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
     assert_eq!(
-        env.ok_as("bob", &["recv", "--secure", "--images", "f"])
-            .trim_end(),
-        "for bob"
+        String::from_utf8_lossy(&out.stdout).trim_end(),
+        "for bob",
+        "{said}"
     );
-    assert!(!env.path("bob/cache/logs").exists());
+    assert!(
+        said.contains("with forward secrecy") && said.contains("is destroyed"),
+        "{said}"
+    );
+    let again = env.run_as("bob", &["recv", "--images", "f"]);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("encrypted for another device"));
+    env.ok_as("bob", &["storage", "clean", "--inbox", "--yes"]);
+    // What was encrypted to bob's lasting keys alone is not taken that way.
+    env.ok_as(
+        "alice",
+        &[
+            "send",
+            "--to",
+            "bob",
+            "--text",
+            "no one-time key",
+            "--export-frames",
+            "plainer",
+        ],
+    );
+    refused(
+        "bob",
+        &["recv", "--secure", "--images", "plainer"],
+        "no forward secrecy",
+    );
     for (option, why) in [
         (&["--keep"][..], "keeps nothing in the inbox"),
         (&["--copy"][..], "clipboard"),
         (
             &["--feedback-to", "back.txt"][..],
-            "tells the sender nothing",
+            "tells the sender nothing but",
         ),
-        (&["--two-way"][..], "tells the sender nothing"),
+        (&["--two-way"][..], "tells the sender nothing but"),
         (&["--log", "log.txt"][..], "keeps no log"),
     ] {
         let args: Vec<&str> = ["recv", "--secure", "--images", "f"]
@@ -1320,6 +1396,7 @@ fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {
     // A transfer that stops halfway leaves nothing behind either: without
     // the option what arrived is kept and can be added to, with it not.
     fs::write(env.path("more.bin"), noise(300_000)).unwrap();
+    let key = one_time_key(&env, "bob");
     env.ok_as(
         "alice",
         &[
@@ -1327,6 +1404,8 @@ fn secure_takes_and_sends_only_what_is_encrypted_between_trusted_devices() {
             "more.bin",
             "--to",
             "bob",
+            "--one-time-key",
+            &key,
             "--seg-shift",
             "16",
             "--export-frames",

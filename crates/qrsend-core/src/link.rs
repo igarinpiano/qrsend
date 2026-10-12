@@ -31,6 +31,10 @@ pub const KIND_SEEDED_OFFER: u8 = 6;
 /// for one code that reads well (PROTOCOL §9.1). `session_id` is 0.
 pub const KIND_DEVICE_ID: u8 = 7;
 
+/// A receiver's one-time key for the transfer to come (forward secrecy,
+/// PROTOCOL §9.2), in parts like a device ID. `session_id` is 0.
+pub const KIND_ONE_TIME_KEY: u8 = 8;
+
 const HEADER_LEN: usize = 8;
 const CHECK_LEN: usize = 2;
 
@@ -185,6 +189,20 @@ pub struct TcpOffer {
     pub key: [u8; 16],
     /// Addresses to try, as text (IPv4 or IPv6).
     pub addresses: Vec<String>,
+    /// The second half of the key: with it the connection is keyed with
+    /// 256 bits. It comes last, where versions from before it read no
+    /// further: they go by the first half alone (and the sender, noticing,
+    /// does the same and says so). None: an offer of such a version.
+    pub more: Option<[u8; 16]>,
+}
+
+impl TcpOffer {
+    /// The key to the connection: both halves, or the one there is.
+    pub fn whole_key(&self) -> Vec<u8> {
+        let mut key = self.key.to_vec();
+        key.extend_from_slice(self.more.as_ref().map_or(&[][..], |m| &m[..]));
+        key
+    }
 }
 
 impl TcpOffer {
@@ -196,6 +214,7 @@ impl TcpOffer {
             out.push(a.len() as u8);
             out.extend_from_slice(a.as_bytes());
         }
+        out.extend_from_slice(self.more.as_ref().map_or(&[][..], |m| &m[..]));
         out
     }
 
@@ -215,10 +234,12 @@ impl TcpOffer {
             let a = std::str::from_utf8(take(len)?).map_err(|_| LinkError::Malformed)?;
             addresses.push(a.to_string());
         }
+        let more = take(16).ok().map(|m| m.try_into().unwrap());
         Ok(TcpOffer {
             port,
             key,
             addresses,
+            more,
         })
     }
 }
@@ -233,7 +254,21 @@ mod tests {
             port: 40123,
             key: [7; 16],
             addresses: vec!["192.168.1.20".into(), "fd00::1".into()],
+            more: Some([8; 16]),
         };
+        // A version from before the second half of the key wrote none, and
+        // reading stops where it stopped: both read each other's offers.
+        let before = TcpOffer {
+            more: None,
+            ..offer.clone()
+        };
+        assert_eq!(TcpOffer::from_bytes(&before.to_bytes()).unwrap(), before);
+        assert_eq!(
+            offer.to_bytes()[..before.to_bytes().len()],
+            before.to_bytes()[..]
+        );
+        assert_eq!(offer.whole_key().len(), 32);
+        assert_eq!(before.whole_key(), [7; 16]);
         let codes = split(5, KIND_TCP_OFFER, 1, &offer.to_bytes(), 40).unwrap();
         assert!(codes.len() > 2);
         let mut a = Assembler::default();

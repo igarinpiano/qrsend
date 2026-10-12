@@ -49,6 +49,96 @@ impl std::fmt::Debug for PqPublic {
     }
 }
 
+/// The tag of the stanza for a recipient that also showed a one-time key
+/// (forward secrecy): the file key is wrapped with the device's lasting
+/// keys and with the one-time ones, and takes both to open.
+pub const STANZA_TAG_ONCE: &str = "qrsend-pq2";
+const COMBINER_LABEL_ONCE: &[u8] = b"qrsend-pq2 x25519+mlkem768, lasting+one-time";
+/// Bytes of a one-time key's public and secret halves.
+pub const ONCE_PUBLIC: usize = 32 + KEM_PUBLIC;
+pub const ONCE_SECRET: usize = 32 + KEM_SEED;
+
+/// The public half of a one-time key: an X25519 key and an ML-KEM-768 key
+/// made for one transfer and thrown away after it. What was encrypted to
+/// them cannot be read any more once they are gone, even by whoever later
+/// gets hold of the device's lasting keys.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OncePublic {
+    pub x25519: [u8; 32],
+    pub kem: Vec<u8>,
+}
+
+impl OncePublic {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        [&self.x25519[..], &self.kem[..]].concat()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<OncePublic> {
+        if bytes.len() != ONCE_PUBLIC {
+            return None;
+        }
+        let (x25519, kem) = bytes.split_at(32);
+        let ek = encapsulation_key(kem)?;
+        (ek.as_bytes().as_slice() == kem).then(|| OncePublic {
+            x25519: x25519.try_into().unwrap(),
+            kem: kem.to_vec(),
+        })
+    }
+
+    /// What a stanza names the key by.
+    pub fn id(&self) -> [u8; 8] {
+        blake3::hash(&self.to_bytes()).as_bytes()[..8]
+            .try_into()
+            .unwrap()
+    }
+}
+
+/// The secret half of a one-time key, as the bytes it grows from.
+#[derive(Clone)]
+pub struct OnceSecret {
+    pub x25519: [u8; 32],
+    pub kem_seed: [u8; KEM_SEED],
+}
+
+impl OnceSecret {
+    pub fn generate() -> Result<OnceSecret, getrandom::Error> {
+        let mut secret = OnceSecret {
+            x25519: [0; 32],
+            kem_seed: [0; KEM_SEED],
+        };
+        getrandom::getrandom(&mut secret.x25519)?;
+        getrandom::getrandom(&mut secret.kem_seed)?;
+        Ok(secret)
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        [&self.x25519[..], &self.kem_seed[..]].concat()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<OnceSecret> {
+        let (x25519, kem_seed) = bytes.split_at_checked(32)?;
+        Some(OnceSecret {
+            x25519: x25519.try_into().ok()?,
+            kem_seed: kem_seed.try_into().ok()?,
+        })
+    }
+
+    fn kem(&self) -> (Dk, Ek) {
+        PqSecret {
+            kem_seed: self.kem_seed,
+            sig_seed: [0; SIG_SEED],
+        }
+        .kem()
+    }
+
+    pub fn public(&self) -> OncePublic {
+        OncePublic {
+            x25519: PublicKey::from(&StaticSecret::from(self.x25519)).to_bytes(),
+            kem: self.kem().1.as_bytes().to_vec(),
+        }
+    }
+}
+
 /// The post-quantum public keys of a device.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PqPublic {
@@ -167,6 +257,8 @@ fn wrap_key(
 pub struct HybridRecipient {
     x25519: [u8; 32],
     kem: Ek,
+    /// The one-time key it showed for this transfer, if it did.
+    once: Option<(OncePublic, Ek)>,
 }
 
 impl HybridRecipient {
@@ -175,7 +267,14 @@ impl HybridRecipient {
         Some(HybridRecipient {
             x25519,
             kem: encapsulation_key(&pq.kem)?,
+            once: None,
         })
+    }
+
+    /// With forward secrecy: the file key takes the one-time key as well.
+    pub fn with_once(mut self, once: &OncePublic) -> Option<HybridRecipient> {
+        self.once = Some((once.clone(), encapsulation_key(&once.kem)?));
+        Some(self)
     }
 }
 
@@ -185,29 +284,57 @@ impl age::Recipient for HybridRecipient {
         file_key: &FileKey,
     ) -> Result<(Vec<Stanza>, HashSet<String>), age::EncryptError> {
         let failed = |what: &str| age::EncryptError::Io(std::io::Error::other(what.to_string()));
-        let mut random = [0u8; 64];
+        let mut random = [0u8; 96];
         getrandom::getrandom(&mut random).map_err(|_| failed("no randomness"))?;
-        let (for_x, for_kem) = random.split_at(32);
-        let ephemeral = StaticSecret::from(<[u8; 32]>::try_from(for_x).unwrap());
+        let ephemeral = StaticSecret::from(<[u8; 32]>::try_from(&random[..32]).unwrap());
         let ephemeral_public = PublicKey::from(&ephemeral).to_bytes();
-        let ss_x = ephemeral.diffie_hellman(&PublicKey::from(self.x25519));
         // (A key that is no point of the curve at all gives nothing to
         // agree on.)
-        if !ss_x.was_contributory() {
-            return Err(failed("the recipient's X25519 key is not usable"));
-        }
-        let message: [u8; 32] = for_kem.try_into().unwrap();
-        let (ciphertext, ss_kem) = self
-            .kem
-            .encapsulate_deterministic(&message.into())
-            .map_err(|_| failed("ML-KEM"))?;
-        let key = wrap_key(&ss_kem, ss_x.as_bytes(), &ephemeral_public, &self.x25519);
+        let agree = |with: &[u8; 32]| {
+            let shared = ephemeral.diffie_hellman(&PublicKey::from(*with));
+            shared
+                .was_contributory()
+                .then(|| shared.to_bytes())
+                .ok_or_else(|| failed("the recipient's X25519 key is not usable"))
+        };
+        let encapsulate = |to: &Ek, random: &[u8]| {
+            let message: [u8; 32] = random.try_into().unwrap();
+            to.encapsulate_deterministic(&message.into())
+                .map_err(|_| failed("ML-KEM"))
+        };
+        let ss_x = agree(&self.x25519)?;
+        let (ciphertext, ss_kem) = encapsulate(&self.kem, &random[32..64])?;
         let mut body = ciphertext.to_vec();
+        let (tag, args, key) = match &self.once {
+            None => (
+                STANZA_TAG,
+                vec![STANDARD_NO_PAD.encode(ephemeral_public)],
+                wrap_key(&ss_kem, &ss_x, &ephemeral_public, &self.x25519),
+            ),
+            Some((once, once_kem)) => {
+                let once_x = agree(&once.x25519)?;
+                let (once_ciphertext, once_ss) = encapsulate(once_kem, &random[64..])?;
+                body.extend_from_slice(&once_ciphertext);
+                (
+                    STANZA_TAG_ONCE,
+                    vec![
+                        STANDARD_NO_PAD.encode(ephemeral_public),
+                        STANDARD_NO_PAD.encode(once.id()),
+                    ],
+                    wrap_key_once(
+                        &wrap_key(&ss_kem, &ss_x, &ephemeral_public, &self.x25519),
+                        &once_ss,
+                        &once_x,
+                        &once.x25519,
+                    ),
+                )
+            }
+        };
         body.extend_from_slice(&aead_encrypt(&key, file_key.expose_secret()));
         Ok((
             vec![Stanza {
-                tag: STANZA_TAG.to_owned(),
-                args: vec![STANDARD_NO_PAD.encode(ephemeral_public)],
+                tag: tag.to_owned(),
+                args,
                 body,
             }],
             HashSet::new(),
@@ -215,12 +342,44 @@ impl age::Recipient for HybridRecipient {
     }
 }
 
-/// The ephemeral X25519 key of a hybrid stanza, if `stanza` is one.
-pub fn stanza_ephemeral(stanza: &Stanza) -> Option<[u8; 32]> {
-    if stanza.tag != STANZA_TAG || stanza.args.len() != 1 {
+/// The key that wraps a file key for a recipient with a one-time key: the
+/// key for its lasting keys (see `wrap_key`), and what was agreed with the
+/// one-time ones. Whoever lacks either cannot make it.
+fn wrap_key_once(
+    lasting: &[u8; 32],
+    ss_kem: &[u8],
+    ss_x: &[u8; 32],
+    once_x: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(lasting);
+    h.update(ss_kem);
+    h.update(ss_x);
+    h.update(once_x);
+    h.update(COMBINER_LABEL_ONCE);
+    h.finalize().into()
+}
+
+/// The one-time key a stanza was made for (its name), if it is of that kind.
+pub fn stanza_once(stanza: &Stanza) -> Option<[u8; 8]> {
+    if stanza.tag != STANZA_TAG_ONCE || stanza.args.len() != 2 {
         return None;
     }
-    if stanza.body.len() != KEM_CIPHERTEXT + FILE_KEY_BYTES + 16 {
+    STANDARD_NO_PAD
+        .decode(&stanza.args[1])
+        .ok()?
+        .try_into()
+        .ok()
+}
+
+/// The ephemeral X25519 key of a hybrid stanza, if `stanza` is one.
+pub fn stanza_ephemeral(stanza: &Stanza) -> Option<[u8; 32]> {
+    let ciphertexts = match (stanza.tag.as_str(), stanza.args.len()) {
+        (STANZA_TAG, 1) => 1,
+        (STANZA_TAG_ONCE, 2) => 2,
+        _ => return None,
+    };
+    if stanza.body.len() != ciphertexts * KEM_CIPHERTEXT + FILE_KEY_BYTES + 16 {
         return None;
     }
     STANDARD_NO_PAD
@@ -241,14 +400,28 @@ pub fn open_stanza(
     ss_x: &[u8; 32],
     recipient: &[u8; 32],
     secret: &PqSecret,
+    once: &[OnceSecret],
 ) -> Option<FileKey> {
     let ephemeral = stanza_ephemeral(stanza)?;
-    let (ciphertext, wrapped) = stanza.body.split_at(KEM_CIPHERTEXT);
-    let ciphertext = ml_kem::Ciphertext::<MlKem768>::try_from(ciphertext).ok()?;
-    // (ML-KEM never fails to give a secret: for a ciphertext made for
-    // another key it gives one that opens nothing.)
-    let ss_kem = secret.kem().0.decapsulate(&ciphertext).ok()?;
-    let key = wrap_key(&ss_kem, ss_x, &ephemeral, recipient);
+    let decapsulate = |dk: &Dk, ciphertext: &[u8]| {
+        let ciphertext = ml_kem::Ciphertext::<MlKem768>::try_from(ciphertext).ok()?;
+        // (ML-KEM never fails to give a secret: for a ciphertext made for
+        // another key it gives one that opens nothing.)
+        dk.decapsulate(&ciphertext).ok()
+    };
+    let (ciphertext, rest) = stanza.body.split_at(KEM_CIPHERTEXT);
+    let ss_kem = decapsulate(&secret.kem().0, ciphertext)?;
+    let mut key = wrap_key(&ss_kem, ss_x, &ephemeral, recipient);
+    let mut wrapped = rest;
+    // Made for a one-time key as well: one of those held here, or none.
+    if let Some(id) = stanza_once(stanza) {
+        let once = once.iter().find(|o| o.public().id() == id)?;
+        let (ciphertext, rest) = rest.split_at(KEM_CIPHERTEXT);
+        let once_ss = decapsulate(&once.kem().0, ciphertext)?;
+        let once_x = StaticSecret::from(once.x25519).diffie_hellman(&PublicKey::from(ephemeral));
+        key = wrap_key_once(&key, &once_ss, once_x.as_bytes(), &once.public().x25519);
+        wrapped = rest;
+    }
     let opened = aead_decrypt(&key, FILE_KEY_BYTES, wrapped).ok()?;
     Some(FileKey::init_with_mut(|key| key.copy_from_slice(&opened)))
 }
@@ -258,6 +431,8 @@ pub fn open_stanza(
 pub struct HybridIdentity {
     x25519: StaticSecret,
     secret: PqSecret,
+    /// The one-time keys shown and not yet done with.
+    pub once: Vec<OnceSecret>,
 }
 
 impl HybridIdentity {
@@ -265,6 +440,7 @@ impl HybridIdentity {
         HybridIdentity {
             x25519: StaticSecret::from(x25519_secret),
             secret,
+            once: Vec::new(),
         }
     }
 }
@@ -274,7 +450,14 @@ impl age::Identity for HybridIdentity {
         let ephemeral = stanza_ephemeral(stanza)?;
         let ss_x = self.x25519.diffie_hellman(&PublicKey::from(ephemeral));
         let recipient = PublicKey::from(&self.x25519).to_bytes();
-        open_stanza(stanza, ss_x.as_bytes(), &recipient, &self.secret).map(Ok)
+        open_stanza(
+            stanza,
+            ss_x.as_bytes(),
+            &recipient,
+            &self.secret,
+            &self.once,
+        )
+        .map(Ok)
     }
 }
 
@@ -359,6 +542,59 @@ mod tests {
         let mut short = copy(&stanzas[0]);
         short.body.pop();
         assert!(own.unwrap_stanza(&short).is_none());
+    }
+
+    /// Forward secrecy: with a one-time key, the file key takes the lasting
+    /// keys and the one-time ones; once those are gone, nothing opens it.
+    #[test]
+    fn a_one_time_key_is_needed_beside_the_lasting_ones_and_then_gone() {
+        let (x, x_public, secret) = device();
+        let once = OnceSecret::generate().unwrap();
+        let shown = once.public();
+        assert_eq!(shown.to_bytes().len(), ONCE_PUBLIC);
+        assert_eq!(
+            OncePublic::from_bytes(&shown.to_bytes()).unwrap().id(),
+            shown.id()
+        );
+        assert_eq!(
+            OnceSecret::from_bytes(&once.to_bytes())
+                .unwrap()
+                .public()
+                .id(),
+            shown.id()
+        );
+        let key = file_key();
+        let to = HybridRecipient::new(x_public, &secret.public())
+            .unwrap()
+            .with_once(&shown)
+            .unwrap();
+        let stanza = to.wrap_file_key(&key).unwrap().0.remove(0);
+        assert_eq!(stanza.tag, STANZA_TAG_ONCE);
+        assert_eq!(stanza.body.len(), 2 * KEM_CIPHERTEXT + 32);
+        assert_eq!(stanza_once(&stanza), Some(shown.id()));
+
+        let mut own = HybridIdentity::new(x, secret.clone());
+        // The lasting keys alone (all that is left afterwards): nothing.
+        assert!(own.unwrap_stanza(&stanza).is_none());
+        // Another one-time key: nothing.
+        own.once.push(OnceSecret::generate().unwrap());
+        assert!(own.unwrap_stanza(&stanza).is_none());
+        // The one it was made for: the file key.
+        own.once.push(once.clone());
+        let opened = own.unwrap_stanza(&stanza).unwrap().unwrap();
+        assert_eq!(opened.expose_secret(), key.expose_secret());
+        // The one-time key with another device's lasting keys: nothing
+        // (whoever copied the key off the screen gains nothing by it).
+        let (other_x, _, other_secret) = device();
+        let mut thief = HybridIdentity::new(other_x, other_secret);
+        thief.once.push(once);
+        assert!(thief.unwrap_stanza(&stanza).is_none());
+        // Changed anywhere: not opened.
+        for at in [0, KEM_CIPHERTEXT, 2 * KEM_CIPHERTEXT + 5] {
+            let mut damaged = copy(&stanza);
+            damaged.body[at] ^= 1;
+            assert!(own.unwrap_stanza(&damaged).is_none(), "{at}");
+        }
     }
 
     #[test]

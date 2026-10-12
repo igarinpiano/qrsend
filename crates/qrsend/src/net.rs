@@ -88,24 +88,36 @@ impl Seal {
     /// `None` when the other side closed the connection. Records longer than
     /// `max` are refused before anything is allocated for them.
     fn read(&mut self, from: &mut impl Read, max: usize) -> Result<Option<Vec<u8>>> {
-        let mut len = [0u8; 4];
-        match from.read_exact(&mut len) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
+        match sealed_record(from, max)? {
+            Some(sealed) => self.open(&sealed).map(Some),
+            None => Ok(None),
         }
-        let len = u32::from_le_bytes(len) as usize;
-        if len > max {
-            bail!("the connection carries something else than a QRSend transfer");
-        }
-        let mut sealed = vec![0u8; len];
-        from.read_exact(&mut sealed)?;
+    }
+
+    /// Opens the next record of the connection.
+    fn open(&mut self, sealed: &[u8]) -> Result<Vec<u8>> {
         let nonce = self.nonce();
         self.cipher
-            .decrypt(&nonce, &sealed[..])
-            .map(Some)
+            .decrypt(&nonce, sealed)
             .map_err(|_| anyhow::anyhow!("the other side does not have the key from the code"))
     }
+}
+
+/// The next record as it is on the connection, still sealed.
+fn sealed_record(from: &mut impl Read, max: usize) -> Result<Option<Vec<u8>>> {
+    let mut len = [0u8; 4];
+    match from.read_exact(&mut len) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    let len = u32::from_le_bytes(len) as usize;
+    if len > max {
+        bail!("the connection carries something else than a QRSend transfer");
+    }
+    let mut sealed = vec![0u8; len];
+    from.read_exact(&mut sealed)?;
+    Ok(Some(sealed))
 }
 
 /// Reads from a connection with one time limit for everything read through
@@ -142,15 +154,37 @@ impl Read for Deadline<'_> {
 
 /// Keys for the two directions, from the key in the code and what each side
 /// contributed to this connection (so no two connections share keys).
-fn seals(key: &[u8; 16], from_receiver: &[u8; 16], from_sender: &[u8; 16]) -> (Seal, Seal) {
+///
+/// `key`: 32 bytes from a current offer, or the 16 that versions before
+/// 0.1.11 know (of their own offers, or the first half of a current one).
+/// The two never give the same keys, whatever the bytes.
+fn seals(key: &[u8], from_receiver: &[u8; 16], from_sender: &[u8; 16]) -> (Seal, Seal) {
     let mut material = key.to_vec();
     material.extend_from_slice(from_receiver);
     material.extend_from_slice(from_sender);
     let derive = |context| Seal::new(blake3::derive_key(context, &material));
-    (
-        derive("qrsend 0.1.3 tcp: sender to receiver"),
-        derive("qrsend 0.1.3 tcp: receiver to sender"),
-    )
+    match key.len() {
+        16 => (
+            derive("qrsend 0.1.3 tcp: sender to receiver"),
+            derive("qrsend 0.1.3 tcp: receiver to sender"),
+        ),
+        _ => (
+            derive("qrsend 0.1.11 tcp, 256-bit key: sender to receiver"),
+            derive("qrsend 0.1.11 tcp, 256-bit key: receiver to sender"),
+        ),
+    }
+}
+
+/// Said once, on the terminal and in the log, by the side that notices: the
+/// other side is a version that knows the shorter key only.
+fn warn_short_key(who: &str) {
+    log::line("link", || {
+        "TCP: 128-bit key (the other side is an older version)".into()
+    });
+    eprintln!(
+        "WARNING: {who} is an older version of qrsend: this network connection is keyed with \
+         128 bits instead of 256. (What is encrypted for a device stays encrypted as it is.)"
+    );
 }
 
 // ------------------------------------------------------------------ sender
@@ -282,6 +316,7 @@ pub fn listen(address: Option<&str>, port: u16) -> Result<(TcpListener, TcpOffer
         port: listener.local_addr()?.port(),
         key: rand::random(),
         addresses: addresses.into_iter().take(4).collect(),
+        more: Some(rand::random()),
     };
     Ok((listener, offer))
 }
@@ -315,7 +350,7 @@ pub fn serve<S, F>(
 {
     let (proven_tx, proven) = bounded::<Proven>(MAX_HANDSHAKES);
     let session_id = layout.session_id;
-    let key = offer.key;
+    let key = offer.whole_key();
     thread::spawn(move || {
         let busy = Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming() {
@@ -324,7 +359,7 @@ pub fn serve<S, F>(
                 continue;
             }
             busy.fetch_add(1, Ordering::SeqCst);
-            let (busy, proven_tx) = (busy.clone(), proven_tx.clone());
+            let (busy, proven_tx, key) = (busy.clone(), proven_tx.clone(), key.clone());
             thread::spawn(move || {
                 // (An error: someone without the key, or something else entirely.)
                 let shook = handshake(stream, &key, session_id);
@@ -339,6 +374,9 @@ pub fn serve<S, F>(
         let mut last: Option<Feedback> = None;
         for p in proven {
             let Ok(source) = source() else { return };
+            if p.short_key {
+                warn_short_key("the receiver");
+            }
             let direct = DirectSender::new(layout, source, last.as_ref());
             let feedback = serve_one(p, direct, &events).unwrap_or(None);
             let _ = events.send(LinkEvent::Down);
@@ -356,10 +394,16 @@ struct Proven {
     stream: TcpStream,
     to_receiver: Seal,
     to_sender: Seal,
+    /// The receiver knew the first half of the key only (an older version).
+    short_key: bool,
 }
 
 /// The sender's side of the handshake.
-fn handshake(stream: TcpStream, key: &[u8; 16], session_id: u32) -> Result<Proven> {
+///
+/// `key`: the whole key of the offer. A receiver from before 256-bit keys
+/// knows its first 16 bytes only and greets with those: it is answered in
+/// kind, with a warning (`Proven::short_key`).
+fn handshake(stream: TcpStream, key: &[u8], session_id: u32) -> Result<Proven> {
     // (A system firewall may hand over a connection it has already cut:
     // every call on it then fails, and the next one is waited for.)
     stream.set_nodelay(true)?;
@@ -373,16 +417,25 @@ fn handshake(stream: TcpStream, key: &[u8; 16], session_id: u32) -> Result<Prove
     let from_receiver: [u8; 16] = hello[MAGIC.len() + 4..].try_into().unwrap();
     let from_sender: [u8; 16] = rand::random();
     (&stream).write_all(&from_sender)?;
-    let (to_receiver, mut to_sender) = seals(key, &from_receiver, &from_sender);
-    // Nothing is sent before the receiver has shown that it knows the key.
-    if to_sender.read(&mut within, MAX_GREETING)?.as_deref() != Some(HELLO.as_bytes()) {
-        bail!("no greeting");
-    }
+    // Nothing is sent before the receiver has shown that it knows the key:
+    // all of it, or (an older version) its first half.
+    let greeting = sealed_record(&mut within, MAX_GREETING)?.context("no greeting")?;
+    let greeted = |key: &[u8]| {
+        let (to_receiver, mut to_sender) = seals(key, &from_receiver, &from_sender);
+        let hello = to_sender.open(&greeting).ok()?;
+        (hello == HELLO.as_bytes()).then_some((to_receiver, to_sender))
+    };
+    let (seals, short_key) = match greeted(key) {
+        Some(seals) => (seals, false),
+        None if key.len() > 16 => (greeted(&key[..16]).context("no greeting")?, true),
+        None => bail!("no greeting"),
+    };
     stream.set_read_timeout(None)?;
     Ok(Proven {
         stream,
-        to_receiver,
-        to_sender,
+        to_receiver: seals.0,
+        to_sender: seals.1,
+        short_key,
     })
 }
 
@@ -396,6 +449,7 @@ fn serve_one<S: SegmentSource + Send + 'static>(
         mut stream,
         mut to_receiver,
         mut to_sender,
+        ..
     } = proven;
     if let (Ok(own), Ok(other)) = (stream.local_addr(), stream.peer_addr()) {
         log::line("link", || {
@@ -528,7 +582,11 @@ pub fn connect(offer: TcpOffer, session_id: u32) -> Link {
             let mut from_sender = [0u8; 16];
             Deadline::new(&stream, HANDSHAKE_TIMEOUT).read_exact(&mut from_sender)?;
             stream.set_read_timeout(None)?;
-            let (mut to_receiver, mut to_sender) = seals(&offer.key, &from_receiver, &from_sender);
+            if offer.more.is_none() {
+                warn_short_key("the sender");
+            }
+            let (mut to_receiver, mut to_sender) =
+                seals(&offer.whole_key(), &from_receiver, &from_sender);
             to_sender.write(&mut stream, HELLO.as_bytes())?;
             if let (Ok(own), Ok(other)) = (stream.local_addr(), stream.peer_addr()) {
                 log::line("link", || {
@@ -662,6 +720,52 @@ mod tests {
     /// Anyone on the network can connect. Whoever does so without the key,
     /// saying nothing or a byte now and then, holds up neither the receiver
     /// that has the key nor the sender.
+    #[test]
+    fn a_receiver_from_before_256_bit_keys_is_answered_in_kind() {
+        use qrsend_core::sender::MemorySource;
+        let layout = SessionLayout {
+            session_id: 7,
+            flags: 0,
+            seg_shift: 16,
+            meta_len: 300,
+            body_len: 50_000,
+            symbol_size: SYMBOL_SIZE,
+        };
+        let source = || {
+            Ok(MemorySource {
+                meta: vec![1; 300],
+                body: vec![2; 50_000],
+                seg_shift: 16,
+            })
+        };
+        let arrives = |offer: TcpOffer| {
+            let link = connect(offer, 7);
+            link.messages
+                .recv_timeout(Duration::from_secs(3))
+                .is_ok_and(|m| direct::unpack(&m).count() > 0)
+        };
+        // The offer holds a key of 256 bits; the two halves key differently.
+        let (listener, offer) = listen(Some("127.0.0.1"), 0).unwrap();
+        assert_eq!(offer.whole_key().len(), 32);
+        let (events, _events) = unbounded();
+        serve(listener, offer.clone(), layout, source, events);
+        assert!(arrives(offer.clone()));
+        // An older version reads the offer up to the first half of the key
+        // and connects with that: served all the same.
+        let older = TcpOffer {
+            more: None,
+            ..offer.clone()
+        };
+        assert_eq!(older.whole_key(), offer.key);
+        assert!(arrives(older));
+        // Someone with a wrong second half holds nothing: not served.
+        let wrong = TcpOffer {
+            more: Some([0; 16]),
+            ..offer
+        };
+        assert!(!arrives(wrong));
+    }
+
     #[test]
     fn a_stranger_on_the_network_holds_nothing_up() {
         use qrsend_core::sender::MemorySource;

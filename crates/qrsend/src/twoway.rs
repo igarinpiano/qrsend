@@ -98,6 +98,31 @@ pub fn listen(source: Source) -> Receiver<Feedback> {
     rx
 }
 
+/// Reads the one-time key a receiver shows (forward secrecy) from pictures:
+/// a camera pointed at its screen, until all of the key's codes were seen.
+pub fn read_one_time_key(input: Input) -> Result<qrsend_core::crypto::OneTimeKey> {
+    use qrsend_core::crypto::{OneTimeRead, OneTimeReader};
+    let (pictures_tx, pictures) = bounded::<Picture>(2);
+    let producer = thread::spawn(move || input.produce(pictures_tx));
+    let mut reader = OneTimeReader::default();
+    let mut said = 0;
+    for picture in pictures {
+        for text in decode::detect(&picture.luma) {
+            match reader.add(&text) {
+                OneTimeRead::Whole(key) => return Ok(*key),
+                OneTimeRead::Part { have, of } if have != said => {
+                    said = have;
+                    eprintln!("One-time key: {have} of {of} codes read…");
+                }
+                _ => {}
+            }
+        }
+    }
+    // (The pictures ran out: say why, if the input failed.)
+    producer.join().expect("input thread panicked")?;
+    anyhow::bail!("the receiver's one-time key was not read: its codes were not all seen")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

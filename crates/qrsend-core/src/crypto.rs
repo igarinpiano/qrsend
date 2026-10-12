@@ -9,7 +9,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 use crate::manifest::{MetaSignature, signed_message};
-use crate::pq::{self, HybridIdentity, HybridRecipient, PqPublic, PqSecret};
+use crate::pq::{
+    self, HybridIdentity, HybridRecipient, OncePublic, OnceSecret, PqPublic, PqSecret,
+};
 
 const ID_PREFIX: &str = "qrsend-id:1:";
 /// An ID with post-quantum keys: all four public keys as one base64url
@@ -73,6 +75,10 @@ pub struct DevicePublic {
     /// With them, what is encrypted to the device and what it signs holds
     /// against a quantum computer as well.
     pub pq: Option<PqPublic>,
+    /// The one-time key the device showed for the transfer at hand, if it
+    /// did: encrypting to the device then takes it as well (forward
+    /// secrecy). No part of the device's ID.
+    pub once: Option<OncePublic>,
 }
 
 impl std::fmt::Debug for DevicePublic {
@@ -138,8 +144,33 @@ impl DevicePublic {
     pub fn classic(&self) -> DevicePublic {
         DevicePublic {
             pq: None,
+            once: None,
             ..self.clone()
         }
+    }
+
+    /// What a one-time key says of the device it belongs to (so that a
+    /// sender does not take one device's key for another's).
+    pub fn once_owner(&self) -> [u8; 8] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"QRSEND-ONCE-OWNER-v1");
+        h.update(&self.x25519());
+        h.update(&self.verifying.to_bytes());
+        h.finalize().as_bytes()[..8].try_into().unwrap()
+    }
+
+    /// The device, to be encrypted to with the one-time key it showed.
+    pub fn with_once(mut self, key: &OneTimeKey) -> Result<DevicePublic, CryptoError> {
+        if key.owner != self.once_owner() {
+            return Err(CryptoError::BadId("this one-time key is another device's"));
+        }
+        if self.pq.is_none() {
+            return Err(CryptoError::BadId(
+                "a one-time key is of use only with a device's post-quantum keys",
+            ));
+        }
+        self.once = Some(key.public.clone());
+        Ok(self)
     }
 
     /// Whether `signature` is this device's Ed25519 signature over
@@ -215,6 +246,7 @@ impl DevicePublic {
             recipient,
             verifying,
             pq: None,
+            once: None,
         })
     }
 }
@@ -272,6 +304,130 @@ impl DevicePublic {
         getrandom::getrandom(&mut id).map_err(|e| io::Error::other(e.to_string()))?;
         crate::link::split(0, crate::link::KIND_DEVICE_ID, id[0], &bytes, max_chars)
             .map_err(|_| CryptoError::BadId("the ID does not fit codes of this size"))
+    }
+}
+
+/// A one-time key as a receiver shows it before a transfer (PROTOCOL §9.2):
+/// whose it is, and its public half. It is not signed and need not be: the
+/// file key takes the device's lasting keys as well, so a key put in its
+/// place by someone else opens nothing for them (and the transfer fails).
+#[derive(Clone, PartialEq, Eq)]
+pub struct OneTimeKey {
+    pub owner: [u8; 8],
+    pub public: OncePublic,
+}
+
+/// The prefix of a one-time key as text.
+pub const ONE_TIME_PREFIX: &str = "QSK1-";
+
+impl std::fmt::Debug for OneTimeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OneTimeKey({:02x?})", self.public.id())
+    }
+}
+
+impl OneTimeKey {
+    /// A marker, the owner, the key, and four bytes of BLAKE3 over those.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = vec![1u8];
+        out.extend_from_slice(&self.owner);
+        out.extend_from_slice(&self.public.to_bytes());
+        let check = blake3::hash(&out);
+        out.extend_from_slice(&check.as_bytes()[..4]);
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<OneTimeKey, CryptoError> {
+        let bad = CryptoError::BadId("not a one-time key");
+        if bytes.len() != 1 + 8 + pq::ONCE_PUBLIC + 4 || bytes[0] != 1 {
+            return Err(bad);
+        }
+        let (bytes, check) = bytes.split_at(bytes.len() - 4);
+        if blake3::hash(bytes).as_bytes()[..4] != *check {
+            return Err(CryptoError::BadId("damaged one-time key"));
+        }
+        Ok(OneTimeKey {
+            owner: bytes[1..9].try_into().unwrap(),
+            public: OncePublic::from_bytes(&bytes[9..]).ok_or(bad)?,
+        })
+    }
+
+    /// As one line of text, to be copied where a camera does not reach.
+    pub fn to_text(&self) -> String {
+        format!(
+            "{ONE_TIME_PREFIX}{}",
+            crate::base45::encode(&self.to_bytes())
+        )
+    }
+
+    pub fn from_text(text: &str) -> Result<OneTimeKey, CryptoError> {
+        let body = text
+            .trim()
+            .strip_prefix(ONE_TIME_PREFIX)
+            .ok_or(CryptoError::BadId("not a one-time key"))?;
+        let bytes =
+            crate::base45::decode(body).map_err(|_| CryptoError::BadId("damaged one-time key"))?;
+        OneTimeKey::from_bytes(&bytes)
+    }
+
+    /// As codes of at most `max_chars` characters, shown in turn.
+    pub fn codes(&self, max_chars: usize) -> Result<Vec<String>, CryptoError> {
+        let mut id = [0u8; 1];
+        getrandom::getrandom(&mut id).map_err(|e| io::Error::other(e.to_string()))?;
+        crate::link::split(
+            0,
+            crate::link::KIND_ONE_TIME_KEY,
+            id[0],
+            &self.to_bytes(),
+            max_chars,
+        )
+        .map_err(|_| CryptoError::BadId("the key does not fit codes of this size"))
+    }
+}
+
+/// Puts a one-time key together from the codes it is shown as (or takes it
+/// as text).
+#[derive(Default)]
+pub struct OneTimeReader {
+    assembler: crate::link::Assembler,
+    parts: Option<(u8, Vec<bool>)>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum OneTimeRead {
+    Whole(Box<OneTimeKey>),
+    Part { have: usize, of: usize },
+    Other,
+}
+
+impl OneTimeReader {
+    pub fn add(&mut self, text: &str) -> OneTimeRead {
+        let text = text.trim();
+        if text.starts_with(ONE_TIME_PREFIX) {
+            return OneTimeKey::from_text(text)
+                .map_or(OneTimeRead::Other, |k| OneTimeRead::Whole(Box::new(k)));
+        }
+        let Ok(part) = crate::link::LinkPart::decode(text) else {
+            return OneTimeRead::Other;
+        };
+        if part.kind != crate::link::KIND_ONE_TIME_KEY || part.part >= part.parts {
+            return OneTimeRead::Other;
+        }
+        if !matches!(&self.parts, Some((id, parts)) if *id == part.id && parts.len() == part.parts as usize)
+        {
+            self.parts = Some((part.id, vec![false; part.parts as usize]));
+        }
+        let (_, parts) = self.parts.as_mut().expect("just set");
+        parts[part.part as usize] = true;
+        let progress = OneTimeRead::Part {
+            have: parts.iter().filter(|p| **p).count(),
+            of: parts.len(),
+        };
+        match self.assembler.add(text) {
+            Some(whole) => OneTimeKey::from_bytes(&whole.payload)
+                .map_or(OneTimeRead::Other, |k| OneTimeRead::Whole(Box::new(k))),
+            None => progress,
+        }
     }
 }
 
@@ -381,6 +537,26 @@ impl DeviceIdentity {
         self.pq.is_some()
     }
 
+    /// A new one-time key for a transfer to come: the secret half, to be
+    /// kept until the transfer has arrived and then destroyed, and what
+    /// the sender is shown.
+    pub fn new_once(&self) -> Result<(OnceSecret, OneTimeKey), CryptoError> {
+        let secret = OnceSecret::generate().map_err(|e| io::Error::other(e.to_string()))?;
+        let key = OneTimeKey {
+            owner: self.public().once_owner(),
+            public: secret.public(),
+        };
+        Ok((secret, key))
+    }
+
+    /// Takes a one-time key into use: what was encrypted to it can be
+    /// opened from now on (for as long as this identity lives in memory).
+    pub fn hold_once(&mut self, secret: OnceSecret) {
+        if let Some((_, hybrid)) = &mut self.pq {
+            hybrid.once.push(secret);
+        }
+    }
+
     /// From now on this identity opens only what was encrypted with both
     /// schemes: a transfer encrypted with X25519 alone (to this device's
     /// older ID) is, to it, not for this device.
@@ -394,6 +570,7 @@ impl DeviceIdentity {
             recipient: self.x25519.to_public(),
             verifying: self.signing.verifying_key(),
             pq: self.pq.as_ref().map(|(secret, _)| secret.public()),
+            once: None,
         }
     }
 
@@ -561,6 +738,7 @@ impl DevicePublic {
             verifying: VerifyingKey::from_bytes(ed25519_public)
                 .map_err(|_| CryptoError::BadId("bad signing key"))?,
             pq: None,
+            once: None,
         })
     }
 }
@@ -605,6 +783,11 @@ pub fn x25519_stanza_keys(age_bytes: &[u8]) -> Result<Vec<[u8; 32]>, CryptoError
 /// What keeps an encrypted transfer from being read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protection {
+    /// As `PostQuantum`, and every receiver's key takes a one-time key as
+    /// well, which the receiver destroys once the transfer has arrived:
+    /// whoever gets hold of a device's lasting keys later reads nothing of
+    /// what was recorded before (forward secrecy).
+    ForwardSecret,
     /// Every receiver's key is wrapped with both schemes: X25519 and
     /// ML-KEM. It holds against a quantum computer as well.
     PostQuantum,
@@ -617,14 +800,19 @@ pub enum Protection {
 impl Protection {
     /// What a transfer to `recipients` gets.
     pub fn of(recipients: &[DevicePublic]) -> Protection {
-        match recipients.iter().all(|r| r.pq.is_some()) {
-            true => Protection::PostQuantum,
-            false => Protection::Older,
+        let all = |f: fn(&DevicePublic) -> bool| recipients.iter().all(f);
+        if !all(|r| r.pq.is_some()) {
+            Protection::Older
+        } else if all(|r| r.once.is_some()) {
+            Protection::ForwardSecret
+        } else {
+            Protection::PostQuantum
         }
     }
 
     pub fn word(self) -> &'static str {
         match self {
+            Protection::ForwardSecret => "fs",
             Protection::PostQuantum => "pq",
             Protection::Older => "older",
         }
@@ -634,32 +822,58 @@ impl Protection {
 /// What protects an age file, going by the stanzas of its header (which is
 /// all of it that needs to be in `age_bytes`): readable without any key.
 pub fn protection(age_bytes: &[u8]) -> Result<Protection, CryptoError> {
-    struct Kinds(std::cell::Cell<(usize, usize)>);
-    impl age::Identity for Kinds {
+    let seen = stanzas(age_bytes)?;
+    Ok(match (seen.once.len(), seen.hybrid, seen.other) {
+        (once, 0, 0) if once > 0 => Protection::ForwardSecret,
+        (once, hybrid, 0) if once + hybrid > 0 => Protection::PostQuantum,
+        _ => Protection::Older,
+    })
+}
+
+/// The one-time keys an age file was encrypted to, by their names (see
+/// [`OncePublic::id`]): what a receiver may destroy once the transfer the
+/// file belongs to has arrived.
+pub fn once_used(age_bytes: &[u8]) -> Vec<[u8; 8]> {
+    stanzas(age_bytes).map_or(Vec::new(), |seen| seen.once)
+}
+
+/// The stanzas of an age header by kind.
+#[derive(Default)]
+struct Stanzas {
+    /// Those made for a one-time key as well: the names of those keys.
+    once: Vec<[u8; 8]>,
+    /// Those made with both schemes.
+    hybrid: usize,
+    /// Anything else (X25519 alone, as a rule).
+    other: usize,
+}
+
+fn stanzas(age_bytes: &[u8]) -> Result<Stanzas, CryptoError> {
+    struct Seen(std::cell::RefCell<Stanzas>);
+    impl age::Identity for Seen {
         fn unwrap_stanza(
             &self,
             stanza: &age_core::format::Stanza,
         ) -> Option<Result<age_core::format::FileKey, age::DecryptError>> {
-            let (hybrid, other) = self.0.get();
+            let mut seen = self.0.borrow_mut();
             // (Stanzas put in to keep readers tolerant count for nothing.)
-            if stanza.tag == pq::STANZA_TAG {
-                self.0.set((hybrid + 1, other));
+            if let Some(id) = pq::stanza_once(stanza) {
+                seen.once.push(id);
+            } else if stanza.tag == pq::STANZA_TAG {
+                seen.hybrid += 1;
             } else if !stanza.tag.ends_with("-grease") {
-                self.0.set((hybrid, other + 1));
+                seen.other += 1;
             }
             None
         }
     }
-    let kinds = Kinds(Default::default());
+    let seen = Seen(Default::default());
     let dec = age::Decryptor::new_buffered(age_bytes).map_err(map_decrypt)?;
-    match dec.decrypt(iter::once(&kinds as &dyn age::Identity)) {
+    match dec.decrypt(iter::once(&seen as &dyn age::Identity)) {
         Err(age::DecryptError::NoMatchingKeys) | Ok(_) => {}
         Err(e) => return Err(map_decrypt(e)),
     }
-    Ok(match kinds.0.get() {
-        (hybrid, 0) if hybrid > 0 => Protection::PostQuantum,
-        _ => Protection::Older,
-    })
+    Ok(seen.0.into_inner())
 }
 
 /// An age identity made of precomputed X25519 shared secrets: the result of
@@ -671,6 +885,8 @@ pub struct SharedSecrets {
     /// The post-quantum secret keys, for the stanzas made with both schemes
     /// (their X25519 half is among `secrets` like the others).
     pub pq: Option<PqSecret>,
+    /// The one-time keys shown and not yet done with.
+    pub once: Vec<OnceSecret>,
 }
 
 impl age::Identity for SharedSecrets {
@@ -681,7 +897,7 @@ impl age::Identity for SharedSecrets {
         use age_core::format::{FILE_KEY_BYTES, FileKey};
         if let (Some(epk), Some(secret)) = (pq::stanza_ephemeral(stanza), &self.pq) {
             let (_, shared) = self.secrets.iter().find(|(e, _)| *e == epk)?;
-            return pq::open_stanza(stanza, shared, &self.our_public, secret).map(Ok);
+            return pq::open_stanza(stanza, shared, &self.our_public, secret, &self.once).map(Ok);
         }
         if stanza.tag != X25519_TAG {
             return None;
@@ -730,10 +946,16 @@ fn encryptor(recipients: &[DevicePublic]) -> Result<age::Encryptor, CryptoError>
         .iter()
         .map(|r| -> Result<Box<dyn age::Recipient>, CryptoError> {
             Ok(match &r.pq {
-                Some(pq) => Box::new(
-                    HybridRecipient::new(r.x25519(), pq)
-                        .ok_or(CryptoError::BadId("bad ML-KEM key"))?,
-                ),
+                Some(pq) => {
+                    let bad = CryptoError::BadId("bad ML-KEM key");
+                    let to = HybridRecipient::new(r.x25519(), pq).ok_or(bad)?;
+                    Box::new(match &r.once {
+                        Some(once) => to
+                            .with_once(once)
+                            .ok_or(CryptoError::BadId("bad one-time key"))?,
+                        None => to,
+                    })
+                }
                 None => Box::new(r.recipient.clone()),
             })
         })
@@ -999,6 +1221,7 @@ mod tests {
                 })
                 .collect(),
             pq: raw.pq.clone(),
+            once: Vec::new(),
         };
         assert_eq!(decrypt(&ct, &shared, 100).unwrap(), b"for me and other");
 
@@ -1018,6 +1241,7 @@ mod tests {
                 })
                 .collect(),
             pq: raw.pq.clone(),
+            once: Vec::new(),
         };
         assert!(matches!(
             decrypt(&ct, &wrong, 100),
@@ -1243,5 +1467,70 @@ mod tests {
             last = reader.add(code);
         }
         assert_eq!(last, IdRead::Whole(Box::new(other)));
+    }
+
+    /// Forward secrecy, end to end: the receiver shows a one-time key, the
+    /// sender encrypts to it, and once the receiver has let go of it the
+    /// lasting keys alone open nothing.
+    #[test]
+    fn what_was_encrypted_to_a_one_time_key_is_gone_with_it() {
+        let mut bob = DeviceIdentity::generate("bob").unwrap();
+        let (secret, shown) = bob.new_once().unwrap();
+        // As text and as codes, it reads back; damaged, it does not.
+        let text = shown.to_text();
+        assert!(
+            text.starts_with("QSK1-") && text.len() < 1900,
+            "{}",
+            text.len()
+        );
+        assert_eq!(OneTimeKey::from_text(&text).unwrap(), shown);
+        assert!(OneTimeKey::from_text(&text[..text.len() - 3]).is_err());
+        let codes = shown.codes(600).unwrap();
+        assert!((3..=4).contains(&codes.len()), "{}", codes.len());
+        let mut reader = OneTimeReader::default();
+        let mut got = None;
+        for code in codes.iter().rev() {
+            if let OneTimeRead::Whole(key) = reader.add(code) {
+                got = Some(*key);
+            }
+        }
+        assert_eq!(got.as_ref(), Some(&shown));
+        assert_eq!(
+            OneTimeReader::default().add(&text),
+            OneTimeRead::Whole(Box::new(shown.clone()))
+        );
+
+        // Another device's key is not taken for bob's, nor is one of any use
+        // with an ID from before post-quantum keys.
+        let carol = DeviceIdentity::generate("carol").unwrap();
+        assert!(carol.public().with_once(&shown).is_err());
+        assert!(bob.public().classic().with_once(&shown).is_err());
+
+        let to = bob.public().with_once(&shown).unwrap();
+        let ct = encrypt(b"for bob, once", std::slice::from_ref(&to)).unwrap();
+        assert_eq!(protection(&ct).unwrap(), Protection::ForwardSecret);
+        assert_eq!(
+            Protection::of(std::slice::from_ref(&to)),
+            Protection::ForwardSecret
+        );
+        assert_eq!(once_used(&ct), [shown.public.id()]);
+        // One receiver without a one-time key: post-quantum, but not this.
+        let mixed = encrypt(b"x", &[to.clone(), carol.public()]).unwrap();
+        assert_eq!(protection(&mixed).unwrap(), Protection::PostQuantum);
+
+        // Bob's lasting keys alone: not for him. With the one-time key: his.
+        assert!(matches!(
+            decrypt(&ct, bob.as_age(), 100),
+            Err(CryptoError::NotForUs)
+        ));
+        bob.hold_once(secret);
+        assert_eq!(decrypt(&ct, bob.as_age(), 100).unwrap(), b"for bob, once");
+        // The transfer has arrived and the key is destroyed: bob's identity
+        // as it is on disk (the lasting keys) opens it no more.
+        let later = DeviceIdentity::parse(&bob.to_secret_string()).unwrap();
+        assert!(matches!(
+            decrypt(&ct, later.as_age(), 100),
+            Err(CryptoError::NotForUs)
+        ));
     }
 }

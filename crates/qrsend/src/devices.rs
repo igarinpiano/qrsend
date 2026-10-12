@@ -88,7 +88,7 @@ fn print_qr(text: &str) {
 /// enough to read well and to fit a terminal (81 columns by 42 rows), which
 /// makes about nine of them. (At the size of a transfer's codes it would
 /// be three, of 121 columns.)
-const ID_CODES: QrParams = QrParams {
+pub(crate) const ID_CODES: QrParams = QrParams {
     version: 15,
     ec: Ec::M,
 };
@@ -98,7 +98,7 @@ const ID_CODE_TIME: Duration = Duration::from_millis(700);
 /// Shows the codes of an ID one after the other, round and round, until a
 /// key ends it. Space holds the code that is showing and lets go again; the
 /// arrow keys step by hand.
-fn show_codes(codes: &[QrMatrix]) -> Result<()> {
+pub(crate) fn show_codes(what: &str, codes: &[QrMatrix]) -> Result<()> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use crossterm::style::Print;
     use crossterm::{cursor, queue, terminal as term};
@@ -107,9 +107,9 @@ fn show_codes(codes: &[QrMatrix]) -> Result<()> {
     let (have_columns, have_rows) = term::size()?;
     if (have_columns as usize) < columns || (have_rows as usize) < rows + 1 {
         bail!(
-            "the terminal is too small for the ID's codes: they take {columns}×{} cells, and it \
+            "the terminal is too small for the codes: they take {columns}×{} cells, and it \
              has {have_columns}×{have_rows}. Enlarge the window or shrink the font; or write them \
-             to pictures (--png FILE), or copy the ID above as text",
+             to pictures where that is offered, or copy the text above",
             rows + 1
         );
     }
@@ -127,7 +127,7 @@ fn show_codes(codes: &[QrMatrix]) -> Result<()> {
                 cursor::MoveTo(0, rows as u16),
                 term::Clear(term::ClearType::CurrentLine),
                 Print(format!(
-                    "Code {} of {}{}  [space] {}  [←/→] step  [q] done",
+                    "{what}: code {} of {}{}  [space] {}  [←/→] step  [q] done",
                     at + 1,
                     codes.len(),
                     if playing { "" } else { " · held" },
@@ -250,7 +250,7 @@ pub fn id(args: IdArgs) -> Result<()> {
         let mut answer = String::new();
         std::io::stdin().lock().read_line(&mut answer)?;
         if !answer.trim().eq_ignore_ascii_case("q") {
-            show_codes(&codes)?;
+            show_codes("ID", &codes)?;
         }
     }
     Ok(())
