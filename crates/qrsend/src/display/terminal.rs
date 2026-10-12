@@ -12,7 +12,59 @@ use super::FrameStream;
 
 const QUIET: usize = 2;
 
-struct Guard;
+/// The terminal as a screen for codes, for as long as this lives: raw
+/// input, its own page, no cursor.
+pub struct Guard;
+
+impl Guard {
+    pub fn enter() -> Result<Guard> {
+        terminal::enable_raw_mode()?;
+        let guard = Guard;
+        execute!(
+            stdout(),
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            terminal::Clear(terminal::ClearType::All)
+        )?;
+        Ok(guard)
+    }
+}
+
+/// Rows a code of `modules` width takes, and the columns (with its margin).
+pub fn cells(modules: usize) -> (usize, usize) {
+    let side = modules + 2 * QUIET;
+    (side, side.div_ceil(2))
+}
+
+/// Draws a code at the top left, two modules to a character cell.
+pub fn draw(out: &mut impl Write, m: &qrsend_core::qr::QrMatrix) -> Result<()> {
+    let (columns, rows) = cells(m.width);
+    let dark = |x: isize, y: isize| {
+        x >= 0
+            && y >= 0
+            && (x as usize) < m.width
+            && (y as usize) < m.width
+            && m.dark(x as usize, y as usize)
+    };
+    for row in 0..rows {
+        queue!(out, cursor::MoveTo(0, row as u16))?;
+        for col in 0..columns {
+            let (x, y) = (
+                col as isize - QUIET as isize,
+                (row * 2) as isize - QUIET as isize,
+            );
+            let color = |dark: bool| if dark { Color::Black } else { Color::White };
+            queue!(
+                out,
+                SetForegroundColor(color(dark(x, y))),
+                SetBackgroundColor(color(dark(x, y + 1))),
+                Print('▀')
+            )?;
+        }
+    }
+    queue!(out, ResetColor)?;
+    Ok(())
+}
 
 impl Drop for Guard {
     fn drop(&mut self) {
@@ -36,15 +88,8 @@ pub fn run(stream: &mut FrameStream, mut fps: f64) -> Result<()> {
              Enlarge the window / shrink the font, or use --density low or --display window"
         );
     }
-    terminal::enable_raw_mode()?;
-    let _guard = Guard;
+    let _guard = Guard::enter()?;
     let mut out = stdout();
-    execute!(
-        out,
-        terminal::EnterAlternateScreen,
-        cursor::Hide,
-        terminal::Clear(terminal::ClearType::All)
-    )?;
 
     let mut paused = false;
     let mut next = Instant::now();
@@ -54,38 +99,7 @@ pub fn run(stream: &mut FrameStream, mut fps: f64) -> Result<()> {
         }
         if !paused && Instant::now() >= next {
             let m = stream.next_matrix()?;
-            let dark = |x: isize, y: isize| {
-                x >= 0
-                    && y >= 0
-                    && (x as usize) < m.width
-                    && (y as usize) < m.width
-                    && m.dark(x as usize, y as usize)
-            };
-            for row in 0..modules.div_ceil(2) {
-                queue!(out, cursor::MoveTo(0, row as u16))?;
-                for col in 0..modules {
-                    let (x, y) = (
-                        col as isize - QUIET as isize,
-                        (row * 2) as isize - QUIET as isize,
-                    );
-                    let top = if dark(x, y) {
-                        Color::Black
-                    } else {
-                        Color::White
-                    };
-                    let bottom = if dark(x, y + 1) {
-                        Color::Black
-                    } else {
-                        Color::White
-                    };
-                    queue!(
-                        out,
-                        SetForegroundColor(top),
-                        SetBackgroundColor(bottom),
-                        Print('▀')
-                    )?;
-                }
-            }
+            draw(&mut out, &m)?;
             queue!(
                 out,
                 ResetColor,

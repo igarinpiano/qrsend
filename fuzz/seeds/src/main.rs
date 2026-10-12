@@ -191,6 +191,13 @@ fn main() {
     );
     direct::pack(&mut records, notice.encode().as_bytes());
     write(&root, "codes", "records", &records);
+    // A device ID with post-quantum keys: as text, as bytes, and as the
+    // codes it is shown as; and the one a device had before those keys.
+    let device = DeviceIdentity::generate("seed").unwrap().public();
+    write(&root, "codes", "id", device.to_id_string().as_bytes());
+    write(&root, "codes", "id-classic", device.classic().to_id_string().as_bytes());
+    write(&root, "codes", "id-bytes", &device.to_bytes().unwrap());
+    write(&root, "codes", "id-parts", device.id_codes(600).unwrap().join("\n").as_bytes());
 
     // sound: a feedback message as a microphone would hear it.
     for (n, rate) in [(0u8, 8_000.0), (3, 48_000.0)] {

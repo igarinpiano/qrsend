@@ -3,6 +3,7 @@
 QR コードのストリームでテキスト・ファイル・フォルダを送るツール。CLI（Rust 単一バイナリ）とブラウザ版（GitHub Pages / PWA）の 2 本立て。
 
 - 構想・決定事項: `docs/CONCEPT.md`
+- 耐量子暗号への移行の計画と記録: `docs/POST-QUANTUM.md`（**フェーズを進めたら表と記録を更新する**）
 - ワイヤ形式の仕様: `docs/PROTOCOL.md`（**プロトコルに触れる変更は必ずここも更新する**）
 - CLI の全コマンド・全オプションの解説: `docs/CLI.md`（**コマンドやオプションを足したら必ずここにも書く**。`crates/qrsend/tests/reference.rs` が `--help` に出るものを全部この文書の該当する見出しの下で探すので、書き忘れるとテストが落ちる。消したオプションの記述が残っていても落ちないので、消すときは自分で直す）
 
@@ -30,7 +31,8 @@ crates/qrsend-core/  プロトコル本体（I/O は std::io トレイトのみ�
   manifest            manifest JSON とメタエンベロープ（"QSM"、署名枠つき）
   payload             ファイル内容の単純連結＋zstd、BLAKE3 検証、展開（UnpackSink）。Packer は pull（add_file）と push（begin_file / write_chunk / end_file）の両方
   compress            zstd の切替（zstd-native / ruzstd）。ruzstd は 4MiB ごとの複数フレーム
-  crypto              デバイス ID、age 暗号化、署名。復号は &dyn age::Identity を受ける。SharedSecrets は外部（WebCrypto）で計算した X25519 共有秘密で復号する identity
+  pq                  耐量子の鍵（ML-KEM-768 / ML-DSA-65。ml-kem・ml-dsa crate）。age の独自スタンザ `qrsend-pq1`（X25519 と ML-KEM の両方で包む）、ML-DSA の署名。PROTOCOL §9.1
+  crypto              デバイス ID（版 1 と、耐量子の鍵つきの版 2。複数の QR に分ける `id_codes` / `IdReader`）、age 暗号化、署名。復号は &dyn age::Identity を受ける。SharedSecrets は外部（WebCrypto）で計算した X25519 共有秘密で復号する identity
   sanitize / resume   パス無害化、resume code（QSR1-…）
   qr                  QR 生成（fast_qr・英数字 1 セグメント・マスク固定）と検出（rqrr）。auto_params（小さな転送は小さなコード）、best_tiling（フレームに最も多く載るバージョンと格子）、QUIET=4（隣のコードと共有する余白）
 crates/qrsend/       CLI（バイナリ名 qrsend）
@@ -142,6 +144,17 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
   - `QRSEND_TRACE=1` で接続の経過を stderr に出す（`[link] …`）。e2e は `cli-link.spec.ts`（CLI → ブラウザ）と `web-to-cli.spec.ts` の "connects to the sending browser"（ブラウザ → CLI）: 前者は CLI を子プロセスで動かし（動画を書き出したあとネットワークで待つ）、Chrome に `--allow-loopback-in-peer-connection` を付けて 127.0.0.1 でつなぐ。`QRSEND_LINK_MB=100` で大きさを変えられる。実測（同じ Mac、100 MiB、ページを開いてから展開完了まで）: 5.9 秒。2 台の実機間、iPhone では未確認。
   - 2026-10-08、ユーザーの友人の Linux の CLI でブラウザからの転送を受けたとき「ローカルネットワークにいけなかったのが気になった」。当時は経路が無かった。同日に両方向の直結を実装した（下の項目）。古い相手の、受けられない申し出は黙って捨てず 1 回だけ言う（CLI は「…but only to another browser」、ブラウザは `tcp-offer` の注意書き。どちらも、受けられる申し出が 6 秒来なかったときだけ）。
 - **ウィンドウの終わり方**（2026-10-12、ユーザーの報告: Cmd+Q で終えると「Sent … codes」「To resend later: …」が出ない）: minifb のメニューの Quit は `terminate:` で、NSApplication はその場で `exit` する（表示ループから戻らない。`--no-keep` の後始末も走らなかった）。`display/window.rs` の `quit_ends_the_loop` が、`applicationShouldTerminate:` だけを持つクラスを objc2 の `ClassBuilder` で作って NSApplication の delegate にし、「終了しない（NSTerminateCancel）」と答えて `display::ask_stop()` を立てる。ループはそれを見て、ウィンドウを閉じたときと同じ道で終わる。Dock の「終了」も同じ道。端末での Ctrl-C も、ウィンドウの表示中はループを終わらせるだけにした（`send.rs` の `interruptible`。締めの行を出し、`--no-keep` なら消してから、`main` の最後で SIGINT で終わり直す = 終了コードは従来どおり 130 相当）。梱包中・書き出し中・接続待ちの Ctrl-C は従来どおり即終了。2 回目の Ctrl-C は待たない。確認は `NSRunningApplication.terminate`（JXA。Dock の終了と同じ Apple イベント）と `kill -INT`、`--no-keep` あり・なしの 4 通り。**キーボードの Cmd+Q そのものは押していない**（メニューの `terminate:` を通るので同じ道のはず）。
+- **耐量子暗号（ハイブリッド）**（2026-10-12、ユーザーの指示:「耐量子化、早速取り掛かりましょう。フェーズ別に、いけるところまで。署名もやって。デバイス ID は密度を上げるより複数個を回す」）。計画・決めたこと・記録は `docs/POST-QUANTUM.md`、仕様は PROTOCOL §9.1。フェーズ 1〜4（コア・CLI・Web）を実装した。**未リリース・未 push**（下の「互換」があるので、出すときはユーザーに確認する）。
+  - 形: 鍵の受け渡しは X25519 ＋ ML-KEM-768、署名は Ed25519 ＋ ML-DSA-65。常に両方。`ml-kem` は age が使っている版（0.2.3、`deterministic` feature。乱数は getrandom から直接渡す）、`ml-dsa` 0.1.1、結合は SHA3-256（X-Wing の式）。x25519-dalek は 3 に統一した（2 と 3 が dev-dependencies で混ざると「multiple candidates for rlib」でテストがビルドできない）。
+  - 暗号化: 耐量子の鍵を持つ宛先には age の X25519 スタンザの **代わりに** `qrsend-pq1` を置く（並べない。並べると従来の側を解けば読める）。開けないスタンザは「自分宛てではない」として `None` を返す（`Some(Err)` を返すと、複数宛先のファイルで他人のスタンザに当たった時点で復号が止まる。age の X25519 と同じ流儀）。
+  - 署名: Meta エンベロープの署名方式 2（Ed25519 ＋ ML-DSA）。**耐量子の鍵を持つ送信者は常に方式 2**、受信側は相手の耐量子の鍵を知っていれば ML-DSA の署名を必須にする（`OpenedMeta::check` → `Signed::Downgraded` は拒否。CLI は `recv::open_meta`、Web は wasm の `openMeta`）。
+  - **互換**: 0.1.10 以前は方式 2 を読めない（「unsupported signature algorithm 2」）。更新した送信者（耐量子の鍵を持つ）からの **署名つきの転送は、古い受信側では受け取れない**（平文でも）。Web 版は自動で更新されるが、古い CLI は更新が要る。ユーザーには報告済みで、嫌なら `DeviceIdentity::sign_meta` の 1 か所で変えられる（ただし「常に両方」をやめると、格下げを見分けられなくなる）。
+  - ID: 版 2（`qrsend-id:2:<4 つの鍵の base64url>:<name>`、約 4,300 文字）。QR は **9 個前後**（バージョン 15-M。端末に 81×42 で収まる。リンクコードの枠、kind 7、末尾に BLAKE3 の 4 バイト）。フィンガープリントは 20 桁。版 1 の ID は「同じデバイスの従来の鍵だけの姿」で、`DevicePublic::classic()` で得られる（`qrsend id --classic`）。
+  - 既存の鍵の移行: CLI は `identity::load()`、Web は `loadIdentity()` が、耐量子の鍵を足して保存する（従来の鍵は変えない。保存できなければ足さない）。相手側の記録は、新しい ID を登録し直すと **同じ記録に鍵が足される**（CLI `identity::add_device` の `Added::Upgraded`、Web `devices.ts` の `trust` → "upgraded"。同じデバイスかどうかは従来の鍵のフィンガープリント `classic` で見る）。従来の ID を後から登録し直すのは断る（鍵を外すことになる）。
+  - Web の鍵: 耐量子の種（96 バイト）は IndexedDB にそのまま置く（WebCrypto に該当する鍵が無い）。従来の鍵は「取り出せない鍵」のままで、復号にも署名にも両方が要るので、種だけ盗んでも何もできない。
+  - `--secure`: 送信は耐量子の鍵を持つ相手だけ、受信は「両方の方式で暗号化されたもの」だけ開く（`DeviceIdentity::require_pq`）、送信者の記録に耐量子の鍵が無ければ断る。
+  - 確認: コアの単体テスト（包む・開く・改ざん・片方だけでは開かない・署名・格下げ・ID の分割と組み立て・種から同じ鍵 = 固定値で見張る）、CLI の `roundtrip.rs`（`post_quantum_keys_come_to_a_device_that_had_none` ほか）、e2e（`pq.spec.ts`: ブラウザ ⇄ ブラウザ・ブラウザ ⇄ CLI で ID を読む、記録の更新。既存の暗号化 e2e もハイブリッドで通る）、端末での ID 表示は pty で操作して確かめた。**未確認**: WebKit（iPhone / Safari。手元にブラウザが無く、CI 任せ）、実機、`cargo deny`（新しい依存のライセンス。手元に無い）、fuzz の実行（入口と種は足した）、MSRV 1.89 でのビルド。
+  - はまった所: `IdRead::Whole(DevicePublic)` は clippy の large_enum_variant に当たる（鍵が 3 kB）→ Box。e2e の入力欄のプレースホルダー（`qrsend-id:…`）を変えたら、それで要素を探していたテストが 2 分ずつ待って落ちた。
 - **`--secure`**（2026-10-12。経緯: 最初「セキュリティ重視・自動・最速の 3 モードをフラグ 1 発で」と頼まれて `--mode secure|auto|fast` を作ったが、同日「auto と fast はやっぱり不要。secure を一番堅い方式に」となり、`--secure` 1 つにした。**auto / fast を作り直さないこと**）: send と recv にある。環境変数 `QRSEND_SECURE=1`。3 つの約束を守り、反するオプションは黙って例外にせず **エラー** にする（`against` の表）。
   - send: (1) 暗号化＋署名、信頼済みデバイス宛てのみ（`--to` 必須、`--plain` はエラー、`--to qrsend-id:…` も一覧に無ければエラー = `identity::is_trusted`、`--session` の梱包が平文でもエラー）。(2) 一方向のみ（`--lan`・`--two-way`・`--feedback-from` はエラー）。(3) 何も残さない（`--no-keep` 扱い、ログは始めない = `log::start` を呼ばない。`--log` はエラー）。
   - recv: (1) この端末宛てに暗号化＋信頼済みデバイスの署名だけ（`refused_as_insecure`。平文は最初のフレームで、署名はファイル一覧が開けた時点で分かる。断ったら inbox の分も消す）。(2) 接続しない（`--no-lan` 扱い）、返事をしない（`--two-way`・`--feedback-to` はエラー）。(3) ログなし、`--keep`・`--copy` はエラー。途中で止まった転送も、終了時に inbox から消す（resume code は出さない。ユーザーの判断、2026-10-12:「消すほうに」。続きを受け取れるのは送信側が同じ梱包を持っている間だけで、送信側も `--secure` / `--no-keep` なら送信の終了とともに梱包が消えるため、残しても完成しないことが多い）。

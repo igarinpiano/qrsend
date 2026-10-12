@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { renderText } from "../lib/core";
+  import { onDestroy, onMount } from "svelte";
+  import { IdCollector, deviceIdCodes, renderText } from "../lib/core";
   import { forget, inspect, trust, trustedDevices, type DeviceInfo, type Trusted } from "../lib/devices";
   import { canKeepKeys, createIdentity, identityInfo, loadIdentity, renameIdentity, type StoredIdentity } from "../lib/keys";
   import { toDataUrl } from "../lib/qrdraw";
@@ -10,7 +10,24 @@
 
   let me = $state<StoredIdentity | undefined>();
   let mine = $state<DeviceInfo | undefined>();
-  let qr = $state("");
+  // The ID as QR codes: one for an ID of the older kind; about nine, shown one after the other, for one with
+  // post-quantum keys (some 3 kB of keys). Whoever reads them may hold one, or step through them by hand.
+  let codes = $state<string[]>([]);
+  let showing = $state(0);
+  let playing = $state(true);
+  const CODE_MS = 700;
+  const turn = setInterval(() => {
+    if (playing && codes.length > 1) showing = (showing + 1) % codes.length;
+  }, CODE_MS);
+  onDestroy(() => clearInterval(turn));
+  function step(by: number) {
+    playing = false;
+    showing = (showing + by + codes.length) % codes.length;
+  }
+  /** Reads an ID from the codes a camera sees, and says how far it is. */
+  let collector: IdCollector | undefined;
+  let scanned = $state<{ have: number; of: number } | undefined>();
+  let note = $state("");
   let name = $state(guessName());
   let devices = $state<Trusted[]>([]);
   let pasted = $state("");
@@ -32,7 +49,8 @@
     me = await loadIdentity();
     if (me) {
       mine = identityInfo(me);
-      qr = toDataUrl(renderText(mine.id), 5);
+      codes = (deviceIdCodes(mine.id) as string[]).map((code) => toDataUrl(renderText(code), 5));
+      showing = 0;
     }
     devices = await trustedDevices();
     protectedKeys = await canKeepKeys();
@@ -78,7 +96,8 @@
   async function confirmTrust() {
     if (!candidate) return;
     try {
-      await trust(candidate, candidateName.trim() || candidate.name);
+      const done = await trust(candidate, candidateName.trim() || candidate.name);
+      note = done === "upgraded" ? `${candidateName.trim() || candidate.name} was trusted already; it now has post-quantum keys here as well.` : "";
       candidate = undefined;
       pasted = "";
       await load();
@@ -88,8 +107,18 @@
   }
 
   function onScan(texts: string[]) {
-    const id = texts.find((t) => t.startsWith("qrsend-id:"));
-    if (id && !candidate) check(id);
+    if (candidate) return;
+    collector ??= new IdCollector();
+    for (const text of texts) {
+      const read = collector.add(text) as { device?: DeviceInfo; have: number; of: number };
+      if (read.device) {
+        scanned = undefined;
+        collector = undefined;
+        check(read.device.id);
+        return;
+      }
+      if (read.of > 1) scanned = { have: read.have, of: read.of };
+    }
   }
 </script>
 
@@ -99,7 +128,17 @@
   <h3>This device</h3>
   {#if mine}
     <div class="me">
-      <img src={qr} alt="QR code of this device's ID" />
+      <div class="codes">
+        <img src={codes[showing]} alt="QR code of this device's ID" data-testid="my-id-code" data-part={showing + 1} data-parts={codes.length} />
+        {#if codes.length > 1}
+          <div class="row small" data-testid="my-id-turn">
+            <button class="link" onclick={() => step(-1)} aria-label="Previous code">◀</button>
+            <span>Code {showing + 1} of {codes.length}</span>
+            <button class="link" onclick={() => step(1)} aria-label="Next code">▶</button>
+            <button class="link" onclick={() => (playing = !playing)}>{playing ? "Hold" : "Go on"}</button>
+          </div>
+        {/if}
+      </div>
       <div class="stack">
         <div><strong>{mine.name}</strong> <button class="link" onclick={rename}>Rename</button></div>
         <div class="small">Fingerprint<br /><span class="mono fpr">{mine.fingerprint}</span></div>
@@ -119,8 +158,12 @@
       <p class="small muted">This browser cannot keep these keys in its protected key store; they are stored as site data.</p>
     {/if}
     <p class="small muted">
-      To receive encrypted transfers, show this code to the sending device (Devices → Scan, or
-      <code>qrsend devices add</code>) and check that it displays the same fingerprint.
+      To receive encrypted transfers, show {codes.length > 1 ? "these codes" : "this code"} to the sending device
+      (Devices → Scan, or <code>qrsend devices add</code>) and check that it displays the same fingerprint.
+      {#if codes.length > 1}
+        The ID holds post-quantum keys and takes {codes.length} codes, shown one after the other; the reader takes them
+        in any order.
+      {/if}
     </p>
   {:else}
     <p>Create an ID so other devices can encrypt transfers for this browser and verify what you send.</p>
@@ -157,6 +200,11 @@
                 connects directly
               </span>
             {/if}
+            {#if !d.pq}
+              <span class="badge" title="Trusted with keys from before post-quantum ones: what is sent to it is encrypted the older way. Have it show its ID again and add that.">
+                older keys only
+              </span>
+            {/if}
             <br /><span class="mono small muted">{d.fingerprint}</span>
           </span>
           <button class="danger" onclick={async () => { await forget(d.fingerprint); await load(); }}>Remove</button>
@@ -182,17 +230,21 @@
     <h3>Add a device</h3>
     {#if scanning}
       <Camera ontexts={onScan} />
+      {#if scanned}
+        <p class="small" data-testid="id-scan-progress">{scanned.have} of {scanned.of} codes of the ID read…</p>
+      {/if}
       <button onclick={() => (scanning = false)}>Stop scanning</button>
     {:else}
       <button class="primary" onclick={() => (scanning = true)}>Scan its QR code</button>
     {/if}
     <label class="field">
       <span>…or paste its ID</span>
-      <input type="text" bind:value={pasted} placeholder="qrsend-id:1:age1…" />
+      <input type="text" bind:value={pasted} placeholder="qrsend-id:…" />
     </label>
     <button disabled={!pasted.trim()} onclick={() => check(pasted)}>Check</button>
   {/if}
   {#if error}<p class="error">{error}</p>{/if}
+  {#if note}<p class="small" data-testid="trust-note">{note}</p>{/if}
 </div>
 
 <style>
@@ -202,8 +254,11 @@
     flex-wrap: wrap;
     align-items: flex-start;
   }
+  .codes {
+    width: min(260px, 100%);
+  }
   .me img {
-    width: min(220px, 100%);
+    width: 100%;
     image-rendering: pixelated;
     border-radius: 8px;
     background: #fff;

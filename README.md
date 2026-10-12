@@ -334,6 +334,29 @@ cd web && npm ci && npm run wasm && npm run dev
 It is hosted at <https://igarinpiano.github.io/qrsend/>, and each release also
 ships an offline copy (`qrsend-web-*.zip`).
 
+## Encryption that holds against a quantum computer
+
+The codes of a transfer are on a screen, and a screen can be recorded: what is
+encrypted today should not be readable with the computers of tomorrow. Since
+0.1.11 every device has post-quantum keys beside its older ones, and uses
+**both together**: X25519 with ML-KEM-768 for the key exchange, Ed25519 with
+ML-DSA-65 for signatures (the lattice schemes come from the RustCrypto
+crates). To read or forge, both would have to be broken.
+
+- A device ID with these keys is some 3 kB, too much for one QR code that
+  reads well: it is shown as about nine codes, one after the other (hold one,
+  or step through them by hand); whoever reads them takes them in any order.
+  As text (`qrsend-id:2:…`) it can be copied as ever.
+- An identity made by an earlier version gets the new keys the first time it
+  is used and keeps the old ones. Devices that trust it go on as before, with
+  the older scheme alone, until they are given its ID again.
+- A device with these keys always signs with both schemes. Versions before
+  0.1.11 cannot read that signature: to receive a signed transfer from an
+  updated sender, update the receiver.
+
+Not covered: forward secrecy (see [docs/POST-QUANTUM.md](docs/POST-QUANTUM.md),
+in Japanese, for the plan and what is done).
+
 ## How it works
 
 ```
@@ -361,7 +384,8 @@ decoders that only return text. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - [x] The strictest way in one option: `--secure` (encrypted between trusted devices, one way only, nothing left behind)
 - [x] Two-way mode in the CLI: feedback codes read by a camera (`send --two-way`) and shown in a window (`recv --two-way`), or as text over any byte channel (`--feedback-from` / `--feedback-to`)
 - [x] Color codes shown by the CLI (`send --color`) and automatic speed from feedback (`send --auto-speed`)
-- [ ] Sound in the CLI; auto-tuning the code size
+- [x] Post-quantum keys beside the older ones: ML-KEM-768 with X25519, ML-DSA-65 with Ed25519 (unreleased)
+- [ ] Sound in the CLI; auto-tuning the code size; forward secrecy
 
 Design notes (Japanese): [docs/CONCEPT.md](docs/CONCEPT.md).
 

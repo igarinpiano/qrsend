@@ -113,7 +113,12 @@ pub struct RecvArgs {
 /// Who sent a transfer, as far as signatures can tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SenderInfo {
-    Trusted(String),
+    /// A trusted device; `pq`: known with its post-quantum keys, so that
+    /// the signature holds against a quantum computer as well.
+    Trusted {
+        name: String,
+        pq: bool,
+    },
     Unverified(String),
     Unsigned,
 }
@@ -124,7 +129,7 @@ impl SenderInfo {
             .map(|c| format!(" claims to be {c:?}"))
             .unwrap_or_default();
         match self {
-            SenderInfo::Trusted(name) => format!("{} ✓", util::printable(name)),
+            SenderInfo::Trusted { name, .. } => format!("{} ✓", util::printable(name)),
             SenderInfo::Unverified(key) => format!("unverified sender (key {key}){claimed}"),
             SenderInfo::Unsigned => format!("unsigned{claimed}"),
         }
@@ -149,15 +154,25 @@ pub fn open_meta(
             )
         }
         Err(OpenMetaError::NotForUs) => bail!(
-            "this transfer is encrypted for another device (remove it with `qrsend inbox rm {}`)",
+            "this transfer is encrypted for another device, or for this one's older ID while \
+             --secure takes only what post-quantum keys protect (remove it with `qrsend inbox rm {}`)",
             session_hex(p.session_id)
         ),
         r => r?,
     };
     let sender = match opened.signer {
         None => SenderInfo::Unsigned,
-        Some(key) => match identity::trusted_name(&key) {
-            Some(name) => SenderInfo::Trusted(name),
+        Some(key) => match identity::trusted_device(&key) {
+            // A device known with its post-quantum keys signs with both
+            // schemes, always: with the older one alone, this is not it
+            // (PROTOCOL §9.1).
+            Some(device) => match opened.check(&device) {
+                crypto::Signed::Downgraded => return Err(OpenMetaError::Downgraded.into()),
+                _ => SenderInfo::Trusted {
+                    name: device.name.clone(),
+                    pq: device.pq.is_some(),
+                },
+            },
             None => SenderInfo::Unverified(crypto::key_id(&key)),
         },
     };
@@ -174,7 +189,11 @@ fn refused_as_insecure(p: &SessionParams, sender: Option<&SenderInfo>) -> Option
     match sender {
         Some(SenderInfo::Unsigned) => Some("it is not signed"),
         Some(SenderInfo::Unverified(_)) => Some("its sender is not a trusted device"),
-        Some(SenderInfo::Trusted(_)) | None => None,
+        Some(SenderInfo::Trusted { pq: false, .. }) => Some(
+            "its sender is trusted with keys from before post-quantum ones only (have it show \
+             its ID again, and add that)",
+        ),
+        Some(SenderInfo::Trusted { pq: true, .. }) | None => None,
     }
 }
 
@@ -188,7 +207,16 @@ pub struct Session {
 
 impl Session {
     pub fn open(store: Store) -> Result<Session> {
-        let me = identity::load()?;
+        Session::open_as(store, false)
+    }
+
+    /// `strict`: this device opens only what was encrypted with both the
+    /// older and the post-quantum scheme (`--secure`).
+    pub fn open_as(store: Store, strict: bool) -> Result<Session> {
+        let mut me = identity::load()?;
+        if let (true, Some(me)) = (strict, &mut me) {
+            me.require_pq();
+        }
         let mut s = Session {
             store,
             manifest: None,
@@ -703,7 +731,7 @@ pub fn run(args: RecvArgs) -> Result<()> {
                             pb.finish_and_clear();
                             return Err(refuse(why, None));
                         }
-                        let s = Session::open(Store::open_or_create(p)?)?;
+                        let s = Session::open_as(Store::open_or_create(p)?, secure)?;
                         if secure
                             && s.manifest.is_some()
                             && let Some(why) = refused_as_insecure(&p, Some(&s.sender))

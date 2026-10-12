@@ -15,6 +15,7 @@ pub mod link;
 pub mod linkcert;
 pub mod manifest;
 pub mod payload;
+pub mod pq;
 pub mod qr;
 pub mod receiver;
 pub mod resume;

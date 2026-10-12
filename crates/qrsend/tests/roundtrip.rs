@@ -235,11 +235,152 @@ fn encrypted_transfer_between_paired_devices() {
         "for bob only"
     );
 
-    // Pairing by scanning the ID QR code from an image.
+    // Pairing by scanning the ID's QR codes from pictures: several of
+    // them, which hold the post-quantum keys, in any order.
     let id_png = env.path("id.png");
     env.ok_as("bob", &["id", "--no-qr", "--png", id_png.to_str().unwrap()]);
-    env.ok_as("eve", &["devices", "add", "--image", "id.png", "--yes"]);
-    assert!(env.ok_as("eve", &["devices", "list"]).contains("bob"));
+    let mut pictures: Vec<String> = fs::read_dir(&env.root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("id-") && n.ends_with(".png"))
+        .collect();
+    pictures.sort();
+    assert!((8..=10).contains(&pictures.len()), "{pictures:?}");
+    pictures.reverse();
+    // One of them missing: no ID, and it says how far it got.
+    let mut args = vec!["devices", "add", "--yes", "--image"];
+    args.extend(pictures[1..].iter().map(String::as_str));
+    let out = env.run_as("eve", &args);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success() && said.contains("codes of a device ID were found"),
+        "{said}"
+    );
+    args.push(&pictures[0]);
+    env.ok_as("eve", &args);
+    let listed = env.ok_as("eve", &["devices", "list"]);
+    assert!(
+        listed.contains("bob") && !listed.contains("older keys only"),
+        "{listed}"
+    );
+    // The ID for versions before those keys is one code, as it was.
+    env.ok_as("bob", &["id", "--classic", "--no-qr", "--png", "old.png"]);
+    env.ok_as("alice", &["devices", "rm", "bob"]);
+    env.ok_as("alice", &["devices", "add", "--image", "old.png", "--yes"]);
+    assert!(
+        env.ok_as("alice", &["devices", "list"])
+            .contains("older keys only")
+    );
+}
+
+/// A device from before post-quantum keys gets them the first time it is
+/// used, and devices that know it go on as before until they are given
+/// its new ID; from then on both schemes protect what is sent to it.
+#[test]
+fn post_quantum_keys_come_to_a_device_that_had_none() {
+    let env = Env::new("pq");
+    let alice = device_id(&env, "alice");
+    device_id(&env, "bob");
+    assert!(alice.starts_with("qrsend-id:2:"), "{alice}");
+    // Bob's identity as an older version wrote it: without the new keys.
+    let file = env.path("bob/config/identity");
+    let before: String = fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with("mlkem768=") && !l.starts_with("mldsa65="))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    fs::write(&file, &before).unwrap();
+    // Its first use gives it the keys, and says so; the older ones stay.
+    let out = env.run_as("bob", &["id", "--classic", "--no-qr"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("now has post-quantum keys"));
+    let after = fs::read_to_string(&file).unwrap();
+    assert!(
+        after.starts_with(&before) && after.contains("mlkem768=") && after.contains("mldsa65=")
+    );
+    let id_of = |out: &str| -> String {
+        out.lines()
+            .find_map(|l| l.strip_prefix("ID:"))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let bob_classic = id_of(&String::from_utf8_lossy(&out.stdout));
+    assert!(bob_classic.starts_with("qrsend-id:1:"), "{bob_classic}");
+    let bob_full = id_of(&env.ok_as("bob", &["id", "--no-qr"]));
+    assert!(bob_full.starts_with("qrsend-id:2:") && bob_full.len() > 4000);
+
+    // Alice knows bob as he was: what she sends him is encrypted the older
+    // way, and she is told.
+    env.ok_as("bob", &["devices", "add", &alice, "--yes"]);
+    env.ok_as("alice", &["devices", "add", &bob_classic, "--yes"]);
+    let send = |dir: &str| {
+        let out = env.run_as(
+            "alice",
+            &[
+                "send",
+                "--to",
+                "bob",
+                "--text",
+                "for bob",
+                "--export-frames",
+                dir,
+            ],
+        );
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    assert!(send("old").contains("encrypted the older way"));
+    // Bob reads it, sees alice (who signs with both schemes), and with
+    // --secure does not take it: only what post-quantum keys protect.
+    let out = env.run_as("bob", &["recv", "--images", "old", "--keep"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("alice ✓"));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), "for bob");
+    env.ok_as("bob", &["storage", "clean", "--inbox", "--yes"]);
+    let out = env.run_as("bob", &["recv", "--secure", "--images", "old"]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success() && said.contains("older ID"), "{said}");
+
+    // Given bob's ID again, alice's record of him takes the new keys (no
+    // second record), and the note is gone.
+    let added = env.ok_as("alice", &["devices", "add", &bob_full, "--yes"]);
+    assert!(added.contains("now has post-quantum keys"), "{added}");
+    let listed = env.ok_as("alice", &["devices", "list"]);
+    assert!(
+        listed.matches("bob").count() == 1 && !listed.contains("older keys only"),
+        "{listed}"
+    );
+    assert!(!send("new").contains("older way"));
+    assert_eq!(
+        env.ok_as("bob", &["recv", "--secure", "--images", "new"])
+            .trim_end(),
+        "for bob"
+    );
+    // The older ID once more adds nothing, and says so.
+    let out = env.run_as("alice", &["devices", "add", &bob_classic, "--yes"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("adds nothing"));
+    // The secure way takes devices with post-quantum keys only, either way.
+    device_id(&env, "carol");
+    let carol_classic = id_of(&env.ok_as("carol", &["id", "--classic", "--no-qr"]));
+    env.ok_as("alice", &["devices", "add", &carol_classic, "--yes"]);
+    let out = env.run_as(
+        "alice",
+        &[
+            "send",
+            "--secure",
+            "--to",
+            "carol",
+            "--text",
+            "x",
+            "--export-frames",
+            "no",
+        ],
+    );
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success() && said.contains("older keys only"),
+        "{said}"
+    );
 }
 
 #[test]

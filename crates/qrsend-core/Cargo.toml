@@ -21,6 +21,10 @@ crc32fast = "1.5.2"
 ed25519-dalek = "3.0.0"
 fast_qr = { version = "0.14.0", default-features = false }
 getrandom = "0.2"
+# Post-quantum halves of the hybrid key exchange and signature (PROTOCOL §9.1).
+# ml-kem at the version and with the feature age uses, so that one copy is built.
+ml-dsa = { version = "0.1.1", default-features = false }
+ml-kem = { version = "0.2.3", default-features = false, features = ["deterministic"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 qrcode = { version = "0.14.1", default-features = false }
 rqrr = { version = "0.11.0", default-features = false }
@@ -28,12 +32,13 @@ ruzstd = { version = "0.9", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+sha3 = { version = "0.10.9", default-features = false }
 thiserror = "2.0.21"
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets"] }
 zstd = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
-x25519-dalek = { version = "3", features = ["static_secrets"] }
 
 [features]
 default = ["zstd-native"]

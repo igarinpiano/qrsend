@@ -202,7 +202,7 @@ test("remembered devices: the second connection needs no answer code", async ({ 
       return (await page.getByTestId("my-id").textContent())!;
     };
     const trust = async (page: typeof sender, id: string) => {
-      await page.getByPlaceholder("qrsend-id:1:age1…").fill(id);
+      await page.getByPlaceholder("qrsend-id:…").fill(id);
       await page.getByRole("button", { name: "Check" }).click();
       await page.getByRole("button", { name: "Yes, trust it" }).click();
     };

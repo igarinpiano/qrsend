@@ -132,8 +132,8 @@ async function sendStart(req: SendRequest): Promise<SendStarted> {
     const message = job.seal();
     let meta: Uint8Array;
     if (me) {
-      const { signature, signer } = await sign(me, message);
-      meta = job.finish(signature, signer);
+      const { signature, signer, pq } = await sign(me, message);
+      meta = job.finish(signature, signer, pq);
     } else {
       meta = job.finish();
     }
@@ -499,7 +499,7 @@ async function extract(s: RecvSession): Promise<RecvResult | undefined> {
 async function attachIdentity(s: RecvSession): Promise<void> {
   s.me = await loadIdentity();
   if (s.me?.kind === "legacy") s.r.setIdentity(Identity.parse(s.me.secret));
-  else if (s.me) s.r.setPublicKey(s.me.x25519Public);
+  else if (s.me) s.r.setPublicKey(s.me.x25519Public, s.me.pq?.seeds);
   for (const d of await trustedDevices()) s.r.addTrusted(d.id, d.name);
 }
 

@@ -7,6 +7,8 @@ const META_MAGIC: &[u8; 3] = b"QSM";
 const META_VERSION: u8 = 1;
 const SIG_NONE: u8 = 0;
 const SIG_ED25519: u8 = 1;
+/// Ed25519 and ML-DSA-65, one after the other.
+const SIG_HYBRID: u8 = 2;
 /// Domain separation prefix for meta signatures.
 pub const SIGNATURE_CONTEXT: &[u8] = b"QRSEND-META-v1";
 /// Upper bound on the decompressed manifest JSON, against decompression bombs.
@@ -101,11 +103,15 @@ pub fn session_hex(session_id: u32) -> String {
     format!("{session_id:08x}")
 }
 
-/// Ed25519 signature carried in the meta envelope.
+/// The signature carried in the meta envelope: Ed25519, and from a signer
+/// with post-quantum keys ML-DSA-65 as well, over the same bytes (§9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaSignature {
     pub signer: [u8; 32],
     pub signature: [u8; 64],
+    /// The ML-DSA-65 signature ([`crate::pq::SIGNATURE`] bytes). Its key is
+    /// not carried: whoever trusts the signer knows it.
+    pub pq: Option<Vec<u8>>,
 }
 
 /// Decoded meta envelope (§5.1), before the manifest is decompressed.
@@ -154,9 +160,13 @@ impl MetaEnvelope {
         match &self.signature {
             None => out.push(SIG_NONE),
             Some(sig) => {
-                out.push(SIG_ED25519);
+                out.push(match sig.pq {
+                    Some(_) => SIG_HYBRID,
+                    None => SIG_ED25519,
+                });
                 out.extend_from_slice(&sig.signer);
                 out.extend_from_slice(&sig.signature);
+                out.extend_from_slice(sig.pq.as_deref().unwrap_or_default());
             }
         }
         out.extend_from_slice(&self.manifest_z);
@@ -179,16 +189,21 @@ impl MetaEnvelope {
                 signature: None,
                 manifest_z: rest.to_vec(),
             }),
-            SIG_ED25519 => {
-                if rest.len() < 96 {
+            alg @ (SIG_ED25519 | SIG_HYBRID) => {
+                let pq = match alg {
+                    SIG_HYBRID => crate::pq::SIGNATURE,
+                    _ => 0,
+                };
+                if rest.len() < 96 + pq {
                     return Err(MetaError::Truncated);
                 }
                 Ok(MetaEnvelope {
                     signature: Some(MetaSignature {
                         signer: rest[..32].try_into().unwrap(),
                         signature: rest[32..96].try_into().unwrap(),
+                        pq: (pq > 0).then(|| rest[96..96 + pq].to_vec()),
                     }),
-                    manifest_z: rest[96..].to_vec(),
+                    manifest_z: rest[96 + pq..].to_vec(),
                 })
             }
             other => Err(MetaError::UnsupportedSignature(other)),
@@ -267,7 +282,7 @@ pub fn content_session_id(manifest: &Manifest) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn sample() -> Manifest {
@@ -347,10 +362,28 @@ mod tests {
             signature: Some(MetaSignature {
                 signer: [7; 32],
                 signature: [9; 64],
+                pq: None,
             }),
             manifest_z: vec![1, 2, 3],
         };
         assert_eq!(MetaEnvelope::decode(&env.encode()).unwrap(), env);
+        // With a post-quantum signature beside it: another kind of envelope,
+        // which holds exactly that much more.
+        let hybrid = MetaEnvelope {
+            signature: Some(MetaSignature {
+                signer: [7; 32],
+                signature: [9; 64],
+                pq: Some(vec![5; crate::pq::SIGNATURE]),
+            }),
+            manifest_z: vec![1, 2, 3],
+        };
+        let bytes = hybrid.encode();
+        assert_eq!(bytes.len(), env.encode().len() + crate::pq::SIGNATURE);
+        assert_eq!(MetaEnvelope::decode(&bytes).unwrap(), hybrid);
+        assert!(matches!(
+            MetaEnvelope::decode(&bytes[..3000]),
+            Err(MetaError::Truncated)
+        ));
     }
 
     #[test]

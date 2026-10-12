@@ -27,6 +27,10 @@ pub const KIND_OPEN_OFFER: u8 = 5;
 /// the offer (§12.5, [`crate::linkcert`]).
 pub const KIND_SEEDED_OFFER: u8 = 6;
 
+/// Not a connection: a device ID with post-quantum keys, which is too long
+/// for one code that reads well (PROTOCOL §9.1). `session_id` is 0.
+pub const KIND_DEVICE_ID: u8 = 7;
+
 const HEADER_LEN: usize = 8;
 const CHECK_LEN: usize = 2;
 

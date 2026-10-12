@@ -66,7 +66,7 @@ test("web → CLI: encrypted for a paired device and signed by the browser's key
   await page.getByRole("button", { name: "Create device ID" }).click();
   await page.getByText("Show ID as text").click();
   const browserId = (await page.getByTestId("my-id").textContent())!;
-  await page.getByPlaceholder("qrsend-id:1:age1…").fill(ids.cli);
+  await page.getByPlaceholder("qrsend-id:…").fill(ids.cli);
   await page.getByRole("button", { name: "Check" }).click();
   await page.getByRole("button", { name: "Yes, trust it" }).click();
   cli(["devices", "add", browserId, "--name", "browser", "--yes"], "cli");

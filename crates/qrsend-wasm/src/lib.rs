@@ -16,7 +16,9 @@
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
-use qrsend_core::crypto::{self, DeviceIdentity, DevicePublic, OpenMetaError, SharedSecrets};
+use qrsend_core::crypto::{
+    self, DeviceIdentity, DevicePublic, IdRead, IdReader, OpenMetaError, SharedSecrets, Signed,
+};
 use qrsend_core::direct::{self, DirectSender, Record};
 use qrsend_core::fec;
 use qrsend_core::feedback::{self, Feedback, SenderNotice};
@@ -29,6 +31,7 @@ use qrsend_core::manifest::{
 use qrsend_core::payload::{
     BodyDigest, BodyHasher, PackOptions, Packed, Packer, UnpackSink, segment_hash,
 };
+use qrsend_core::pq::{self, PqPublic, PqSecret};
 use qrsend_core::qr::{self, Ec, QrParams};
 use qrsend_core::receiver::{Event, Receiver, SessionParams};
 use qrsend_core::resume::ResumeCode;
@@ -178,6 +181,12 @@ struct DeviceInfo {
     name: String,
     fingerprint: String,
     id: String,
+    /// Whether the ID holds post-quantum keys.
+    pq: bool,
+    /// The fingerprint of the device's older keys alone: the same for the
+    /// ID a device had before post-quantum keys and the one it has with
+    /// them, which is how the two are known to be one device.
+    classic: String,
 }
 
 fn device_info(p: &DevicePublic) -> DeviceInfo {
@@ -185,6 +194,8 @@ fn device_info(p: &DevicePublic) -> DeviceInfo {
         name: p.name.clone(),
         fingerprint: p.fingerprint(),
         id: p.to_id_string(),
+        pq: p.pq.is_some(),
+        classic: p.classic().fingerprint(),
     }
 }
 
@@ -219,20 +230,119 @@ pub fn verify_device_signature(device_id: &str, message: &[u8], signature: &[u8]
 }
 
 /// `{ name, fingerprint, id }` of a device given its raw public keys
-/// (identities whose private keys live in WebCrypto).
+/// (identities whose private keys live in WebCrypto). `pq_public`: its
+/// post-quantum public keys, if it has them (see [`pq_generate`]).
 #[wasm_bindgen(js_name = deviceInfo)]
 pub fn device_info_from_keys(
     name: &str,
     x25519_public: &[u8],
     ed25519_public: &[u8],
+    pq_public: Option<Vec<u8>>,
 ) -> JsResult<JsValue> {
-    let p = DevicePublic::from_raw(
+    let mut p = DevicePublic::from_raw(
         name,
         &key32(x25519_public, "X25519 key")?,
         &key32(ed25519_public, "Ed25519 key")?,
     )
     .map_err(js_err)?;
+    if let Some(bytes) = pq_public {
+        p.pq = Some(PqPublic::from_bytes(&bytes).ok_or_else(|| js_err("bad post-quantum keys"))?);
+    }
     to_js(&device_info(&p))
+}
+
+// The post-quantum keys of a device (PROTOCOL §9.1). WebCrypto has no such
+// keys, so they are held as the seeds they grow from: 64 bytes for ML-KEM,
+// then 32 for ML-DSA. Every decryption and every signature takes the
+// device's X25519 or Ed25519 key as well, which stays where it is.
+
+fn pq_secret(seeds: &[u8]) -> JsResult<PqSecret> {
+    if seeds.len() != pq::KEM_SEED + pq::SIG_SEED {
+        return Err(js_err("bad post-quantum keys"));
+    }
+    let (kem, sig) = seeds.split_at(pq::KEM_SEED);
+    Ok(PqSecret {
+        kem_seed: kem.try_into().unwrap(),
+        sig_seed: sig.try_into().unwrap(),
+    })
+}
+
+fn pq_seeds(secret: &PqSecret) -> Vec<u8> {
+    [&secret.kem_seed[..], &secret.sig_seed[..]].concat()
+}
+
+/// New post-quantum keys: `{ seeds, public }` (the secret, and what goes
+/// into the device ID).
+#[wasm_bindgen(js_name = pqGenerate)]
+pub fn pq_generate() -> JsResult<Object> {
+    let secret = PqSecret::generate().map_err(js_err)?;
+    let o = Object::new();
+    set(&o, "seeds", Uint8Array::from(&pq_seeds(&secret)[..]));
+    set(
+        &o,
+        "public",
+        Uint8Array::from(&secret.public().to_bytes()[..]),
+    );
+    Ok(o)
+}
+
+/// The ML-DSA signature over the message returned by [`SendJob::seal`].
+#[wasm_bindgen(js_name = pqSign)]
+pub fn pq_sign(seeds: &[u8], message: &[u8]) -> JsResult<Vec<u8>> {
+    Ok(pq_secret(seeds)?.sign(message))
+}
+
+/// The codes a device ID is shown as: one for an ID of the older kind,
+/// several for one with post-quantum keys (in any order, as often as it
+/// takes).
+#[wasm_bindgen(js_name = deviceIdCodes)]
+pub fn device_id_codes(id: &str) -> JsResult<Array> {
+    let codes = DevicePublic::parse(id)
+        .map_err(js_err)?
+        .id_codes(ID_CODES.capacity_chars())
+        .map_err(js_err)?;
+    Ok(codes.iter().map(|c| JsValue::from_str(c)).collect())
+}
+
+/// The size of the codes of an ID with post-quantum keys (as the command
+/// line shows them: about nine).
+const ID_CODES: QrParams = QrParams {
+    version: 15,
+    ec: Ec::M,
+};
+
+/// Puts a device ID together from the codes a camera reads.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct IdCollector {
+    reader: IdReader,
+}
+
+#[derive(Serialize)]
+struct IdProgress {
+    /// The ID, once all of it is here.
+    device: Option<DeviceInfo>,
+    /// Parts read so far, and how many there are (0: this was no ID code).
+    have: usize,
+    of: usize,
+}
+
+#[wasm_bindgen]
+impl IdCollector {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> IdCollector {
+        IdCollector::default()
+    }
+
+    /// Takes a code: `{ device, have, of }`.
+    pub fn add(&mut self, text: &str) -> JsResult<JsValue> {
+        let (device, have, of) = match self.reader.add(text) {
+            IdRead::Whole(device) => (Some(device_info(&device)), 1, 1),
+            IdRead::Part { have, of } => (None, have, of),
+            IdRead::Other => (None, 0, 0),
+        };
+        to_js(&IdProgress { device, have, of })
+    }
 }
 
 /// Ephemeral public keys of the X25519 stanzas of an age file (its header is
@@ -282,8 +392,15 @@ impl Identity {
         to_js(&device_info(&self.inner.public()))
     }
 
+    /// Gives an identity from before post-quantum keys those keys (the
+    /// others stay). False: it had them.
+    pub fn upgrade(&mut self) -> JsResult<bool> {
+        self.inner.upgrade().map_err(js_err)
+    }
+
     /// `{ x25519Secret, x25519Public, ed25519Seed, ed25519Public }` as byte
-    /// arrays, for importing into WebCrypto.
+    /// arrays, for importing into WebCrypto; and `pqSeeds` / `pqPublic` if
+    /// the identity has post-quantum keys.
     #[wasm_bindgen(js_name = rawKeys)]
     pub fn raw_keys(&self) -> Object {
         let raw = self.inner.raw_keys();
@@ -296,12 +413,27 @@ impl Identity {
             "ed25519Public",
             Uint8Array::from(&raw.ed25519_public[..]),
         );
+        if let Some(secret) = &raw.pq {
+            set(&o, "pqSeeds", Uint8Array::from(&pq_seeds(secret)[..]));
+            set(
+                &o,
+                "pqPublic",
+                Uint8Array::from(&secret.public().to_bytes()[..]),
+            );
+        }
         o
     }
 
     /// Signs the message returned by [`SendJob::seal`].
     pub fn sign(&self, message: &[u8]) -> Uint8Array {
         Uint8Array::from(&self.inner.sign_bytes(message)[..])
+    }
+
+    /// The ML-DSA signature over the same message, by an identity with
+    /// post-quantum keys.
+    #[wasm_bindgen(js_name = signPq)]
+    pub fn sign_pq(&self, message: &[u8]) -> Option<Vec<u8>> {
+        self.inner.raw_keys().pq.map(|secret| secret.sign(message))
     }
 }
 
@@ -554,14 +686,22 @@ impl SendJob {
         &mut self,
         signature: Option<Vec<u8>>,
         signer: Option<Vec<u8>>,
+        pq_signature: Option<Vec<u8>>,
     ) -> JsResult<Uint8Array> {
         let (manifest, mut envelope) = self.sealed.take().ok_or_else(|| js_err("seal() first"))?;
         if let (Some(sig), Some(pk)) = (signature, signer) {
+            if pq_signature
+                .as_ref()
+                .is_some_and(|s| s.len() != pq::SIGNATURE)
+            {
+                return Err(js_err("bad post-quantum signature"));
+            }
             envelope.signature = Some(MetaSignature {
                 signer: key32(&pk, "signer key")?,
                 signature: sig
                     .try_into()
                     .map_err(|_| js_err("signature must be 64 bytes"))?,
+                pq: pq_signature,
             });
         }
         let mut meta = envelope.encode();
@@ -1370,11 +1510,18 @@ impl Receive {
 
     /// Decrypt with shared secrets computed elsewhere: first this device's
     /// X25519 public key, then one `addSecret` per stanza key.
+    /// `pq_seeds`: this device's post-quantum keys, for what was encrypted
+    /// with both schemes.
     #[wasm_bindgen(js_name = setPublicKey)]
-    pub fn set_public_key(&mut self, x25519_public: &[u8]) -> JsResult<()> {
+    pub fn set_public_key(
+        &mut self,
+        x25519_public: &[u8],
+        pq_seeds: Option<Vec<u8>>,
+    ) -> JsResult<()> {
         self.keys = Keys::Shared(SharedSecrets {
             our_public: key32(x25519_public, "X25519 key")?,
             secrets: Vec::new(),
+            pq: pq_seeds.as_deref().map(pq_secret).transpose()?,
         });
         Ok(())
     }
@@ -1525,6 +1672,14 @@ impl Receive {
             }
             Err(e) => return Ok(Some(e.to_string())),
         };
+        // A device known with its post-quantum keys signs with both
+        // schemes, always: with the older one alone, this is not it.
+        let known = opened
+            .signer
+            .and_then(|key| self.trusted.iter().find(|t| t.verifying.to_bytes() == key));
+        if known.is_some_and(|device| opened.check(device) == Signed::Downgraded) {
+            return Ok(Some(OpenMetaError::Downgraded.to_string()));
+        }
         let m = opened.manifest;
         if m.body.length.div_ceil(1 << p.seg_shift) != p.seg_count as u64
             || m.body.segment_blake3.len() != p.seg_count as usize

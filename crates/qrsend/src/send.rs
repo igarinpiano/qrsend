@@ -343,6 +343,28 @@ pub fn run(args: SendArgs) -> Result<()> {
             .iter()
             .map(|t| identity::resolve(t))
             .collect::<Result<Vec<_>>>()?;
+        // Whoever is trusted with its older keys only is encrypted to the
+        // older way: worth saying, since one step mends it.
+        let older: Vec<String> = recipients
+            .iter()
+            .filter(|r| r.pq.is_none())
+            .map(|r| util::printable(&r.name))
+            .collect();
+        if secure && !older.is_empty() {
+            bail!(
+                "--secure sends only what post-quantum keys protect, and {} is trusted with \
+                 older keys only: have it show its ID again (`qrsend id`) and add that",
+                older.join(", ")
+            );
+        }
+        if !older.is_empty() {
+            eprintln!(
+                "Note: {} is trusted with keys from before post-quantum ones, so this transfer \
+                 is encrypted the older way for it. Have it show its ID again (`qrsend id`) and \
+                 add that with `qrsend devices add`.",
+                older.join(", ")
+            );
+        }
         // Sign whenever this device has (or, when encrypting, gets) an identity.
         let signer = if recipients.is_empty() {
             identity::load()?

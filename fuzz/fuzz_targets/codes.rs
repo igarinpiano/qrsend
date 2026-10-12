@@ -1,8 +1,10 @@
 //! The small codes besides frames: feedback, notices, resume codes, link
-//! codes (and the offers in them), and records off a network connection.
+//! codes (and the offers in them), records off a network connection, and
+//! device IDs (as text, as bytes, and in the parts they are shown as).
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use qrsend_core::crypto::{DevicePublic, IdReader};
 use qrsend_core::direct::{self, Record};
 use qrsend_core::feedback::{Feedback, SenderNotice};
 use qrsend_core::link::{self, LinkPart, TcpOffer};
@@ -18,6 +20,11 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(again.session_id, f.session_id);
     }
     let _ = TcpOffer::from_bytes(data);
+    // An ID that is taken says the same when written out again.
+    if let Ok(device) = DevicePublic::from_bytes(data) {
+        let again = DevicePublic::from_bytes(&device.to_bytes().unwrap()).unwrap();
+        assert_eq!(again.fingerprint(), device.fingerprint());
+    }
     for record in direct::unpack(data) {
         let _ = Record::parse(record);
     }
@@ -32,8 +39,14 @@ fuzz_target!(|data: &[u8]| {
         }
         // Parts of messages, one per line, in any order and repeated.
         let mut assembler = link::Assembler::default();
+        let mut ids = IdReader::default();
         for line in text.lines() {
             let _ = assembler.add(line);
+            let _ = ids.add(line);
+        }
+        if let Ok(device) = DevicePublic::parse(text) {
+            let again = DevicePublic::parse(&device.to_id_string()).unwrap();
+            assert_eq!(again.fingerprint(), device.fingerprint());
         }
     }
 });
