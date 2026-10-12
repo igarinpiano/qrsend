@@ -247,15 +247,42 @@ jobs:
           # A package that cannot be published (typically a new one that has
           # no trusted publisher yet — see the header) must not block the
           # others: keep going, publish the main package, then fail the job.
+          #
+          # Two things the registry does that are not failures of a package
+          # (both seen at 0.1.12): the transparency log now and then refuses
+          # an entry it has just taken (TLOG_CREATE_ENTRY_ERROR) — tried
+          # again a little later, the same package goes out; and a version
+          # published minutes ago may not show in `npm view` yet, so that a
+          # rerun of this job publishes it again and is told E409, "already
+          # there". Without the second try, the main package went out while
+          # the one for Apple Silicon was missing.
           failed=""
           publish() {
             name="$(node -p "require('./$1/package.json').name")"
             if npm view "$name@$VERSION" version > /dev/null 2>&1; then
               echo "$name@$VERSION is already published; skipping"
-            elif ! (cd "$1" && npm publish --access public --provenance); then
-              echo "::error::could not publish $name@$VERSION"
-              failed="$failed $name"
+              return 0
             fi
+            for attempt in 1 2; do
+              if out="$(cd "$1" && npm publish --access public --provenance 2>&1)"; then
+                echo "$out"
+                return 0
+              fi
+              echo "$out"
+              if echo "$out" | grep -q -e "E409" -e "previously published"; then
+                echo "$name@$VERSION is already published (not yet listed); skipping"
+                return 0
+              fi
+              # (No trusted publisher: a second try changes nothing.)
+              if [ "$attempt" = 1 ] && ! echo "$out" | grep -q "ENEEDAUTH"; then
+                echo "could not publish $name@$VERSION; trying once more in 30 seconds"
+                sleep 30
+              else
+                break
+              fi
+            done
+            echo "::error::could not publish $name@$VERSION"
+            failed="$failed $name"
           }
           for d in npm-out/qrsend-bin-* npm-out/@qrsend/*; do
             [ -d "$d" ] && publish "$d"
