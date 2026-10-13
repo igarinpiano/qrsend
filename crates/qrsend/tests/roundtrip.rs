@@ -1130,7 +1130,8 @@ fn two_way_over_a_lossy_byte_channel() {
     // No number of frames was asked for: it stopped because it was told to,
     // and before it had buried the receiver under passes on end (with a
     // third lost, one and a half times the data gets there; a sender that
-    // did not wait for the receiver's word wrote eight times as much).
+    // did not wait for the receiver's word wrote eight times as much, and
+    // one that did not wait for a slow receiver to catch up, five times).
     let wrote: u64 = said
         .lines()
         .find_map(|l| l.strip_prefix("Wrote ")?.split(' ').next()?.parse().ok())

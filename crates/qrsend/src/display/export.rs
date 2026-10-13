@@ -221,6 +221,17 @@ pub const UNANSWERED_PASSES: u64 = 3;
 /// condition: when nothing comes, sending goes on.
 const FIRST_WORD: Duration = Duration::from_secs(4);
 const NEXT_WORD: Duration = Duration::from_millis(200);
+/// A receiver that is heard at that point may still be working through
+/// what it was sent: it reports whenever what it has changes (ten times a
+/// second at most), so reports that keep coming mean that it is not done
+/// with the frames it has. The sender then waits until none has come for
+/// `CAUGHT_UP`, for `CATCHING_UP` at most, before it writes more: what it
+/// writes next is then what the receiver still lacks, not what it was about
+/// to find in what it already had. (Without this, how much was written
+/// followed from how slow the receiver was: on a slow machine a sender wrote
+/// five times the data where one and a half were needed.)
+const CAUGHT_UP: Duration = Duration::from_millis(300);
+const CATCHING_UP: Duration = Duration::from_secs(5);
 
 /// Writes frames as text, one per line ("-" = standard output): `count` of
 /// them, or (none) until the receiver reports that it has everything, which
@@ -235,29 +246,44 @@ pub fn text(stream: &mut FrameStream, path: &Path, count: Option<u64>) -> Result
     };
     let mut written = 0;
     let pass = stream.frames_per_pass().max(1);
-    // Frames written since the receiver's last report, and the reports so far.
-    let (mut since, mut reports) = (0u64, 0u64);
+    // Frames written since the receiver was last waited for.
+    let mut since = 0u64;
     while count.is_none_or(|n| written < n) && !stream.finished() {
         if count.is_none() {
             if since >= pass {
+                let reports = stream.reports();
                 let patience = if stream.answered() {
                     NEXT_WORD
                 } else {
                     FIRST_WORD
                 };
-                let until = Instant::now() + patience;
-                while stream.reports() == reports && !stream.finished() && Instant::now() < until {
+                let began = Instant::now();
+                while stream.reports() == reports
+                    && !stream.finished()
+                    && began.elapsed() < patience
+                {
                     std::thread::sleep(Duration::from_millis(5));
+                }
+                // It is heard: until it has nothing new to say.
+                let (mut heard, mut at) = (stream.reports(), Instant::now());
+                while heard != reports
+                    && !stream.finished()
+                    && at.elapsed() < CAUGHT_UP
+                    && began.elapsed() < CATCHING_UP
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                    let now = stream.reports();
+                    if now != heard {
+                        (heard, at) = (now, Instant::now());
+                    }
                 }
                 since = 0;
                 if stream.finished() {
                     break;
                 }
             }
-            let now = stream.reports();
-            if now != reports {
-                (reports, since) = (now, 0);
-            }
+            // (Reports are taken in as they come: they say what to send.)
+            stream.reports();
             if written >= pass * UNANSWERED_PASSES && !stream.answered() {
                 break;
             }
