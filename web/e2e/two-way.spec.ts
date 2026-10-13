@@ -138,3 +138,48 @@ test("feedback by sound: the receiver's chirps reach the sender's microphone", a
     await senderBrowser.close();
   }
 });
+
+// On a phone the bar under the codes grows once the camera is on (its picture
+// while aiming, a line of figures): the codes have less room than when their
+// grid was chosen. With Automatic speed the grid used to stay as chosen, and
+// was then drawn with smaller dots and white all around; and the "+" of the
+// speed controls was left alone on the next line.
+test("two-way on a phone: the codes keep their size when the camera picture takes room", async ({ playwright, baseURL }) => {
+  fs.mkdirSync(WORK, { recursive: true });
+  const wall = path.join(WORK, "two-way-wall.y4m");
+  writeY4m(wall, [blank()]);
+  const browser = await playwright.chromium.launch({ args: camera(wall) });
+  try {
+    const context = await browser.newContext({ baseURL, permissions: ["camera"], viewport: { width: 430, height: 873 }, deviceScaleFactor: 3 });
+    const page = await context.newPage();
+    await enablePreview(page, /Two-way transfer/, /Automatic speed/, /Local network boost/, /Show measurements/);
+    await page.goto("./#/send");
+    await page.getByRole("tab", { name: "Text" }).click();
+    await page.getByPlaceholder("Paste or type anything…").fill("hello");
+    await page.getByRole("checkbox", { name: /Anyone who sees the codes/ }).check();
+    // (Many codes of a size that leaves little to spare on this screen.)
+    await page.getByLabel("Density").selectOption("normal");
+    await page.getByLabel("Codes on screen").selectOption({ label: "As many as fit the screen" });
+    await page.getByRole("button", { name: "Start sending" }).click();
+    const canvas = page.getByLabel("QR code stream");
+    await expect(canvas).toBeVisible();
+    // The camera is on, and its picture is in the bar.
+    const eye = page.locator("video.eye");
+    await expect(eye).toBeVisible();
+    await expect.poll(async () => (await eye.boundingBox())?.height ?? 0).toBeGreaterThan(60);
+    // The dots are as large as the smallest that is ever chosen (3 pixels
+    // of the screen), not smaller: the grid is one that fits the room there is.
+    await expect.poll(async () => Number(await canvas.getAttribute("data-module-px")), { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+    // (And stays so: the room has settled.)
+    await page.waitForTimeout(1500);
+    expect(Number(await canvas.getAttribute("data-module-px"))).toBeGreaterThanOrEqual(3);
+    // Slower, the speed and Faster stand on one line.
+    const slower = (await page.getByRole("button", { name: "Slower" }).boundingBox())!;
+    const faster = (await page.getByRole("button", { name: "Faster" }).boundingBox())!;
+    expect(Math.abs(slower.y - faster.y)).toBeLessThan(2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: path.join(WORK, "two-way-phone.png") });
+  } finally {
+    await browser.close();
+  }
+});

@@ -181,6 +181,9 @@
       if (!last || c * r > last[0] * last[1]) found.push([c, r]);
     }
     if (found.length === 0) found.push([1, 1]);
+    // (The same choices as before: nothing to tell the engine, which would
+    // start finding the best of them over again.)
+    if (found.length === layouts.length && found.every(([c, r], i) => c === layouts[i][0] && r === layouts[i][1])) return;
     // Start from what was asked for (`grid` 0: as many as fit).
     const wanted = grid > 0 ? grid * grid : Infinity;
     const count = layouts.length ? layouts[level][0] * layouts[level][1] : wanted;
@@ -440,6 +443,8 @@
 
   /** White space beside the codes (CSS pixels on each side): room for the camera picture while aiming. */
   let sideRoom = $state(0);
+  /** The size the codes' dots are drawn at, in device pixels. */
+  let modulePx = $state(0);
 
   function draw() {
     if (!shown) return;
@@ -451,6 +456,7 @@
     const dpr = window.devicePixelRatio || 1;
     const used = (cols * (info.modules + info.quiet) + info.quiet) * scale;
     sideRoom = Math.max(0, (canvas.width - used) / 2 / dpr);
+    modulePx = scale;
   }
 
   // Until the receiver has been seen (its answer or feedback code read),
@@ -524,6 +530,18 @@
       draw();
     };
     window.addEventListener("resize", onResize);
+    // The room for the codes changes without the window doing so: the bar
+    // below grows and shrinks (the camera picture while aiming, a line of
+    // figures more, words that wrap). Grids chosen for the room there was
+    // would then be drawn smaller than they were meant, with white around
+    // them. (Once the room has stopped changing: a bar that is being laid
+    // out passes through several heights.)
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const room = new ResizeObserver(() => {
+      clearTimeout(settle);
+      settle = setTimeout(onResize, 150);
+    });
+    room.observe(canvas);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === " ") paused = !paused;
       if (e.key === "+" || e.key === "ArrowUp") faster();
@@ -540,6 +558,8 @@
       ear?.stop();
       scanner?.dispose();
       window.removeEventListener("resize", onResize);
+      room.disconnect();
+      clearTimeout(settle);
       window.removeEventListener("keydown", onKey);
       lock?.release().catch(() => {});
       engine.sendStop().catch(() => {});
@@ -574,7 +594,7 @@
 
 <div class="player" bind:this={root}>
   <div class="stage">
-    <canvas bind:this={canvas} data-frames={frames} aria-label="QR code stream"></canvas>
+    <canvas bind:this={canvas} data-frames={frames} data-module-px={modulePx} aria-label="QR code stream"></canvas>
     {#if finished}
       <div class="finished" role="status">
         <p class="check">✓</p>
@@ -659,11 +679,14 @@
           Two-way{hearing ? " 🎤" : ""}{listenError ? ` (${listenError})` : twoWay && !report ? " …" : ""}{link === "offering" ? " · offering LAN" : ""}
         </button>
       {/if}
-      <button onclick={slower} aria-label="Slower">−</button>
-      <span class="fps" data-testid="fps" title={autoFeature ? "Chosen from the receiver's feedback" : undefined}>
-        {fps} fps{autoFeature && report && !linkUp ? " · auto" : ""}
+      <!-- (One piece: a narrow screen must not leave "+" alone on the next line.) -->
+      <span class="speed">
+        <button onclick={slower} aria-label="Slower">−</button>
+        <span class="fps" data-testid="fps" title={autoFeature ? "Chosen from the receiver's feedback" : undefined}>
+          {fps} fps{autoFeature && report && !linkUp ? " · auto" : ""}
+        </span>
+        <button onclick={faster} aria-label="Faster">+</button>
       </span>
-      <button onclick={faster} aria-label="Faster">+</button>
       <button onclick={() => (paused = !paused)}>{paused ? "Resume" : "Pause"}</button>
       <button class="primary" onclick={stop}>Done</button>
     </div>
@@ -770,6 +793,12 @@
     line-height: 1;
     color: #16a34a;
     margin: 0;
+  }
+  .speed {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
   }
   .fps {
     min-width: 4.5em;
