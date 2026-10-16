@@ -2672,6 +2672,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrsend-js"
+version = "0.1.13"
+dependencies = [
+ "blake3",
+ "js-sys",
+ "qrsend-core",
+ "serde",
+ "serde-wasm-bindgen",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "qrsend-wasm"
 version = "0.1.13"
 dependencies = [
@@ -3019,9 +3031,9 @@ dependencies = [
 
 [[package]]
 name = "ruzstd"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
 dependencies = [
  "twox-hash",
 ]

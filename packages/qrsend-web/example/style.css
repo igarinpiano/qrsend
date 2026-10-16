@@ -1,0 +1,6 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0 auto; max-width: 720px; padding: 16px; }
+canvas, video { display: block; width: 100%; aspect-ratio: 1; background: #fff; }
+video { aspect-ratio: auto; background: #000; }
+progress { width: 100%; }
+footer { margin-top: 32px; font-size: 0.8em; opacity: 0.7; }
