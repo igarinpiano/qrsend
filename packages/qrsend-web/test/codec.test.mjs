@@ -98,6 +98,11 @@ test("paths are made safe to save", async () => {
   // What could land outside the receiver's folder is not sent at all.
   await assert.rejects(Encoder.create([{ path: "../../etc/passwd", data: "no" }]), /unsafe path/);
   await assert.rejects(Encoder.create([{ path: "C:/Windows/x", data: "no" }]), /unsafe path/);
+  // Slashes at either end go, backslashes separate folders; a long run of
+  // slashes takes no time.
+  const slashes = await Encoder.create([{ path: "/a\\b.txt/", data: "x" }, { path: "c" + "/".repeat(100_000) + "d", data: "y" }]);
+  const tidy = (await decode(codes(slashes))).result().files.map((f) => f.path).sort();
+  assert.deepEqual(tidy, ["a/b.txt", "c/d"]);
   // Names some systems refuse, and names that differ only in case, are changed.
   const encoder = await Encoder.create([
     { path: "CON", data: "1" },

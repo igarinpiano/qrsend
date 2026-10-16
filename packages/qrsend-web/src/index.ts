@@ -213,11 +213,13 @@ async function pack(e: WasmEncoder, content: Content, options: EncodeOptions): P
   // Folders that files are in are added for them; empty ones are listed.
   const folders = new Set<string>();
   for (const item of items) {
-    const path = item.path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-    if (!path) throw new Error("an item without a path");
-    const parts = path.split("/");
-    for (let i = 1; i < parts.length; i++) {
-      const folder = parts.slice(0, i).join("/");
+    // Backslashes separate folders too; empty names ("a//b", "/a/") go.
+    const parts = item.path.replaceAll("\\", "/").split("/").filter(Boolean);
+    if (!parts.length) throw new Error("an item without a path");
+    const path = parts.join("/");
+    let folder = "";
+    for (const part of parts.slice(0, -1)) {
+      folder = folder ? `${folder}/${part}` : part;
       if (!folders.has(folder)) {
         folders.add(folder);
         e.addDir(folder, undefined);
