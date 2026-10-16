@@ -226,10 +226,13 @@ pub fn finalize(
             }
             // Made anew (never one that someone else put there), and for this
             // user only while it fills.
-            let mut new_dir = fs::DirBuilder::new();
             #[cfg(unix)]
-            std::os::unix::fs::DirBuilderExt::mode(&mut new_dir, 0o700);
-            new_dir.create(&partial)?;
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                fs::DirBuilder::new().mode(0o700).create(&partial)?;
+            }
+            #[cfg(not(unix))]
+            fs::DirBuilder::new().create(&partial)?;
             if let Err(e) = unpack(
                 manifest,
                 reader,
