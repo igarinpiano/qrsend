@@ -37,7 +37,7 @@
 #
 # THE LIBRARY FOR WEB PAGES (@qrsend/web, packages/qrsend-web) came later
 # and has its own job (npm-library, run with "Publish to npm"). Its first
-# version goes out by hand, from the release's tag:
+# version (0.1.13) went out by hand; were the package ever made anew, that is:
 #   cd packages/qrsend-web && npm ci && npm run build && npm test
 #   npm publish --access public
 # then npmjs.com → @qrsend/web → Settings → Trusted publishing, as above
