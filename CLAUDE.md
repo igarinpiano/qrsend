@@ -116,7 +116,7 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
 - `cargo fmt` で整形されるため、スクリプトで文字列置換して編集すると一致しないことがある。編集は Read → Edit で行う。
 - core は WASM でも使うので、スレッド・ファイルシステム・プロセスを直接使わない。zstd は feature で切替: `zstd-native`（既定、C ライブラリ）/ `ruzstd`（WASM、レベル 1 相当・finish 時に一括圧縮）。どちらも標準 zstd なので相互に読める。
 - 乱数: core は rand を使わず getrandom 0.2 を直接使う（age と同じ版。wasm では qrsend-wasm が `js` feature を有効化）。p256 0.14 などが引き込む getrandom 0.4 は、qrsend-wasm の `getrandom04`（`wasm_js` feature）で有効化している（無いと wasm のビルドが compile_error で止まる）。CLI は rand 0.10。
-- 依存の版の決まり（Dependabot の `ignore` に理由つきで書いてある）: `bech32` は age と同じ版（0.11。型を渡し合うので）、core の `getrandom` は 0.2、web の TypeScript は svelte-check が対応するまで 6。
+- 依存の版の決まり（Dependabot の `ignore` に理由つきで書いてある）: `bech32` は age と同じ版（0.11。型を渡し合うので）、core の `getrandom` は 0.2、core の `sha3` は ml-kem・age と同じ 0.10（2026-10-16、0.12 の提案〔#10〕を見送った: ビルドも同じハッシュも通るが、SHA-3 が 2 つ入る）、web の TypeScript は svelte-check が対応するまで 6（ライブラリ `packages/qrsend-web` は svelte-check を使わないので 7 でよい）。
 - **linkcert の証明書は版が変わっても 1 バイトも変えてはいけない**（ブラウザと CLI がそれぞれ種から作って一致させるので、版の違う相手とつながらなくなる）。`linkcert::tests::the_certificate_of_a_seed_never_changes` が固定値で見張る（p256 を 0.13 → 0.14 に上げたときに追加）。
 - CLI のデコード（decode.rs）: rxing は縮小・圧縮に強いが多数のコードは苦手、rqrr は位置（四隅・モジュール数）を返すがスクリーンショットに弱い。全体を一度に読むと 2px モジュールの 28 個入りフレームでどちらも半分程度しか読めなかったので、「rxing で 1 個 → rqrr で位置を測る → 4 モジュール間隔の格子をたどって各セルを切り出し個別にデコード（失敗時は 2〜3 倍に拡大して再試行）」にしている。実測: 12×12 で 144/144、4K・1px モジュール 299 個で 290。rqrr を密なフレーム全体にかけると数十秒かかるので避ける。
 - QR 生成は fast_qr ＋マスク固定（1 個 0.9ms。qrcode crate のマスク選定は 11ms）。qrcode crate は容量計算と ID 用 QR（render_text）にだけ使う。

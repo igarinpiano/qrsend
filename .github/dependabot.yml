@@ -30,6 +30,12 @@ updates:
       # (Patch releases still come, of 0.2 and of 0.4.)
       - dependency-name: getrandom
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # The version ml-kem and age use (for the hybrid key combiner,
+      # PROTOCOL §9.1), so that one copy is built: a newer one compiles and
+      # gives the same hashes, but builds a second SHA-3 into every binary and
+      # the WebAssembly (remove when ml-kem moves to a newer sha3).
+      - dependency-name: sha3
+        versions: [">= 0.11"]
 
   - package-ecosystem: cargo
     directory: /fuzz
