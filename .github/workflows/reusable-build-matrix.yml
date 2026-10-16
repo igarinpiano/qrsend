@@ -98,10 +98,15 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
-          targets: ${{ matrix.universal && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      # rustup itself (on every runner) rather than an action that wraps it:
+      # one third-party action fewer.
+      - name: Install Rust (stable)
+        shell: bash
+        env:
+          RUST_TARGETS: ${{ matrix.universal && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --target "$RUST_TARGETS"
+          rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}

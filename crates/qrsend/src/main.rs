@@ -47,7 +47,7 @@ enum Cmd {
     /// Show files, folders or text as a QR code stream
     Send(Box<send::SendArgs>),
     /// Receive a QR code stream from a video or images
-    Recv(recv::RecvArgs),
+    Recv(Box<recv::RecvArgs>),
     /// Show this device's ID (for others to encrypt to it)
     Id(devices::IdArgs),
     /// Manage trusted devices
@@ -101,7 +101,7 @@ fn main() {
 fn run() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Send(args) => send::run(*args),
-        Cmd::Recv(args) => recv::run(args),
+        Cmd::Recv(args) => recv::run(*args),
         Cmd::Id(args) => devices::id(args),
         Cmd::Devices(cmd) => devices::devices(cmd),
         Cmd::Inbox(cmd) => inbox::run(cmd),
