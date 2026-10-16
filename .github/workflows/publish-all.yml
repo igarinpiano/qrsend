@@ -35,6 +35,15 @@
 #        environment npm
 # After that, every release is just this workflow with everything selected.
 #
+# THE LIBRARY FOR WEB PAGES (@qrsend/web, packages/qrsend-web) came later
+# and has its own job (npm-library, run with "Publish to npm"). Its first
+# version goes out by hand, from the release's tag:
+#   cd packages/qrsend-web && npm ci && npm run build && npm test
+#   npm publish --access public
+# then npmjs.com → @qrsend/web → Settings → Trusted publishing, as above
+# (environment npm). Until then the npm-library job fails with ENEEDAUTH;
+# once that version is out it skips it.
+#
 # ADDING A PLATFORM LATER: its npm package does not exist yet, so the npm
 # stage publishes everything else and then fails naming it. Publish it once
 # with `scripts/npm-publish-remaining.sh <version> --trust` (which also adds
@@ -295,6 +304,85 @@ jobs:
             echo "::error::not published:$failed — publish them once by hand (scripts/npm-publish-remaining.sh $VERSION) and add their trusted publishers"
             exit 1
           fi
+
+  # The library for web pages (packages/qrsend-web, @qrsend/web). Its own
+  # job beside npm: it is built from the sources here (WebAssembly and
+  # TypeScript), not from the CLI binaries, and a failure of one must not
+  # hold back the other.
+  npm-library:
+    needs: [check-version, github-release]
+    if: |
+      always() && inputs.publish_npm &&
+      needs.check-version.result == 'success' &&
+      needs.github-release.result != 'failure' && needs.github-release.result != 'cancelled'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write  # npm Trusted Publishing (OIDC)
+    defaults:
+      run:
+        working-directory: packages/qrsend-web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - name: Version matches Cargo.toml
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          if [ "$v" != "$VERSION" ]; then
+            echo "::error::packages/qrsend-web/package.json version ($v) does not match Cargo.toml ($VERSION)."
+            exit 1
+          fi
+      - name: Install Rust (stable)
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --target wasm32-unknown-unknown
+          rustup default stable
+      - name: Install wasm-bindgen
+        run: command -v wasm-bindgen || cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          # (Nothing cached: what a release builds comes from the lockfile alone.)
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Publish
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          # (As in the npm job: let npm fall back to the OIDC exchange.)
+          unset NODE_AUTH_TOKEN
+          unset NPM_CONFIG_USERCONFIG
+          name="$(node -p "require('./package.json').name")"
+          if npm view "$name@$VERSION" version > /dev/null 2>&1; then
+            echo "$name@$VERSION is already published; skipping"
+            exit 0
+          fi
+          for attempt in 1 2; do
+            if out="$(npm publish --access public --provenance 2>&1)"; then
+              echo "$out"
+              exit 0
+            fi
+            echo "$out"
+            if echo "$out" | grep -q -e "E409" -e "previously published"; then
+              echo "$name@$VERSION is already published (not yet listed); skipping"
+              exit 0
+            fi
+            if echo "$out" | grep -q "ENEEDAUTH"; then
+              echo "::error::$name has no trusted publisher yet — publish it once by hand and add one (see the header of this workflow)"
+              exit 1
+            fi
+            [ "$attempt" = 1 ] && { echo "trying once more in 30 seconds"; sleep 30; }
+          done
+          echo "::error::could not publish $name@$VERSION"
+          exit 1
 
   # (Beside npm, not after it. Like npm it follows the builds — where they
   # ran: with only crates.io selected there are none — and the GitHub Release.)

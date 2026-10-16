@@ -1,7 +1,6 @@
 {
   "name": "@qrsend/web",
   "version": "0.1.13",
-  "private": true,
   "description": "Send files, folders and text through a stream of QR codes: show them on one screen, read them with another device's camera.",
   "license": "Apache-2.0",
   "repository": {
@@ -28,6 +27,9 @@
     }
   },
   "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
