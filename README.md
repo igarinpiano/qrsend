@@ -20,6 +20,10 @@ rebuilds the data from any large-enough subset of them.
 
 **Web app:** <https://igarinpiano.github.io/qrsend/>
 
+**Library for web pages** (not published yet): show a transfer as QR codes
+on your own page and read it with a camera on another, in a few lines —
+[packages/qrsend-web](packages/qrsend-web/README.md).
+
 ## Install
 
 ```bash

@@ -57,6 +57,17 @@ updates:
       - dependency-name: typescript
         versions: [">= 7"]
 
+  - package-ecosystem: npm
+    directory: /packages/qrsend-web
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      library:
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 10
+
   # The actions are pinned to commits: this moves the pins (and the version
   # comments next to them) when new versions come out.
   - package-ecosystem: github-actions

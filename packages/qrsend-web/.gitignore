@@ -1,0 +1,7 @@
+/node_modules
+/dist
+/src/wasm
+/LICENSE
+/test-results
+/playwright-report
+/example/dist

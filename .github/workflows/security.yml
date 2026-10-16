@@ -4,7 +4,7 @@
 #
 # - Dependencies: RustSec advisories, licenses and sources of every crate
 #   (cargo-deny, deny.toml); npm advisories and registry signatures of the
-#   web app's packages.
+#   packages of the web app and of the library for web pages.
 # - Code: CodeQL's security queries for the Rust, the TypeScript and the
 #   workflows themselves.
 # - Workflows: zizmor (injection, credentials, pinning, permissions).
@@ -51,11 +51,15 @@ jobs:
           command: check advisories
 
   npm-dependencies:
-    name: npm dependencies (advisories, signatures)
+    name: npm dependencies (advisories, signatures; ${{ matrix.directory }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        directory: [web, packages/qrsend-web]
     defaults:
       run:
-        working-directory: web
+        working-directory: ${{ matrix.directory }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -9,6 +9,9 @@ const SIG_NONE: u8 = 0;
 const SIG_ED25519: u8 = 1;
 /// Ed25519 and ML-DSA-65, one after the other.
 const SIG_HYBRID: u8 = 2;
+/// Length of an ML-DSA-65 signature (`pq::SIGNATURE`; here so that a build
+/// without the `crypto` feature reads envelopes all the same).
+pub const PQ_SIGNATURE: usize = 3309;
 /// Domain separation prefix for meta signatures.
 pub const SIGNATURE_CONTEXT: &[u8] = b"QRSEND-META-v1";
 /// Upper bound on the decompressed manifest JSON, against decompression bombs.
@@ -109,7 +112,7 @@ pub fn session_hex(session_id: u32) -> String {
 pub struct MetaSignature {
     pub signer: [u8; 32],
     pub signature: [u8; 64],
-    /// The ML-DSA-65 signature ([`crate::pq::SIGNATURE`] bytes). Its key is
+    /// The ML-DSA-65 signature ([`PQ_SIGNATURE`] bytes). Its key is
     /// not carried: whoever trusts the signer knows it.
     pub pq: Option<Vec<u8>>,
 }
@@ -191,7 +194,7 @@ impl MetaEnvelope {
             }),
             alg @ (SIG_ED25519 | SIG_HYBRID) => {
                 let pq = match alg {
-                    SIG_HYBRID => crate::pq::SIGNATURE,
+                    SIG_HYBRID => PQ_SIGNATURE,
                     _ => 0,
                 };
                 if rest.len() < 96 + pq {
@@ -373,12 +376,12 @@ pub(crate) mod tests {
             signature: Some(MetaSignature {
                 signer: [7; 32],
                 signature: [9; 64],
-                pq: Some(vec![5; crate::pq::SIGNATURE]),
+                pq: Some(vec![5; PQ_SIGNATURE]),
             }),
             manifest_z: vec![1, 2, 3],
         };
         let bytes = hybrid.encode();
-        assert_eq!(bytes.len(), env.encode().len() + crate::pq::SIGNATURE);
+        assert_eq!(bytes.len(), env.encode().len() + PQ_SIGNATURE);
         assert_eq!(MetaEnvelope::decode(&bytes).unwrap(), hybrid);
         assert!(matches!(
             MetaEnvelope::decode(&bytes[..3000]),

@@ -1,0 +1,45 @@
+{
+  "name": "@qrsend/web",
+  "version": "0.1.13",
+  "private": true,
+  "description": "Send files, folders and text through a stream of QR codes: show them on one screen, read them with another device's camera.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/igarinpiano/qrsend.git",
+    "directory": "packages/qrsend-web"
+  },
+  "homepage": "https://github.com/igarinpiano/qrsend/tree/main/packages/qrsend-web#readme",
+  "keywords": ["qr", "qr-code", "file-transfer", "air-gap", "fountain-code", "raptorq", "camera"],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./player": {
+      "types": "./dist/player.d.ts",
+      "default": "./dist/player.js"
+    },
+    "./scanner": {
+      "types": "./dist/scanner.d.ts",
+      "default": "./dist/scanner.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "zxing-wasm": "^3.1.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.2"
+  }
+}
