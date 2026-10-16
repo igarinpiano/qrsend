@@ -65,10 +65,77 @@ test("the camera reads what the CLI shows", async () => {
   }
 });
 
+/** The number of the picture on the send page's canvas, and how many were made. */
+async function shown(page) {
+  const status = await page.locator("#status").textContent();
+  const m = status.match(/Picture (\d+)(?: of (\d+))?/);
+  return { picture: Number(m[1]), pictures: Number(m[2] ?? m[1]), paused: status.includes("paused") };
+}
+
+const canvasImage = (page) => page.locator("#codes").evaluate((c) => c.toDataURL());
+
+test("the player pauses, steps forward and back, and changes speed", async ({ page }) => {
+  await page.goto("index.html");
+  // A text that takes many codes.
+  let text = "";
+  for (let i = 0; i < 20000; i++) text += String.fromCharCode(97 + ((i * 7919) % 26) ^ (i % 3));
+  await page.locator("#text").fill(text);
+  await page.locator("#send").click();
+  await expect(page.locator("#status")).toHaveText(/Picture \d+/);
+  // A few pictures in, so that there are some to step back to.
+  await expect.poll(async () => (await shown(page)).picture).toBeGreaterThanOrEqual(3);
+
+  // Paused: the picture stays.
+  await page.locator("#toggle").click();
+  await expect(page.locator("#toggle")).toHaveText("Play");
+  const paused = await shown(page);
+  expect(paused.paused).toBe(true);
+  const before = await canvasImage(page);
+  await page.waitForTimeout(500);
+  expect(await shown(page)).toEqual(paused);
+  expect(await canvasImage(page)).toBe(before);
+
+  // Forward: a new picture. Back: the one before, as it was.
+  await page.locator("#forward").click();
+  expect(await shown(page)).toEqual({ picture: paused.picture + 1, pictures: paused.pictures + 1, paused: true });
+  const next = await canvasImage(page);
+  expect(next).not.toBe(before);
+  await page.locator("#back").click();
+  expect(await shown(page)).toEqual({ picture: paused.picture, pictures: paused.pictures + 1, paused: true });
+  expect(await canvasImage(page)).toBe(before);
+  await page.locator("#back").click();
+  expect((await shown(page)).picture).toBe(paused.picture - 1);
+  // Forward again goes through the pictures shown before, then to new ones.
+  await page.locator("#forward").click();
+  await page.locator("#forward").click();
+  expect(await canvasImage(page)).toBe(next);
+  await page.locator("#forward").click();
+  expect(await shown(page)).toEqual({ picture: paused.picture + 2, pictures: paused.pictures + 2, paused: true });
+  // The keyboard: space plays.
+  await page.locator("#codes").click();
+  await page.keyboard.press("Space");
+  await expect(page.locator("#toggle")).toHaveText("Pause");
+
+  // The speed, in milliseconds per picture.
+  const rate = async (ms, seconds) => {
+    await page.locator("#interval").fill(String(ms));
+    await page.locator("#interval").dispatchEvent("change");
+    const a = (await shown(page)).pictures;
+    await page.waitForTimeout(seconds * 1000);
+    return ((await shown(page)).pictures - a) / seconds;
+  };
+  const slow = await rate(500, 3);
+  expect(slow).toBeGreaterThanOrEqual(1.3);
+  expect(slow).toBeLessThanOrEqual(2.7);
+  const fast = await rate(50, 2);
+  expect(fast).toBeGreaterThanOrEqual(12);
+  expect(fast).toBeLessThanOrEqual(22);
+});
+
 test("the send page shows codes, with the trademark notice", async ({ page }) => {
   await page.goto("index.html");
   await expect(page.locator("#trademark")).toHaveText(/QR Code is a registered trademark of DENSO WAVE INCORPORATED/);
   await page.locator("#text").fill("hello");
   await page.locator("#send").click();
-  await expect(page.locator("#status")).toHaveText(/codes shown/);
+  await expect(page.locator("#status")).toHaveText(/codes made/);
 });

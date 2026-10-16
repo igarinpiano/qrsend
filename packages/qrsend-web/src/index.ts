@@ -143,6 +143,11 @@ export class Encoder {
     return this.inner.nextModules();
   }
 
+  /** A code's text (from `next()`) drawn as `nextModules()` draws it: to show a code again. */
+  render(text: string): Uint8Array {
+    return this.inner.render(text);
+  }
+
   /** Modules on a side of a code. */
   get size(): number {
     return this.inner.size;

@@ -5,7 +5,7 @@ QR コードのストリームでテキスト・ファイル・フォルダを�
 - 構想・決定事項: `docs/CONCEPT.md`
 - 耐量子暗号への移行の計画と記録: `docs/POST-QUANTUM.md`（**フェーズを進めたら表と記録を更新する**）
 - ワイヤ形式の仕様: `docs/PROTOCOL.md`（**プロトコルに触れる変更は必ずここも更新する**）
-- Web ページ向けライブラリ（npm、仮名 `@qrsend/web`）の決めたことと中身: `docs/LIBRARY.md`（利用者向けの説明は `packages/qrsend-web/README.md`。**API を変えたら両方を直す**）
+- Web ページ向けライブラリ（npm、仮名 `@qrsend/web`）の決めたことと中身: `docs/LIBRARY.md`（利用者向けの説明は `packages/qrsend-web/README.md`。**API を変えたら両方を直す**）。**ライブラリに関わるものはすべて英語**（2026-10-16、ユーザーの指示。コード・コメント・README・`docs/LIBRARY.md`・見本・テストのデータまで。ほかの docs は日本語のまま）
 - CLI の全コマンド・全オプションの解説: `docs/CLI.md`（**コマンドやオプションを足したら必ずここにも書く**。`crates/qrsend/tests/reference.rs` が `--help` に出るものを全部この文書の該当する見出しの下で探すので、書き忘れるとテストが落ちる。消したオプションの記述が残っていても落ちないので、消すときは自分で直す）
 
 ## ユーザーについて
@@ -57,7 +57,7 @@ web/                 Svelte 5 + Vite + TS の PWA
   src/lib/guide.ts          受信カメラの持ち方の案内（preview「Camera guidance」）。純粋なロジックで、e2e/guide.spec.ts が Node 上で直接テストする
   src/views/                Home / Send(+Player) / Receive(+Camera, Result) / Devices / Inbox / Storage / Preview（Feature preview）
   e2e/                      Playwright。CLI が書いた Y4M を Chrome の仮想カメラに流す相互運用テスト（暗号化・多セグメント・ZIP を含む）。bridge.ts は 2 つのページを「互いのカメラ」として生でつなぐ（BroadcastChannel で画像を送り、getUserMedia を canvas.captureStream に差し替える）。相手の反応を見て変わる機能（自動調節、案内）はこれで試す
-packages/qrsend-web/ Web ページ向けライブラリ（npm。名前は公開時に決める、いまは private）。index（Encoder / Decoder、Node でも動く）・player（QrPlayer）・scanner（QrScanner、Worker で BarcodeDetector → ZXing）。example/ を Vite でビルドして e2e。docs/LIBRARY.md
+packages/qrsend-web/ Web ページ向けライブラリ（npm。名前は公開時に決める、いまは private）。index（Encoder / Decoder、Node でも動く）・player（QrPlayer。一時停止・再生、コマ送り・コマ戻し〔直近 300 枚をコードの文字列で覚える〕、速さは ms/枚 の `interval`。ユーザーの指定: 速く/遅くや fps ではなく ms/枚）・scanner（QrScanner、Worker で BarcodeDetector → ZXing）。example/ を Vite でビルドして e2e。docs/LIBRARY.md
 npm/                 npm 配布用: assemble.py（機種別パッケージの対応表）と launcher.js
 fuzz/                cargo-fuzz のターゲット（frame / codes / meta / payload / receiver / sound。他人から届くものを読む所すべて）と seeds/（正しい入力を書き出す種の生成器）。メインのワークスペースには入れていない（nightly が要る）
 deny.toml            cargo-deny の設定（RustSec の勧告・ライセンス・取得元）

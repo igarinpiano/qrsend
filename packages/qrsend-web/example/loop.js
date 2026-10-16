@@ -17,7 +17,7 @@ for (let i = 0; i < size; i++) {
 }
 
 const canvas = document.getElementById("codes");
-const player = new QrPlayer(canvas, { fps: Number(params.get("fps") ?? 15), grid, minModulePixels: 3 });
+const player = new QrPlayer(canvas, { interval: Number(params.get("interval") ?? 66), grid, minModulePixels: 3 });
 await player.play([
   { path: "folder/data.bin", data: bytes },
   { path: "hello.txt", data: "hello" },

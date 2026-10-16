@@ -283,8 +283,13 @@ impl Encoder {
     #[wasm_bindgen(js_name = nextModules)]
     pub fn next_modules(&mut self) -> JsResult<Uint8Array> {
         let text = self.next_text()?;
-        let params = self.stream()?.params;
-        let m = qr::render(&text, params).map_err(js_err)?;
+        self.render(&text)
+    }
+
+    /// A code's text (from `next`) drawn as `nextModules` draws it: to show
+    /// a code again without keeping its picture.
+    pub fn render(&self, text: &str) -> JsResult<Uint8Array> {
+        let m = qr::render(text, self.sealed()?.params).map_err(js_err)?;
         let modules: Vec<u8> = m.modules.into_iter().map(u8::from).collect();
         Ok(Uint8Array::from(&modules[..]))
     }

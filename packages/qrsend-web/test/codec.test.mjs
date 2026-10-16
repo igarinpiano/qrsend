@@ -50,9 +50,9 @@ test("loads and tells its version", async () => {
 });
 
 test("a text comes through", async () => {
-  const encoder = await Encoder.create("Hello, QR codes! 日本語も。");
+  const encoder = await Encoder.create("Hello, QR codes — “quoted” and checked ✓");
   const decoder = await decode(codes(encoder));
-  assert.deepEqual(decoder.result(), { kind: "text", text: "Hello, QR codes! 日本語も。" });
+  assert.deepEqual(decoder.result(), { kind: "text", text: "Hello, QR codes — “quoted” and checked ✓" });
   assert.equal(decoder.progress.state, "complete");
   assert.equal(decoder.progress.ratio, 1);
 });
@@ -132,6 +132,10 @@ test("codes have the size asked for", async () => {
   assert.equal(m.length, encoder.size * encoder.size);
   assert.ok(m.every((v) => v === 0 || v === 1));
   assert.equal(encoder.count, 1);
+  // A text drawn again comes out the same.
+  const text = encoder.next();
+  assert.deepEqual(encoder.render(text), encoder.render(text));
+  assert.equal(encoder.render(text).length, m.length);
   // A small transfer picks small codes by itself.
   assert.ok((await Encoder.create("hi")).qrVersion <= 10);
 });

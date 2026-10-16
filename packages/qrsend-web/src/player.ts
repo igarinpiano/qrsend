@@ -12,8 +12,13 @@ export { QR_CODE_TRADEMARK } from "./index.js";
 const QUIET = 4;
 
 export interface PlayerOptions extends EncodeOptions {
-  /** Pictures per second (default 10). Slower is easier for a weak camera; faster sends more. */
-  fps?: number;
+  /**
+   * How long each picture stays, in milliseconds (default 100: ten pictures a
+   * second). Longer is easier for a weak camera; shorter sends more. A
+   * picture cannot change more often than the display does (about 16 ms at
+   * 60 Hz). Can be changed while playing (`interval`).
+   */
+  interval?: number;
   /**
    * How many codes each picture holds: a number (default 1), `[columns,
    * rows]`, or "fill" for as many as fit with modules of at least
@@ -22,10 +27,16 @@ export interface PlayerOptions extends EncodeOptions {
   grid?: number | readonly [number, number] | "fill";
   /** With `grid: "fill"`: the smallest module, in device pixels (default 4). */
   minModulePixels?: number;
+  /** How many of the pictures shown are kept for stepping back (default 300). */
+  history?: number;
 }
 
 export interface PictureInfo {
-  /** Codes shown so far. */
+  /** The number of the picture on the canvas: 1 for the first one shown. */
+  picture: number;
+  /** Pictures made so far (the picture on the canvas is an earlier one after stepping back). */
+  pictures: number;
+  /** Codes made so far. */
   count: number;
   /** Codes that hold everything once. */
   codesPerRound: number;
@@ -33,21 +44,36 @@ export interface PictureInfo {
   codes: number;
   /** Device pixels per module. */
   modulePixels: number;
+  paused: boolean;
+}
+
+/** A picture shown: the texts of its codes, so that it can be shown again. */
+interface Picture {
+  number: number;
+  texts: string[];
+  cols: number;
+  rows: number;
 }
 
 /**
  * Shows a transfer on a `<canvas>` as QR codes, for another device's camera
  * to read (with `QrScanner` from `@qrsend/web/scanner`, or the QRSend app).
- * It goes on until `stop()`. Give the canvas its size with CSS; the codes are
- * drawn sharp at the device's pixel ratio, centered, on white.
+ * It goes on until `stop()`; it can be paused, stepped picture by picture
+ * (also back to pictures shown before) and sped up or slowed down. Give the
+ * canvas its size with CSS; the codes are drawn sharp at the device's pixel
+ * ratio, centered, on white.
  *
  * ```js
- * const player = new QrPlayer(document.querySelector("canvas"), { fps: 10 });
+ * const player = new QrPlayer(document.querySelector("canvas"), { interval: 100 });
  * await player.play(file);
+ * player.pause();
+ * player.stepBack();
+ * player.interval = 250;
+ * player.resume();
  * ```
  */
 export class QrPlayer {
-  /** Called after each picture. */
+  /** Called when a picture is drawn, and when playing is paused or resumed. */
   onpicture?: (info: PictureInfo) => void;
 
   private encoder?: Encoder;
@@ -55,6 +81,13 @@ export class QrPlayer {
   private last = 0;
   private options: PlayerOptions;
   private turn = 0;
+  private isPaused = false;
+  /** The pictures shown, oldest first, and which of them is on the canvas. */
+  private shown: Picture[] = [];
+  private at = -1;
+  private made = 0;
+  /** The canvas size the picture on it was drawn for. */
+  private drawnFor = "";
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -63,15 +96,17 @@ export class QrPlayer {
     this.options = { ...options };
   }
 
-  /** Pictures per second. Can be changed while playing. */
-  get fps(): number {
-    return this.options.fps ?? 10;
+  /** Milliseconds each picture stays. Can be changed while playing. */
+  get interval(): number {
+    return this.options.interval ?? 100;
   }
 
-  set fps(value: number) {
-    this.options.fps = value;
+  set interval(ms: number) {
+    if (!(ms > 0)) throw new RangeError("the interval must be more than 0 ms");
+    this.options.interval = ms;
   }
 
+  /** Codes per picture, for the pictures made from now on. */
   get grid(): PlayerOptions["grid"] {
     return this.options.grid ?? 1;
   }
@@ -80,20 +115,26 @@ export class QrPlayer {
     this.options.grid = value;
   }
 
+  /** Whether something is loaded (playing or paused). */
   get playing(): boolean {
-    return this.frame !== 0;
+    return this.encoder !== undefined;
   }
 
-  /** The encoder of what is playing (its size, `codesPerRound`, …). */
+  get paused(): boolean {
+    return this.isPaused;
+  }
+
+  /** The encoder of what is loaded (its size, `codesPerRound`, …). */
   get current(): Encoder | undefined {
     return this.encoder;
   }
 
   /**
    * Packs `content` and starts showing it (replacing whatever played).
-   * Resolves once the first picture is drawn.
+   * Resolves once the first picture is drawn. With `{ paused: true }` it
+   * stays on the first picture until `resume()` or a step.
    */
-  async play(content: Content, options: EncodeOptions = {}): Promise<Encoder> {
+  async play(content: Content, options: EncodeOptions & { paused?: boolean } = {}): Promise<Encoder> {
     this.stop();
     const turn = this.turn;
     const encoder = await Encoder.create(content, { ...this.options, ...options });
@@ -102,10 +143,51 @@ export class QrPlayer {
       throw new DOMException("stopped before it started", "AbortError");
     }
     this.encoder = encoder;
-    this.last = 0;
-    this.draw();
+    this.isPaused = options.paused ?? false;
+    this.last = performance.now();
+    this.forward();
     this.frame = requestAnimationFrame(this.tick);
     return encoder;
+  }
+
+  /** Stays on the picture shown. */
+  pause(): void {
+    this.isPaused = true;
+    this.report();
+  }
+
+  /** Goes on from the picture shown (through the pictures stepped back over, then new ones). */
+  resume(): void {
+    if (!this.isPaused) return;
+    this.isPaused = false;
+    this.last = performance.now();
+    this.report();
+  }
+
+  /** Pauses, or resumes when paused. */
+  toggle(): void {
+    if (this.isPaused) this.resume();
+    else this.pause();
+  }
+
+  /** Pauses and shows the next picture. */
+  stepForward(): void {
+    if (!this.encoder) return;
+    this.isPaused = true;
+    this.forward();
+  }
+
+  /** Pauses and shows the picture before. Returns false at the oldest picture kept (`history`). */
+  stepBack(): boolean {
+    if (!this.encoder) return false;
+    this.isPaused = true;
+    if (this.at <= 0) {
+      this.report();
+      return false;
+    }
+    this.at--;
+    this.draw();
+    return true;
   }
 
   /** Stops, clears the canvas and frees what was playing. */
@@ -115,38 +197,92 @@ export class QrPlayer {
     this.frame = 0;
     this.encoder?.free();
     this.encoder = undefined;
+    this.shown = [];
+    this.at = -1;
+    this.made = 0;
+    this.drawnFor = "";
+    this.isPaused = false;
     const ctx = this.canvas.getContext("2d");
     ctx?.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
   private tick = (now: number): void => {
     if (!this.encoder) return;
-    const interval = 1000 / Math.max(0.1, this.fps);
-    if (now - this.last >= interval) {
+    const interval = this.interval;
+    if (!this.isPaused && now - this.last >= interval) {
       // Keep to the rate on average, without catching up after a pause.
       this.last = now - this.last > 2 * interval ? now : this.last + interval;
+      this.forward();
+    } else if (this.size() !== this.drawnFor) {
+      // The canvas changed size: the same picture, drawn anew.
       this.draw();
     }
     this.frame = requestAnimationFrame(this.tick);
   };
 
+  /** The next picture: one stepped back over, or a new one. */
+  private forward(): void {
+    if (this.at < this.shown.length - 1) {
+      this.at++;
+      this.draw();
+      return;
+    }
+    const encoder = this.encoder!;
+    const [w, h] = this.pixels();
+    if (w === 0 || h === 0) return;
+    const [cols, rows] = layout(this.grid, encoder.size, w, h, this.options.minModulePixels ?? 4);
+    const texts: string[] = [];
+    for (let i = 0; i < cols * rows; i++) texts.push(encoder.next());
+    this.shown.push({ number: ++this.made, texts, cols, rows });
+    const keep = Math.max(1, Math.floor(this.options.history ?? 300));
+    if (this.shown.length > keep) this.shown.splice(0, this.shown.length - keep);
+    this.at = this.shown.length - 1;
+    this.draw();
+  }
+
+  /** The canvas in device pixels. */
+  private pixels(): [number, number] {
+    const dpr = globalThis.devicePixelRatio || 1;
+    const canvas = this.canvas;
+    return [Math.round((canvas.clientWidth || canvas.width) * dpr), Math.round((canvas.clientHeight || canvas.height) * dpr)];
+  }
+
+  private size(): string {
+    return this.pixels().join("x");
+  }
+
   private draw(): void {
     const encoder = this.encoder!;
+    const picture = this.shown[this.at];
+    if (!picture) return;
     const canvas = this.canvas;
-    const dpr = globalThis.devicePixelRatio || 1;
-    const w = Math.round((canvas.clientWidth || canvas.width) * dpr);
-    const h = Math.round((canvas.clientHeight || canvas.height) * dpr);
+    const [w, h] = this.pixels();
     if (w === 0 || h === 0) return;
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
     }
-    const size = encoder.size;
-    const [cols, rows] = layout(this.grid, size, w, h, this.options.minModulePixels ?? 4);
-    const codes: Uint8Array[] = [];
-    for (let i = 0; i < cols * rows; i++) codes.push(encoder.nextModules());
-    const modulePixels = drawCodes(canvas, codes, size, cols, rows);
-    this.onpicture?.({ count: encoder.count, codesPerRound: encoder.codesPerRound, codes: codes.length, modulePixels });
+    this.drawnFor = this.size();
+    const codes = picture.texts.map((text) => encoder.render(text));
+    this.modulePixels = drawCodes(canvas, codes, encoder.size, picture.cols, picture.rows);
+    this.report();
+  }
+
+  private modulePixels = 0;
+
+  private report(): void {
+    const encoder = this.encoder;
+    const picture = this.shown[this.at];
+    if (!encoder || !picture) return;
+    this.onpicture?.({
+      picture: picture.number,
+      pictures: this.made,
+      count: encoder.count,
+      codesPerRound: encoder.codesPerRound,
+      codes: picture.texts.length,
+      modulePixels: this.modulePixels,
+      paused: this.isPaused,
+    });
   }
 }
 

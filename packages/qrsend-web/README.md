@@ -34,7 +34,7 @@ pattern pick both up without any configuration (tested with Vite).
 <script type="module">
   import { QrPlayer } from "@qrsend/web/player";
 
-  const player = new QrPlayer(document.getElementById("codes"), { fps: 10 });
+  const player = new QrPlayer(document.getElementById("codes"), { interval: 100 });
   document.getElementById("files").onchange = (e) => player.play(e.target.files);
 </script>
 ```
@@ -50,13 +50,37 @@ pattern pick both up without any configuration (tested with Vite).
 | an array of `{ path, data?, lastModified? }` | files (and, without `data`, folders) at the paths you give |
 
 The player goes on until `stop()`. Give the canvas its size with CSS; the
-codes are drawn sharp at the device's pixel ratio. Options:
+codes are drawn sharp at the device's pixel ratio.
+
+### Controls
+
+| | |
+|---|---|
+| `pause()`, `resume()`, `toggle()` | Stay on the picture shown, and go on from it. `paused` tells which. |
+| `stepForward()` | Pause and show the next picture. |
+| `stepBack()` | Pause and show the picture before, as it was (the last `history` pictures are kept). Returns `false` at the oldest one. Going on from there replays the pictures stepped back over, then new ones follow. |
+| `interval` | Milliseconds each picture stays: `player.interval = 250`. Takes effect at once, also while playing. |
+| `grid` | Codes per picture, for the pictures made from now on. |
+| `stop()` | Clear the canvas and let go of the transfer. |
+
+`onpicture` is called with `{ picture, pictures, count, codesPerRound, codes,
+modulePixels, paused }` whenever a picture is drawn and when playing is
+paused or resumed: `picture` is the number of the picture on the canvas (1
+for the first), `pictures` how many were made, `count` how many codes.
+`play(content, { paused: true })` loads the transfer and stays on its first
+picture.
+
+The example page (`example/index.html`) puts these on buttons, a number
+field for the milliseconds, and the keyboard (space, ← and →).
+
+### Options
 
 | Option | Default | |
 |---|---|---|
-| `fps` | `10` | Pictures per second. Slower is easier for a weak camera. Can be changed while playing. |
+| `interval` | `100` | Milliseconds each picture stays (100: ten a second). Longer is easier for a weak camera; shorter sends more. A picture cannot change more often than the display does (about 16 ms at 60 Hz). |
 | `grid` | `1` | Codes per picture: a number, `[columns, rows]`, or `"fill"` (as many as fit). More codes send more, but each comes out smaller. |
 | `minModulePixels` | `4` | With `grid: "fill"`: the smallest module, in device pixels. |
+| `history` | `300` | Pictures kept for stepping back. |
 | `qrVersion` | chosen | QR version 1–40. Left out, small transfers get small codes and the rest version 25. |
 | `errorCorrection` | `"M"` | With `qrVersion`: `"L"`, `"M"`, `"Q"` or `"H"`. |
 | `compress` | `true` | zstd. Turn off for data that is compressed already (photos, videos, archives). |
@@ -138,6 +162,7 @@ import { Decoder, Encoder } from "@qrsend/web";
 const encoder = await Encoder.create(files);
 encoder.next();         // the text of the next code (QR alphanumeric mode, version `encoder.qrVersion`)
 encoder.nextModules();  // or the code drawn: encoder.size × encoder.size, 1 = dark
+encoder.render(text);   // a code's text drawn the same way (to show it again)
 encoder.codesPerRound;  // codes that hold everything once
 
 const decoder = await Decoder.create();
