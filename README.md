@@ -20,8 +20,9 @@ rebuilds the data from any large-enough subset of them.
 
 **Web app:** <https://igarinpiano.github.io/qrsend/>
 
-**Library for web pages** (not published yet): show a transfer as QR codes
-on your own page and read it with a camera on another, in a few lines —
+**Library for web pages** ([`@qrsend/web`](https://www.npmjs.com/package/@qrsend/web)
+on npm): show a transfer as QR codes on your own page and read it with a
+camera on another, in a few lines —
 [packages/qrsend-web](packages/qrsend-web/README.md).
 
 ## Install
@@ -32,8 +33,6 @@ cargo install qrsend       # from source
 ```
 
 The npm package is named `qrsend-cli`; the command it installs is `qrsend`.
-On 64-bit Windows, use the release archive or Cargo for now — those npm
-binaries are not published yet.
 
 Or download an archive from [Releases](https://github.com/igarinpiano/qrsend/releases)
 (checksums and build provenance attestations included). The Linux musl builds

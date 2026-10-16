@@ -1,6 +1,6 @@
 {
   "name": "@qrsend/web",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Send files, folders and text through a stream of QR codes: show them on one screen, read them with another device's camera.",
   "license": "Apache-2.0",
   "repository": {
