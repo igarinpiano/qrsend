@@ -12,36 +12,54 @@ keywords = ["qr", "raptorq", "fountain-code", "air-gap", "file-transfer"]
 categories = ["encoding", "command-line-utilities"]
 
 [dependencies]
-age = "0.12.1"
-age-core = "0.12"
-base64 = "0.23.1"
-bech32 = "0.11"
+age = { version = "0.12.1", optional = true }
+age-core = { version = "0.12", optional = true }
+base64 = { version = "0.23.1", optional = true }
+bech32 = { version = "0.11", optional = true }
 blake3 = "1.8.7"
 crc32fast = "1.5.2"
-ed25519-dalek = "3.0.0"
+ed25519-dalek = { version = "3.0.0", optional = true }
 fast_qr = { version = "0.14.0", default-features = false }
-getrandom = "0.2"
+getrandom = { version = "0.2", optional = true }
 # Post-quantum halves of the hybrid key exchange and signature (PROTOCOL §9.1).
 # ml-kem at the version and with the feature age uses, so that one copy is built.
-ml-dsa = { version = "0.1.1", default-features = false }
-ml-kem = { version = "0.2.3", default-features = false, features = ["deterministic"] }
-p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+ml-dsa = { version = "0.1.1", default-features = false, optional = true }
+ml-kem = { version = "0.2.3", default-features = false, features = ["deterministic"], optional = true }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"], optional = true }
 qrcode = { version = "0.14.1", default-features = false }
 rqrr = { version = "0.11.0", default-features = false }
 ruzstd = { version = "0.9", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-sha2 = "0.11.0"
-sha3 = { version = "0.10.9", default-features = false }
+sha2 = { version = "0.11.0", optional = true }
+sha3 = { version = "0.10.9", default-features = false, optional = true }
 thiserror = "2.0.21"
-x25519-dalek = { version = "3", default-features = false, features = ["static_secrets"] }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets"], optional = true }
 zstd = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
 
 [features]
-default = ["zstd-native"]
+default = ["zstd-native", "crypto"]
+# Device identities, encryption and signatures (`crypto`, `pq`). Without it,
+# transfers are sent and received unencrypted only: what the QRSend library
+# for web pages builds on.
+crypto = [
+    "link",
+    "dep:age",
+    "dep:age-core",
+    "dep:base64",
+    "dep:bech32",
+    "dep:ed25519-dalek",
+    "dep:getrandom",
+    "dep:ml-dsa",
+    "dep:ml-kem",
+    "dep:sha3",
+    "dep:x25519-dalek",
+]
+# Codes that offer another way to connect (`link`, `linkcert`).
+link = ["dep:p256", "dep:sha2"]
 # zstd via the reference C library (best ratio, multithreading).
 zstd-native = ["dep:zstd"]
 # Multithreaded zstd compression (native builds only).

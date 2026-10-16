@@ -2672,6 +2672,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrsend-js"
+version = "0.1.13"
+dependencies = [
+ "blake3",
+ "js-sys",
+ "qrsend-core",
+ "serde",
+ "serde-wasm-bindgen",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "qrsend-wasm"
 version = "0.1.13"
 dependencies = [

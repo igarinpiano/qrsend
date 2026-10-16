@@ -28,7 +28,7 @@ pub const KEM_CIPHERTEXT: usize = 1088;
 pub const KEM_SEED: usize = 64;
 pub const SIG_PUBLIC: usize = 1952;
 pub const SIG_SEED: usize = 32;
-pub const SIGNATURE: usize = 3309;
+pub const SIGNATURE: usize = crate::manifest::PQ_SIGNATURE;
 
 /// The tag of the stanza that wraps a file key for a hybrid recipient.
 pub const STANZA_TAG: &str = "qrsend-pq1";

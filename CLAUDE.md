@@ -5,6 +5,7 @@ QR コードのストリームでテキスト・ファイル・フォルダを�
 - 構想・決定事項: `docs/CONCEPT.md`
 - 耐量子暗号への移行の計画と記録: `docs/POST-QUANTUM.md`（**フェーズを進めたら表と記録を更新する**）
 - ワイヤ形式の仕様: `docs/PROTOCOL.md`（**プロトコルに触れる変更は必ずここも更新する**）
+- Web ページ向けライブラリ（npm、仮名 `@qrsend/web`）の決めたことと中身: `docs/LIBRARY.md`（利用者向けの説明は `packages/qrsend-web/README.md`。**API を変えたら両方を直す**）
 - CLI の全コマンド・全オプションの解説: `docs/CLI.md`（**コマンドやオプションを足したら必ずここにも書く**。`crates/qrsend/tests/reference.rs` が `--help` に出るものを全部この文書の該当する見出しの下で探すので、書き忘れるとテストが落ちる。消したオプションの記述が残っていても落ちないので、消すときは自分で直す）
 
 ## ユーザーについて
@@ -18,7 +19,7 @@ QR コードのストリームでテキスト・ファイル・フォルダを�
 ## 構成
 
 ```
-crates/qrsend-core/  プロトコル本体（I/O は std::io トレイトのみ。WASM と共有する）
+crates/qrsend-core/  プロトコル本体（I/O は std::io トレイトのみ。WASM と共有する）。feature `crypto`（既定。crypto・pq、`link` を含む）と `link`（link・linkcert）を外すと平文の転送だけになる（ライブラリ用）
   base45 / frame      フレーム形式（ヘッダ 22B + シンボル + CRC32、Base45 で QR 英数字モード）
   fec                 RaptorQ（raptorq crate）。1 セグメント = 1 ソースブロック、ESI は RFC 6330 準拠
   schedule / sender   参考送信スケジュール（窓インターリーブ、Meta は毎パス＋差し込み）。フィードバックがあれば受信済みを送らず、窓が受信されるまで次へ進まない（Sender::apply_feedback / forget_receiver）
@@ -46,6 +47,7 @@ crates/qrsend/       CLI（バイナリ名 qrsend）
   net                 CLI 同士の TCP 直結（send --lan）。待ち受け・接続・暗号化したレコード（ChaCha20-Poly1305）。PROTOCOL §12.2
   firewall            macOS のファイアウォールが、この実行ファイルへの外からの接続をどう扱うか（socketfilterfw に尋ねる）。`send --lan` の開始時に調べて知らせる
   twoway              Two-way の戻り道（送信側）: 受信側のフィードバックコードを、カメラ（ffmpeg）かテキスト行から読んで FrameStream に渡す。受信側がコードを出すウィンドウは display/answer.rs
+crates/qrsend-js/    Web ページ向けライブラリの WebAssembly（publish しない）。Encoder / Decoder だけ、平文のみ、すべてメモリ上
 crates/qrsend-wasm/  Web 用バインディング（wasm-bindgen）。コールバック方式: SendJob（本体を JS の write に書き出す）/ SendSession（JS の read からセグメントを読む）/ Receive（完成セグメントを JS に渡す。extract は read → sink へストリーミング）
 web/                 Svelte 5 + Vite + TS の PWA
   src/lib/engine.worker.ts  エンジン本体（Worker）。wasm とストレージを持ち、送信の梱包・フレーム生成・受信状態・展開を担当。ページとは engine.ts の RPC でやり取り
@@ -55,6 +57,7 @@ web/                 Svelte 5 + Vite + TS の PWA
   src/lib/guide.ts          受信カメラの持ち方の案内（preview「Camera guidance」）。純粋なロジックで、e2e/guide.spec.ts が Node 上で直接テストする
   src/views/                Home / Send(+Player) / Receive(+Camera, Result) / Devices / Inbox / Storage / Preview（Feature preview）
   e2e/                      Playwright。CLI が書いた Y4M を Chrome の仮想カメラに流す相互運用テスト（暗号化・多セグメント・ZIP を含む）。bridge.ts は 2 つのページを「互いのカメラ」として生でつなぐ（BroadcastChannel で画像を送り、getUserMedia を canvas.captureStream に差し替える）。相手の反応を見て変わる機能（自動調節、案内）はこれで試す
+packages/qrsend-web/ Web ページ向けライブラリ（npm。名前は公開時に決める、いまは private）。index（Encoder / Decoder、Node でも動く）・player（QrPlayer）・scanner（QrScanner、Worker で BarcodeDetector → ZXing）。example/ を Vite でビルドして e2e。docs/LIBRARY.md
 npm/                 npm 配布用: assemble.py（機種別パッケージの対応表）と launcher.js
 fuzz/                cargo-fuzz のターゲット（frame / codes / meta / payload / receiver / sound。他人から届くものを読む所すべて）と seeds/（正しい入力を書き出す種の生成器）。メインのワークスペースには入れていない（nightly が要る）
 deny.toml            cargo-deny の設定（RustSec の勧告・ライセンス・取得元）
@@ -80,6 +83,15 @@ npm run wasm        # crates/qrsend-wasm をビルドし src/wasm/ に bindings 
 npm run dev         # 開発サーバ
 npm run check && npm run build
 cargo build --release -p qrsend && npx playwright test   # e2e（CLI バイナリを使う。動画ファイル受信のテストは ffmpeg が無いと skip）
+```
+
+Web ページ向けライブラリ:
+
+```bash
+cd packages/qrsend-web && npm ci
+npm run build && npm run check   # crates/qrsend-js の wasm → wasm-bindgen → tsc（dist/）
+cargo build -p qrsend && npm test   # Node のテスト。CLI との相互運用は target/debug/qrsend（または QRSEND_BIN）を使う
+npm run test:e2e                 # example/ を Vite でビルドして Chromium で。Playwright の版と合う Chromium が無ければ QRSEND_CHROMIUM=/path/to/chrome
 ```
 
 セキュリティ（`.github/workflows/security.yml` と同じことを手元で）:
@@ -271,6 +283,7 @@ qrsend recv --images /tmp/q/f -o /tmp/q/out
   - 機種を追加した直後のリリースでは、新しい npm パッケージに Trusted Publisher が無いので npm の段がそのパッケージ名を挙げて失敗する（他は公開される）。`scripts/npm-publish-remaining.sh <version> --trust` で一度手動公開する（`--trust` は `npm trust` で Trusted Publisher も登録する。npm アカウントは 2FA が auth-and-writes なので、このスクリプトは OTP を入力できる本人の端末で実行する）。（crates.io は npm を待たないので、そのまま公開される。）
   - npm の初回公開では `*-win32-*` という名前が spam 判定（403 Forbidden - Package name triggered spam detection）で拒否されやすい（dirlens でも発生）。npm サポートに whitelist を依頼して解除してもらう。途中で止まった公開は `scripts/npm-publish-remaining.sh <version> [--skip NAME]` で再開できる（公開済みは飛ばし、失敗しても続行し、全機種がそろうまで本体 `qrsend-cli` は保留。`--main` で先に公開できる。`--try-name PKG=NAME` はパッケージ PKG の複製を NAME という名前で公開してみて、その名前が npm に通るかだけを調べる）。
   - **初回だけ手動**: publish-all を「GitHub Releases」のみで実行 → `scripts/first-publish.sh <version>`（タグの内容から crates と npm を公開。`--dry-run` あり）→ crates.io / npmjs.com で Trusted Publishing を登録（publish-all.yml、environment は crates が `crates-io`、npm が `npm`）。
-- バージョンはワークスペースの `Cargo.toml`（`[workspace.package]`）と `crates/qrsend/Cargo.toml` の qrsend-core 依存、`web/package.json` を揃えて上げる。
+- バージョンはワークスペースの `Cargo.toml`（`[workspace.package]`）と `crates/qrsend/Cargo.toml` の qrsend-core 依存、`web/package.json`、`packages/qrsend-web/package.json` を揃えて上げる。
+- **Web ページ向けライブラリ（`packages/qrsend-web`）はまだ公開していない**（2026-10-16 に作成。名前はユーザーが公開時に決める。`publish-all.yml` には入れていない）。公開するときの手順は `docs/LIBRARY.md` の末尾。
 - GitHub Pages: リポジトリは public、Pages の Source は「GitHub Actions」。`pages.yml` が main への push ごとに web/ をビルドしてデプロイする（https://igarinpiano.github.io/qrsend/）。Source を「Deploy from a branch」にすると README が表示されてしまうので注意。
 - Release には各 OS の CLI、Web アプリのオフライン用 zip（`qrsend-web-<version>.zip`）、SHA256SUMS、build provenance attestation が付く。

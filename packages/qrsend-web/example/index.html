@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QRSend library: send</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <h1>Send</h1>
+    <p>
+      <input type="file" id="files" multiple />
+      or <input type="text" id="text" placeholder="a text" />
+      <button id="send">Send</button>
+      <button id="stop">Stop</button>
+    </p>
+    <canvas id="codes" aria-label="QR codes"></canvas>
+    <p id="status"></p>
+    <p><a href="./receive.html">Receive on another device</a></p>
+    <!-- The trademark notice, where the page shows QR codes. -->
+    <footer id="trademark"></footer>
+    <script type="module" src="./send.js"></script>
+  </body>
+</html>
