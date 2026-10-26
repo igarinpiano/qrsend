@@ -13,7 +13,20 @@ all-features = true
 # with the reason, never silently.
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # crypto-bigint 0.5.5: timing variability in operations meant to be
+    # constant-time. The fix is in 0.7.6 (we use 0.7.10 directly); the 0.5
+    # series has no fixed release. 0.5 comes only through elliptic-curve 0.13
+    # (p256 / p384 0.13), which the latest age (0.12.1, for its SSH and tagged
+    # recipients, which QRSend does not use) and str0m (0.24.1, through dimpl
+    # 0.7: the CLI's DTLS handshake) still depend on. Remove once they move to
+    # elliptic-curve 0.14.
+    { id = "RUSTSEC-2026-0387", reason = "0.5.x has no fixed release; only through age 0.12.1 and str0m 0.24.1 (elliptic-curve 0.13)" },
+    # basic-toml is unmaintained (no fixed release, no vulnerability). It reads
+    # age's i18n.toml at compile time (i18n-config, under age's i18n-embed);
+    # nothing received at run time goes through it.
+    { id = "RUSTSEC-2026-0374", reason = "unmaintained only; build-time parsing of age's own i18n.toml" },
+]
 
 [licenses]
 version = 2
