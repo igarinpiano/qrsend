@@ -23,5 +23,9 @@
   },
   "dependencies": {
     "zxing-wasm": "^3.1.6"
+  },
+  "overrides": {
+    "glob": "^14.0.2",
+    "ejs": "^7.0.1"
   }
 }

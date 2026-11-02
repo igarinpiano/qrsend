@@ -70,7 +70,9 @@ jobs:
       # (No install scripts: nothing of the packages runs here.)
       - run: npm ci --ignore-scripts
       # Every advisory counts, the build tools' too: they make what is deployed.
-      - run: npm audit --audit-level=low
+      # (`npm audit`, failing on any advisory not listed with its reason in
+      # the script, as deny.toml does for the crates.)
+      - run: node "$GITHUB_WORKSPACE/scripts/npm-audit.mjs"
       - name: Registry signatures and provenance of what was installed
         run: npm audit signatures
 
