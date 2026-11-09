@@ -7,6 +7,7 @@
   import { bytes } from "../lib/format";
   import { featureOn } from "../lib/prefs";
   import Camera from "./Camera.svelte";
+  import Invite from "./Invite.svelte";
   import Player from "./Player.svelte";
 
   let { params }: { params: URLSearchParams } = $props();
@@ -374,6 +375,14 @@
   {/if}
   <a href="#/preview">Feature preview</a>
 </p>
+
+<details class="resume" data-testid="invite-details">
+  <summary class="small">The receiver has no QRSend open?</summary>
+  <p class="small muted">
+    Show it this code (and later, the <strong>Open QRSend</strong> button while sending shows it again, large).
+  </p>
+  <Invite />
+</details>
 
 <details class="resume">
   <summary class="small">Continuing a transfer that stopped halfway?</summary>

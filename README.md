@@ -78,6 +78,11 @@ Useful options: `--fps 12`, `--display terminal`, and
 - `--grid 3`, `--grid 8x4` or `--grid auto` — several codes at once (any
   rectangle up to 64×64; `auto` fills the window).
 
+No QRSend on the receiving phone? Press `L` in the window (or the terminal
+display) for an ordinary QR code that its camera app opens: the web app's
+Receive page, ready to read the stream, with nothing to install. `L` again
+goes back to the transfer. `qrsend web` prints the same code and address.
+
 Receive with a webcam, from a recording of the sender's screen, or from image files:
 
 ```bash
@@ -278,6 +283,10 @@ loaded (PWA).
 - The device's private keys are WebCrypto keys that cannot be exported — not
   even by the page itself.
 - Up to 8×8 codes at once, or as many as fit the screen.
+- For a receiver without QRSend, **Open QRSend** in the player (or `L`) shows
+  an ordinary QR code that any phone's camera app opens: this web app's
+  Receive page. The stream waits meanwhile. Also on the Send page, with the
+  address to type and a button to share the link.
 - A transfer that stopped halfway continues when the sender simply sends the
   same data again (unencrypted transfers): it is the same transfer, bit for
   bit, and the receiver keeps what it had — also of the part it was in the

@@ -22,6 +22,7 @@ mod storage;
 mod store;
 mod twoway;
 mod util;
+mod web;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -65,6 +66,9 @@ enum Cmd {
     /// Print the diagnostic log of the latest `send` or `recv` (one is kept
     /// of each of the last runs), to send along with a report of a problem
     Log(log::LogArgs),
+    /// Show a QR code that opens QRSend's web app, ready to receive, with
+    /// the camera app of any phone: for a receiver without QRSend
+    Web(web::WebArgs),
     /// Print shell completions
     Completions { shell: clap_complete::Shell },
     /// Report what each QR detector finds in images (diagnostics)
@@ -107,6 +111,7 @@ fn run() -> Result<()> {
         Cmd::Inbox(cmd) => inbox::run(cmd),
         Cmd::Storage(args) => storage::run(args),
         Cmd::Log(args) => log::command(args),
+        Cmd::Web(args) => web::run(args),
         Cmd::Cache(CacheCmd::List) => {
             let spools = spool::Spool::list();
             if spools.is_empty() {

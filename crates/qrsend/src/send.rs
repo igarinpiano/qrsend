@@ -819,6 +819,10 @@ pub fn run(args: SendArgs) -> Result<()> {
         }
         serve_until_done(&mut stream);
     } else {
+        eprintln!(
+            "The receiver has no QRSend? Press L there for a code its camera app opens \
+             (or run `qrsend web`)."
+        );
         match args.display {
             DisplayKind::Terminal => display::terminal::run(&mut stream, fps)?,
             #[cfg(feature = "window")]

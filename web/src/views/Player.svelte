@@ -11,6 +11,7 @@
   import { featureChoice, featureOn } from "../lib/prefs";
   import { Scanner, type ScanStats } from "../lib/scanner";
   import { Ear, canListen } from "../lib/sound";
+  import Invite from "./Invite.svelte";
 
   /** `grid` is codes per side, or 0 to fill the screen. */
   let { info, fps: initialFps, grid, onclose }: { info: SendStarted; fps: number; grid: number; onclose: () => void } =
@@ -23,6 +24,8 @@
   let root: HTMLDivElement;
   let fps = $state(untrack(() => initialFps));
   let paused = $state(false);
+  /** The code that opens QRSend on the other device is shown, over the stream (which waits meanwhile). */
+  let inviting = $state(false);
   let frames = $state(0);
   let pass = $state(0);
   let cols = $state(1);
@@ -313,6 +316,7 @@
       fps,
       layout: `${cols}×${rows}${layers > 1 ? `×${layers}` : ""}`,
       paused,
+      inviting,
       receiverBytes: report ? report.totalBytes - report.remainingBytes : undefined,
       of: report?.totalBytes,
       arrivingPerS: report ? Math.round(arriving) : undefined,
@@ -491,7 +495,7 @@
     };
 
     const tick = (now: number) => {
-      if (!paused && !finished && now >= next && ready) {
+      if (!paused && !inviting && !finished && now >= next && ready) {
         shown = ready;
         shownChannels = readyChannels;
         ready = undefined;
@@ -501,7 +505,7 @@
         perPass = shown.framesPerPass;
         next = Math.max(next + 1000 / fps, now);
       }
-      if (!ready && !paused && !finished) fetchNext();
+      if (!ready && !paused && !inviting && !finished) fetchNext();
       raf = requestAnimationFrame(tick);
     };
     log("tx", "player", {
@@ -544,6 +548,7 @@
     room.observe(canvas);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === " ") paused = !paused;
+      if (e.key === "l" || e.key === "L") invite(!inviting);
       if (e.key === "+" || e.key === "ArrowUp") faster();
       if (e.key === "-" || e.key === "ArrowDown") slower();
       if (e.key === "Escape") stop();
@@ -574,6 +579,10 @@
     fps = Math.max(1, Math.round((fps / 1.25) * 10) / 10);
     tune();
   }
+  function invite(on: boolean) {
+    inviting = on;
+    log("tx", on ? "showing the code that opens QRSend" : "back to the stream");
+  }
   function stop() {
     log("tx", "player closed", { finished, codes: frames });
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -595,6 +604,12 @@
 <div class="player" bind:this={root}>
   <div class="stage">
     <canvas bind:this={canvas} data-frames={frames} data-module-px={modulePx} aria-label="QR code stream"></canvas>
+    {#if inviting && !finished}
+      <div class="inviting">
+        <Invite big />
+        <button class="primary" onclick={() => invite(false)} data-testid="invite-back">Back to the transfer</button>
+      </div>
+    {/if}
     {#if finished}
       <div class="finished" role="status">
         <p class="check">✓</p>
@@ -687,6 +702,13 @@
         </span>
         <button onclick={faster} aria-label="Faster">+</button>
       </span>
+      <button
+        class:active={inviting}
+        aria-pressed={inviting}
+        onclick={() => invite(!inviting)}
+        data-testid="invite-open"
+        title="Show a code that opens QRSend on the other device with its camera app [L]">Open QRSend</button
+      >
       <button onclick={() => (paused = !paused)}>{paused ? "Resume" : "Pause"}</button>
       <button class="primary" onclick={stop}>Done</button>
     </div>
@@ -787,6 +809,18 @@
     color: #0f172a;
     text-align: center;
     padding: 16px;
+  }
+  .inviting {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding-bottom: 12px;
+    background: #fff;
+    overflow: auto;
   }
   .finished .check {
     font-size: 4rem;

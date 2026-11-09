@@ -92,12 +92,15 @@ pub fn run(stream: &mut FrameStream, mut fps: f64) -> Result<()> {
     let mut out = stdout();
 
     let mut paused = false;
+    // L shows the code that opens QRSend on a phone, in place of the
+    // stream (which waits meanwhile), and L again goes back.
+    let mut inviting = false;
     let mut next = Instant::now();
     loop {
         if stream.finished() {
             break;
         }
-        if !paused && Instant::now() >= next {
+        if !paused && !inviting && Instant::now() >= next {
             let m = stream.next_matrix()?;
             draw(&mut out, &m)?;
             queue!(
@@ -109,7 +112,7 @@ pub fn run(stream: &mut FrameStream, mut fps: f64) -> Result<()> {
             queue!(
                 out,
                 Print(format!(
-                    "{}  [space] pause  [+/-] speed  [q] quit",
+                    "{}  [space] pause  [+/-] speed  [L] open QRSend on a phone  [q] quit",
                     stream.status(fps, 1)
                 ))
             )?;
@@ -132,6 +135,25 @@ pub fn run(stream: &mut FrameStream, mut fps: f64) -> Result<()> {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break,
                 KeyCode::Char(' ') => paused = !paused,
+                KeyCode::Char('l') | KeyCode::Char('L') => {
+                    inviting = !inviting;
+                    queue!(out, terminal::Clear(terminal::ClearType::All))?;
+                    if inviting {
+                        let code = crate::web::code();
+                        draw(&mut out, &code)?;
+                        queue!(
+                            out,
+                            cursor::MoveTo(0, cells(code.width).1 as u16),
+                            Print(
+                                "Point the phone's camera app here: it opens QRSend, ready to receive.  [L] back"
+                            )
+                        )?;
+                        out.flush()?;
+                    } else {
+                        // The stream again, at once.
+                        next = Instant::now();
+                    }
+                }
                 KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Up => {
                     fps = (fps * 1.25).min(60.0)
                 }
