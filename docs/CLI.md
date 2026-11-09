@@ -16,6 +16,7 @@
 | [`qrsend cache`](#qrsend-cache) | 送り直し用に残している送信データの管理（`list` / `clean`） |
 | [`qrsend storage`](#qrsend-storage) | 残しているもの全部の容量の一覧と削除（`list` / `clean`） |
 | [`qrsend log`](#qrsend-log) | 直近の `send` / `recv` の診断ログを表示する（`show` / `list` / `clear`） |
+| [`qrsend web`](#qrsend-web) | QRSend の Web 版を開く QR コードを表示する（相手の端末に QRSend が無いとき、スマホのカメラアプリで読ませる） |
 | [`qrsend completions`](#qrsend-completions) | シェルの補完スクリプトを出力する |
 
 共通のオプションは `-h` / `--help`（ヘルプ）と、`qrsend` 自体の `-V` / `--version`（版）だけ。
@@ -101,6 +102,7 @@ qrsend send [OPTIONS] [PATH]...
 | `Space` | 一時停止／再開 |
 | `↑` または `+`（`=`） | 速くする（1.25 倍、最大 60 枚/秒） |
 | `↓` または `-` | 遅くする（最小 0.5 枚/秒） |
+| `L` | 相手の端末で QRSend を開く QR コード（[`qrsend web`](#qrsend-web) と同じもの）をストリームの代わりに出す。もう一度押すと戻る。出している間、ストリームは止まる |
 | `Esc` または `Q` | 終了（端末表示では `Ctrl-C` も） |
 
 macOS でウィンドウ表示にすると、Dock に QRSend のアイコンが出る（ウィンドウを持つプログラムは Dock に並ぶ。送信が終わると消える）。
@@ -539,6 +541,18 @@ HEAD~2   2026-10-12 02:04:28 UTC  send    4.00 KiB  1 min ago
 ### `qrsend log clear`
 
 残しているログをすべて消す。
+
+---
+
+## `qrsend web`
+
+```
+qrsend web
+```
+
+QRSend の Web 版の受信画面（`https://igarinpiano.github.io/qrsend/#/receive`）を開く、普通の QR コードを端末に描き、その下にアドレスを書く。受け取る側に QRSend が無いとき、そのスマホのカメラアプリ（iPhone のカメラ、Android のカメラや Google レンズなど）で読ませれば、ブラウザで受信画面が開いてそのままカメラで読める（何も入れなくてよい）。パソコンならアドレスを打ち込む。
+
+標準出力にはコードとアドレスだけを書き、説明は標準エラーに書く（`qrsend web | tail -1` でアドレスだけを取れる）。送信中のウィンドウや端末表示では、`L` キーで同じコードを出せる（[`qrsend send` の表示](#表示)）。オプションは無い。
 
 ---
 

@@ -34,6 +34,10 @@ pub fn run(
     let modules = stream.params.modules();
     let mut buf: Vec<u32> = Vec::new();
     let mut paused = false;
+    // L shows the code that opens QRSend on a phone, in place of the stream
+    // (which waits meanwhile), and L again goes back.
+    let mut inviting = false;
+    let invite = [crate::web::code()];
     let mut next = Instant::now();
     let mut last_title = Instant::now() - Duration::from_secs(2);
     let mut dirty = true;
@@ -54,6 +58,11 @@ pub fn run(
         if window.is_key_pressed(Key::Space, KeyRepeat::No) {
             paused = !paused;
         }
+        if window.is_key_pressed(Key::L, KeyRepeat::No) {
+            inviting = !inviting;
+            dirty = true;
+            last_title = Instant::now() - Duration::from_secs(2);
+        }
         if window.is_key_pressed(Key::Up, KeyRepeat::Yes)
             || window.is_key_pressed(Key::Equal, KeyRepeat::Yes)
         {
@@ -67,7 +76,7 @@ pub fn run(
             stream.tuned_by_hand(fps);
         }
         let (w, h) = window.get_size();
-        if !paused && Instant::now() >= next {
+        if !paused && !inviting && Instant::now() >= next {
             colors = stream.colors();
             let layers = colors.count_ones().max(1) as usize;
             if tuned {
@@ -104,13 +113,22 @@ pub fn run(
             }
         }
         if dirty || buf.len() != w * h {
-            buf = super::paint(&codes, colors, cols, rows, w, h);
+            buf = if inviting {
+                super::paint(&invite, 0, 1, 1, w, h)
+            } else {
+                super::paint(&codes, colors, cols, rows, w, h)
+            };
             window.update_with_buffer(&buf, w, h)?;
             dirty = false;
         } else {
             window.update();
         }
-        if last_title.elapsed() >= Duration::from_millis(500) {
+        if inviting && last_title.elapsed() >= Duration::from_millis(500) {
+            window.set_title(
+                "QRSend — a code that opens QRSend on a phone (its camera app) · L: back to the transfer",
+            );
+            last_title = Instant::now();
+        } else if last_title.elapsed() >= Duration::from_millis(500) {
             let state = if paused { "PAUSED · " } else { "" };
             window.set_title(&format!(
                 "QRSend — {state}{}",

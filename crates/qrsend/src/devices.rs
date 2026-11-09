@@ -62,7 +62,7 @@ pub enum DevicesCmd {
     Rename { old: String, new: String },
 }
 
-fn print_qr(text: &str) {
+pub(crate) fn print_qr(text: &str) {
     let Ok(m) = qr::render_text(text) else { return };
     let quiet = 2isize;
     let w = m.width as isize;
