@@ -13,6 +13,7 @@
 //! QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and
 //! in other countries.
 
+use std::collections::BTreeMap;
 use std::io::{self, Read};
 
 use js_sys::{Function, Object, Reflect, Uint8Array};
@@ -386,8 +387,11 @@ struct EntryInfo {
 pub struct Decoder {
     rx: Receiver,
     manifest: Option<Manifest>,
-    /// Body segments (index 1 at 0). Verified once the manifest is known.
-    segments: Vec<Option<Vec<u8>>>,
+    /// The body segments that are here (index 1 at 0). Verified once the
+    /// manifest is known. A map, not a list with a place for every segment:
+    /// how many there are is the word of the first code read, and room for
+    /// millions is not set aside on that.
+    segments: BTreeMap<usize, Vec<u8>>,
     encrypted: bool,
     other: bool,
 }
@@ -405,7 +409,7 @@ impl Decoder {
         Decoder {
             rx: Receiver::new(),
             manifest: None,
-            segments: Vec::new(),
+            segments: BTreeMap::new(),
             encrypted: false,
             other: false,
         }
@@ -426,7 +430,7 @@ impl Decoder {
         for event in self.rx.push(frame) {
             changed = true;
             match event {
-                Event::Locked(p) => self.segments = vec![None; p.seg_count as usize],
+                Event::Locked(_) => self.segments.clear(),
                 Event::ForeignSession(_) => {
                     changed = !std::mem::replace(&mut self.other, true);
                 }
@@ -442,15 +446,14 @@ impl Decoder {
             match self.open_meta(&data) {
                 Some(m) => {
                     // What came before the list of files is checked now.
-                    for (i, slot) in self.segments.iter_mut().enumerate() {
-                        let fits = |data: &Vec<u8>| {
-                            m.body.segment_blake3.get(i) == Some(&segment_hash(data))
-                        };
-                        if slot.as_ref().is_some_and(|data| !fits(data)) {
-                            *slot = None;
-                            self.rx.reset(i as u32 + 1);
+                    let rx = &mut self.rx;
+                    self.segments.retain(|&i, data| {
+                        let fits = m.body.segment_blake3.get(i) == Some(&segment_hash(data));
+                        if !fits {
+                            rx.reset(i as u32 + 1);
                         }
-                    }
+                        fits
+                    });
                     self.manifest = Some(m);
                 }
                 // Damaged: collected anew.
@@ -463,9 +466,11 @@ impl Decoder {
             Some(m) => m.body.segment_blake3.get(i) == Some(&segment_hash(&data)),
             None => true,
         };
-        match self.segments.get_mut(i) {
-            Some(slot) if fits => *slot = Some(data),
-            _ => self.rx.reset(index),
+        match fits && i < self.segment_count() {
+            true => {
+                self.segments.insert(i, data);
+            }
+            false => self.rx.reset(index),
         }
     }
 
@@ -486,7 +491,7 @@ impl Decoder {
     pub fn is_complete(&self) -> bool {
         self.manifest.is_some()
             && self.rx.is_complete()
-            && self.segments.iter().all(Option::is_some)
+            && self.segments.len() == self.segment_count()
     }
 
     /// `{ state, session, codes, usefulCodes, remainingCodes, receivedBytes,
@@ -558,13 +563,13 @@ impl Decoder {
             .filter(|_| self.is_complete())
             .ok_or_else(|| js_err("the transfer is not complete"))?;
         let mut hasher = blake3::Hasher::new();
-        io::copy(&mut Segments::new(&self.segments), &mut hasher).map_err(js_err)?;
+        io::copy(&mut self.body(), &mut hasher).map_err(js_err)?;
         if hasher.finalize().to_hex().as_str() != m.body.blake3 {
             return Err(js_err(
                 "the received data does not match the sender's checksum",
             ));
         }
-        let body = Segments::new(&self.segments);
+        let body = self.body();
         match m.kind {
             Kind::Text => {
                 let text = qrsend_core::payload::unpack_text(m, body).map_err(js_err)?;
@@ -579,32 +584,41 @@ impl Decoder {
     }
 }
 
-/// The body segments read one after another.
-struct Segments<'a> {
-    rest: std::slice::Iter<'a, Option<Vec<u8>>>,
-    current: &'a [u8],
-}
+impl Decoder {
+    /// How many body segments the transfer has (0 before its first code).
+    fn segment_count(&self) -> usize {
+        self.rx.params().map_or(0, |p| p.seg_count as usize)
+    }
 
-impl<'a> Segments<'a> {
-    fn new(segments: &'a [Option<Vec<u8>>]) -> Self {
+    fn body(&self) -> Segments<'_> {
         Segments {
-            rest: segments.iter(),
+            segments: &self.segments,
+            next: 0,
+            count: self.segment_count(),
             current: &[],
         }
     }
 }
 
+/// The body segments read one after another.
+struct Segments<'a> {
+    segments: &'a BTreeMap<usize, Vec<u8>>,
+    next: usize,
+    count: usize,
+    current: &'a [u8],
+}
+
 impl Read for Segments<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         while self.current.is_empty() {
-            match self.rest.next() {
-                None => return Ok(0),
-                Some(segment) => {
-                    self.current = segment
-                        .as_deref()
-                        .ok_or_else(|| io::Error::other("a segment is missing"))?;
-                }
+            if self.next >= self.count {
+                return Ok(0);
             }
+            self.current = self
+                .segments
+                .get(&self.next)
+                .ok_or_else(|| io::Error::other("a segment is missing"))?;
+            self.next += 1;
         }
         self.current.read(buf)
     }
@@ -728,7 +742,7 @@ mod tests {
         assert_eq!(m.kind, Kind::Files);
         assert_eq!(m.file_count(), 2);
         let mut body = Vec::new();
-        Segments::new(&d.segments).read_to_end(&mut body).unwrap();
+        d.body().read_to_end(&mut body).unwrap();
         assert_eq!(blake3::hash(&body).to_hex().as_str(), m.body.blake3);
     }
 
@@ -754,6 +768,29 @@ mod tests {
         for text in texts(&mut e, 10) {
             assert_eq!(qr::render(&text, params).unwrap().width, 97);
         }
+    }
+
+    #[test]
+    fn one_code_cannot_ask_for_memory_at_will() {
+        // The first code of a transfer says how many segments it has: up
+        // to 16 million. Nothing is set aside for them on its word.
+        let frame = Frame {
+            header: qrsend_core::frame::FrameHeader {
+                flags: 0,
+                session_id: 7,
+                seg_shift: 30,
+                seg_count: qrsend_core::frame::MAX_U24,
+                seg_index: META_INDEX,
+                seg_len: 100_000,
+                esi: 0,
+            },
+            symbol: vec![0; 100],
+        };
+        let mut d = Decoder::new();
+        assert!(d.push(&frame.to_qr_text()));
+        assert_eq!(d.segment_count(), qrsend_core::frame::MAX_U24 as usize);
+        assert!(d.segments.is_empty());
+        assert!(!d.is_complete());
     }
 
     #[test]

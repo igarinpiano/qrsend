@@ -75,8 +75,12 @@ impl<S: SegmentSource> Sender<S> {
         config: ScheduleConfig,
         only: Option<&[u32]>,
     ) -> Self {
+        // (A set: looked up once per segment, and both a transfer and a list
+        // of what is missing of it can run to millions of segments.)
+        let only: Option<std::collections::HashSet<u32>> =
+            only.map(|o| o.iter().copied().collect());
         let segments = (1..=layout.seg_count())
-            .filter(|i| only.is_none_or(|o| o.contains(i)))
+            .filter(|i| only.as_ref().is_none_or(|o| o.contains(i)))
             .map(|i| (i, layout.k(i)))
             .collect();
         let cache_size = config.window + 2;

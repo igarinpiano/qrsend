@@ -256,7 +256,12 @@ test("CLI → web: forward secrecy with the browser's one-time key", async ({ pl
     // (The test's camera plays the file it was started with: the page is
     // opened anew for the video that exists now. The key was kept, so the
     // page that showed it need not be the one that receives.)
+    // The page that showed the key lets go of the camera first, and the browser gets a moment to close it: a
+    // page opened while the camera is still held is given the same one, which goes on playing the old file (the
+    // blank picture), and nothing ever arrives. (Seen in CI, once; holding the first page open does it every time.)
     const context = page.context();
+    await page.goto("./#/");
+    await page.waitForTimeout(1_000);
     await page.close();
     const receiving = await context.newPage();
     await receiving.goto("./#/receive");

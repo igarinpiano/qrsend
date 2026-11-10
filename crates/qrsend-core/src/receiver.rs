@@ -77,6 +77,9 @@ pub struct Receiver {
 /// How many recent frames are remembered to recognize repeats.
 const RECENT_FRAMES: usize = 8192;
 
+/// How many other sessions are remembered (and reported, once each).
+const FOREIGN_SESSIONS: usize = 32;
+
 /// Segment, ESI and symbol size: what makes two frames carry the same data.
 type FrameKey = (u32, u32, usize);
 
@@ -386,7 +389,10 @@ impl Receiver {
     }
 
     fn foreign(&mut self, id: u32) -> Vec<Event> {
-        if self.foreign.contains(&id) {
+        // (Whoever shows codes chooses their ids: beyond a number of them no
+        // screen in the room accounts for, they are neither remembered nor
+        // told any more.)
+        if self.foreign.contains(&id) || self.foreign.len() >= FOREIGN_SESSIONS {
             return Vec::new();
         }
         self.foreign.push(id);

@@ -1,5 +1,5 @@
 // The devices this browser trusts (their public IDs only).
-import { parseDeviceId, ready } from "./core";
+import { parseDeviceId, ready, sameDevice } from "./core";
 import * as db from "./db";
 import type { DeviceInfo } from "./keys";
 
@@ -32,9 +32,12 @@ export async function inspect(idString: string): Promise<DeviceInfo> {
  */
 export async function trust(info: DeviceInfo, name: string): Promise<"added" | "upgraded"> {
   const list = await trustedDevices();
-  const known = list.find((d) => d.classic === info.classic);
+  await ready();
+  // The same device going by its keys, not by its fingerprint: that is short enough for someone to make keys with
+  // the fingerprint of a trusted device, which would then take that device's place under its name.
+  const known = list.find((d) => sameDevice(d.id, info.id, true));
   if (known) {
-    if (known.fingerprint === info.fingerprint) throw new Error("This device is already trusted.");
+    if (sameDevice(known.id, info.id, false)) throw new Error("This device is already trusted.");
     if (known.pq && !info.pq) {
       throw new Error(`This device is already trusted as “${known.name}”, with post-quantum keys; this is its older ID.`);
     }
@@ -54,10 +57,14 @@ export async function trust(info: DeviceInfo, name: string): Promise<"added" | "
   return "added";
 }
 
-/** Remembers the certificate a trusted device connected with. Returns its name, or undefined if it is not trusted. */
-export async function rememberLink(fingerprint: string, certificate: string): Promise<string | undefined> {
+/**
+ * Remembers the certificate a trusted device connected with. `id`: the ID it introduced itself with, which is that of
+ * a trusted device only if it holds the very same keys. Returns its name, or undefined if it is not trusted.
+ */
+export async function rememberLink(id: string, certificate: string): Promise<string | undefined> {
   const list = await trustedDevices();
-  const device = list.find((d) => d.fingerprint === fingerprint);
+  await ready();
+  const device = list.find((d) => sameDevice(d.id, id, false));
   if (!device) return undefined;
   device.link = { certificate, seen: Date.now() };
   await db.put("kv", list, "devices");

@@ -412,7 +412,13 @@ function segmentAt(s: RecvSession, index: number): Uint8Array {
 function verifyPending(s: RecvSession): void {
   let bad = 0;
   for (const index of s.unverified) {
-    if (!s.r.verifySegment(index, segmentAt(s, index))) {
+    let good = false;
+    try {
+      good = s.r.verifySegment(index, segmentAt(s, index));
+    } catch {
+      // (Stored shorter than the file list says it is: not that segment.)
+    }
+    if (!good) {
       s.r.resetSegment(index);
       s.done.delete(index);
       bad++;
@@ -454,8 +460,9 @@ async function extract(s: RecvSession): Promise<RecvResult | undefined> {
   try {
     const info = s.r.info() as RecvInfo;
     if (info.encrypted && s.me?.kind === "webcrypto" && rec.segCount > 0) {
-      // The body is its own age file; its header is at the start of segment 1.
-      const head = segmentAt(s, 1).subarray(0, 1 << 16);
+      // The body is its own age file; its header is at its start. (A megabyte of it: the header grows with the
+      // number of devices the transfer is encrypted for, by some kilobytes each, and segments may be small.)
+      const head = s.body!.read(0, Math.min(info.wire_length ?? 0, 1 << 20));
       for (const key of stanzaKeys(head) as Uint8Array[]) s.r.addSecret(key, await sharedSecret(s.me, key));
     }
     let pos = 0;
@@ -683,7 +690,8 @@ async function recvPush(
     const p = s.r.params() as { session: string; flags: number; segShift: number; segCount: number } | null;
     if (!p) return done();
     const saved = await db.get<SessionRecord>("sessions", p.session);
-    if (saved?.extracted && saved.segCount === p.segCount && saved.flags === p.flags) {
+    const same = !!saved && saved.segCount === p.segCount && saved.flags === p.flags && saved.segShift === p.segShift;
+    if (saved?.extracted && same) {
       // Received in full before (the same data sent again is the same
       // transfer): there is nothing to receive, the copy is in the inbox.
       s.record = saved;
@@ -692,7 +700,14 @@ async function recvPush(
       logLine("rx", "this transfer was received before: showing the copy from the inbox");
       return done();
     }
-    if (saved && !saved.extracted && saved.segCount === p.segCount && saved.flags === p.flags) {
+    if (saved?.extracted) {
+      // Another transfer under the number of one that was received and is kept in the inbox. Numbers are short, and
+      // whoever shows codes chooses theirs: what was received is not thrown away to make room for it.
+      s.error = `Another transfer with the same number (${p.session}) is kept in the inbox. Delete that one from the Inbox to receive this one.`;
+      logLine("rx", "a transfer with the number of one kept in the inbox: not received");
+      return done();
+    }
+    if (saved && same) {
       // Seen before: continue where it stopped.
       await resume(s, saved);
     } else {

@@ -104,6 +104,34 @@ pub fn disk_use(path: &std::path::Path) -> (u64, i64) {
         })
 }
 
+/// The longest line taken as a code read as text. (A frame's text is at most
+/// about 100,000 characters; a line that goes on and on, from a serial line
+/// or a pipe that carries something else, must not fill the memory.)
+pub const MAX_CODE_LINE: usize = 1 << 20;
+
+/// Reads the next line of codes as text into `line` (without its line
+/// break). A line longer than [`MAX_CODE_LINE`] is passed over and comes
+/// back empty: it is no code. False at the end of the input.
+pub fn read_code_line(
+    reader: &mut dyn std::io::BufRead,
+    line: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    use std::io::{BufRead, Read};
+    line.clear();
+    let mut limited = reader.take(MAX_CODE_LINE as u64 + 1);
+    if limited.read_until(b'\n', line)? == 0 {
+        return Ok(false);
+    }
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    } else if line.len() > MAX_CODE_LINE {
+        // Too long to be a code: what is left of it goes by unkept.
+        line.clear();
+        reader.skip_until(b'\n')?;
+    }
+    Ok(true)
+}
+
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -221,6 +249,21 @@ mod tests {
             printable_text("shown\rhidden\x1b[2J"),
             "shown\\u{d}hidden\\u{1b}[2J"
         );
+    }
+
+    #[test]
+    fn lines_of_codes_are_read_within_bounds() {
+        let long = "x".repeat(MAX_CODE_LINE + 10);
+        let input = format!("first\r\n{long}\nsecond\n\nlast");
+        let mut reader = std::io::BufReader::with_capacity(64, input.as_bytes());
+        let mut line = Vec::new();
+        let mut seen = Vec::new();
+        while read_code_line(&mut reader, &mut line).unwrap() {
+            seen.push(String::from_utf8_lossy(&line).trim().to_string());
+        }
+        // The overlong line is no code: it comes back empty, and what
+        // follows it is read as ever.
+        assert_eq!(seen, ["first", "", "second", "", "last"]);
     }
 
     #[test]

@@ -62,9 +62,13 @@ class Buf {
 
 const MAX32 = 0xffffffff;
 
+/** A time as ZIP holds it. Its years run from 1980 to 2107: a time outside (or none at all) becomes the nearest. */
 function dosDateTime(ms?: number): [number, number] {
-  const d = new Date(ms ?? Date.now());
-  const year = Math.max(1980, d.getFullYear());
+  let d = new Date(ms ?? Date.now());
+  if (Number.isNaN(d.getTime())) d = new Date();
+  if (d.getFullYear() < 1980) d = new Date(1980, 0, 1);
+  if (d.getFullYear() > 2107) d = new Date(2107, 11, 31, 23, 59, 58);
+  const year = d.getFullYear();
   const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
   const date = ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
   return [time, date];
@@ -81,6 +85,8 @@ export async function zipBlob(entries: ZipEntry[], onProgress?: (done: number, t
 
   for (const e of entries) {
     const name = encoder.encode(e.dir ? `${e.path}/` : e.path);
+    // (The length of a name is a 16-bit field: a longer one would spill into what follows it.)
+    if (name.length > 0xffff) throw new Error("A path in this transfer is too long for a ZIP file.");
     const size = e.dir ? 0 : e.blob!.size;
     const crc = e.dir ? 0 : await crc32(e.blob!);
     const [time, date] = dosDateTime(e.mtime);

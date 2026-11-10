@@ -55,8 +55,9 @@ pub fn listen(source: Source) -> Result<Receiver<Feedback>> {
             thread::spawn(move || {
                 let lines = |reader: &mut dyn BufRead| {
                     // (A damaged line is a code not read, no more.)
-                    for line in reader.split(b'\n').map_while(|l| l.ok()) {
-                        let line = String::from_utf8_lossy(&line);
+                    let mut raw = Vec::new();
+                    while let Ok(true) = crate::util::read_code_line(reader, &mut raw) {
+                        let line = String::from_utf8_lossy(&raw);
                         if let Ok(f) = Feedback::decode(line.trim())
                             && tx.send(f).is_err()
                         {
