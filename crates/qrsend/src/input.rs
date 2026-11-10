@@ -1,7 +1,7 @@
 //! Frame sources for the receiver: image files, Y4M video, anything ffmpeg reads.
 
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -292,12 +292,18 @@ fn header_value<'a>(fields: &'a [&'a str], tag: char) -> Option<&'a str> {
 /// The largest side of a picture read from a video (8K is 7680).
 const MAX_SIDE: usize = 16384;
 
+/// The longest header line of a video (the stream's, or a picture's).
+const MAX_HEADER: u64 = 4096;
+
 /// Minimal YUV4MPEG2 reader (8 bits per sample).
 fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<Picture>, dedupe: bool) -> Result<()> {
-    let mut line = String::new();
-    if r.read_line(&mut line)? == 0 {
+    // (Header lines are short: one that goes on and on is no header, and
+    // is not read into memory to find that out.)
+    let mut header = Vec::new();
+    if r.by_ref().take(MAX_HEADER).read_until(b'\n', &mut header)? == 0 {
         bail!("the stream ended before its first picture");
     }
+    let line = String::from_utf8_lossy(&header);
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.first() != Some(&"YUV4MPEG2") {
         bail!("not a YUV4MPEG2 stream");
@@ -330,10 +336,14 @@ fn read_y4m<R: BufRead>(mut r: R, tx: &Sender<Picture>, dedupe: bool) -> Result<
     let mut last = None;
     loop {
         let mut frame_line = Vec::new();
-        if r.read_until(b'\n', &mut frame_line)? == 0 {
+        if r.by_ref()
+            .take(MAX_HEADER)
+            .read_until(b'\n', &mut frame_line)?
+            == 0
+        {
             return Ok(());
         }
-        if !frame_line.starts_with(b"FRAME") {
+        if !frame_line.starts_with(b"FRAME") || frame_line.last() != Some(&b'\n') {
             bail!("corrupt Y4M frame header");
         }
         let mut pixels = vec![0u8; w * h];

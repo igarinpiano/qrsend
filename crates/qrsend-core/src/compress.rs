@@ -14,10 +14,17 @@ pub enum BoundedError {
     Io(#[from] io::Error),
 }
 
+/// The largest window a small object (the file list) may ask the decoder
+/// for, as a power of two: what zstd itself takes without being told
+/// otherwise, and more than any level this program compresses it at uses.
+const SMALL_WINDOW_LOG_MAX: u32 = 27;
+
 /// Decompresses at most `limit` bytes; errors if the stream holds more.
+/// For small objects from anyone: the window (memory the decoder sets
+/// aside before the first byte) is limited as well.
 pub fn decompress_bounded(data: &[u8], limit: usize) -> Result<Vec<u8>, BoundedError> {
     let mut out = Vec::new();
-    decoder(data)?
+    decoder_with_window(data, SMALL_WINDOW_LOG_MAX)?
         .take(limit as u64 + 1)
         .read_to_end(&mut out)?;
     if out.len() > limit {
@@ -67,9 +74,18 @@ mod imp {
     }
 
     pub fn decoder<'a, R: BufRead + 'a>(inner: R) -> io::Result<Box<dyn Read + 'a>> {
-        let mut dec = zstd::stream::read::Decoder::with_buffer(inner)?;
         // Allow windows up to 2 GiB (long-distance matching on huge inputs).
-        dec.window_log_max(31)?;
+        decoder_with_window(inner, 31)
+    }
+
+    /// A decoder that refuses frames asking for a window above
+    /// `2^window_log_max` bytes.
+    pub fn decoder_with_window<'a, R: BufRead + 'a>(
+        inner: R,
+        window_log_max: u32,
+    ) -> io::Result<Box<dyn Read + 'a>> {
+        let mut dec = zstd::stream::read::Decoder::with_buffer(inner)?;
+        dec.window_log_max(window_log_max)?;
         Ok(Box::new(dec))
     }
 }
@@ -172,9 +188,17 @@ mod imp {
             ruzstd::decoding::StreamingDecoder::new(inner).map_err(invalid)?,
         ))))
     }
+
+    /// (This decoder has a limit of its own, 128 MiB, whatever is asked.)
+    pub fn decoder_with_window<'a, R: BufRead + 'a>(
+        inner: R,
+        _window_log_max: u32,
+    ) -> io::Result<Box<dyn Read + 'a>> {
+        decoder(inner)
+    }
 }
 
-pub use imp::{Encoder, decoder};
+pub use imp::{Encoder, decoder, decoder_with_window};
 
 #[cfg(test)]
 mod tests {

@@ -20,6 +20,10 @@ use crate::{paths, util};
 /// How long a spool is kept, to be sent again.
 pub const MAX_AGE_SECS: i64 = 14 * 24 * 3600;
 
+/// A spool in the making that nothing was written to for this long is one
+/// whose `send` was interrupted.
+const STALE_TMP_SECS: i64 = 24 * 3600;
+
 /// The file in a spool that says it is not to be kept (`send --no-keep`),
 /// and which process will remove it when it is done sending.
 pub const NOT_KEPT: &str = "not-kept";
@@ -302,9 +306,18 @@ fn cleanup_old(root: &std::path::Path) {
             let _ = spool.remove();
         }
     }
-    // Leftovers of interrupted spool creation.
+    remove_stale_tmp(root, now);
+}
+
+/// Removes leftovers of interrupted spool creation. Not what was written to
+/// within the last day: that may be another `send` still packing (a large
+/// one takes long, and removing its directory from under it made it fail
+/// at the very end).
+fn remove_stale_tmp(root: &std::path::Path, now: i64) {
     for e in fs::read_dir(root).into_iter().flatten().flatten() {
-        if e.file_name().to_string_lossy().starts_with(".tmp-") {
+        if e.file_name().to_string_lossy().starts_with(".tmp-")
+            && now - util::disk_use(&e.path()).1 > STALE_TMP_SECS
+        {
             let _ = fs::remove_dir_all(e.path());
         }
     }
@@ -329,5 +342,30 @@ impl SegmentSource for FileSource {
         self.body.seek(SeekFrom::Start(start))?;
         self.body.read_exact(&mut buf)?;
         Ok(buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_spool_another_send_is_packing_is_left_alone() {
+        let root = std::env::temp_dir().join(format!("qrsend-spool-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (fresh, stale) = (root.join(".tmp-0000aaaa"), root.join(".tmp-0000bbbb"));
+        for dir in [&fresh, &stale] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join("body.bin"), b"being packed").unwrap();
+        }
+        // The second one was last written to two days ago.
+        let now = util::now();
+        let then = filetime::FileTime::from_unix_time(now - 2 * 24 * 3600, 0);
+        filetime::set_file_mtime(stale.join("body.bin"), then).unwrap();
+        filetime::set_file_mtime(&stale, then).unwrap();
+        remove_stale_tmp(&root, now);
+        assert!(fresh.join("body.bin").exists());
+        assert!(!stale.exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

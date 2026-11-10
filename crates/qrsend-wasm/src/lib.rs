@@ -232,6 +232,25 @@ pub fn link_certificate_fingerprint(seed: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
+/// Whether two device IDs are of one device: the same keys, whatever the
+/// names in them. `classic`: going by the keys from before post-quantum
+/// ones alone, which a device keeps when it is given the others (its older
+/// ID and its current one are then the same device).
+///
+/// The keys themselves are compared, not their fingerprints: a fingerprint
+/// is short enough for a person to compare, and so short enough for
+/// someone to make keys that share it.
+#[wasm_bindgen(js_name = sameDevice)]
+pub fn same_device(a: &str, b: &str, classic: bool) -> bool {
+    let (Ok(a), Ok(b)) = (DevicePublic::parse(a), DevicePublic::parse(b)) else {
+        return false;
+    };
+    match classic {
+        true => a.classic() == b.classic(),
+        false => a == b,
+    }
+}
+
 /// Whether `signature` is the Ed25519 signature of the device with this ID
 /// over `message`.
 #[wasm_bindgen(js_name = verifyDeviceSignature)]

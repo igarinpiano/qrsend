@@ -182,6 +182,9 @@ pub fn proof(key: &[u8; 16], certificate: &[u8]) -> String {
     )
 }
 
+/// Datagrams that have come and wait to be taken in, at most.
+const INCOMING_QUEUE: usize = 8192;
+
 /// One UDP socket per local address, read by threads of their own.
 struct Sockets {
     list: Vec<(SocketAddr, Arc<UdpSocket>)>,
@@ -191,7 +194,10 @@ struct Sockets {
 
 impl Sockets {
     fn open(addresses: &[IpAddr]) -> Result<Sockets> {
-        let (tx, incoming) = unbounded();
+        // (Bounded: anyone on the network can send to these ports, and what
+        // comes faster than it is taken in is dropped, as a network drops
+        // it, instead of being kept in memory.)
+        let (tx, incoming) = bounded(INCOMING_QUEUE);
         let mut list = Vec::new();
         for ip in addresses {
             let Ok(socket) = UdpSocket::bind((*ip, 0)) else {
@@ -207,7 +213,9 @@ impl Sockets {
                 loop {
                     match socket.recv_from(&mut buf) {
                         Ok((n, from)) => {
-                            if tx.send((local, from, buf[..n].to_vec())).is_err() {
+                            if let Err(crossbeam_channel::TrySendError::Disconnected(_)) =
+                                tx.try_send((local, from, buf[..n].to_vec()))
+                            {
                                 return;
                             }
                         }

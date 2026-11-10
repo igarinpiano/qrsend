@@ -187,6 +187,13 @@ with a QR library of your own, make it use that mode and version, or use
   (as compressed, plus the files once received). That suits what QR codes
   carry, tens of kilobytes a second; for hundreds of megabytes, use the QRSend
   app or CLI.
+- **Codes from anyone.** Whatever a camera sees is taken for a transfer, and
+  what a transfer says about itself is its sender's word. Paths are made safe
+  and every byte is checked against the sender's checksums, but how large the
+  result is, is up to the sender: a few codes can unpack to a great deal
+  (compressed data). The list of files comes first: in `onprogress` (or
+  before `decoder.result()`), look at `size` and `fileCount`, and `stop()`
+  when it is more than your page expects. A text is taken up to 256 MiB.
 - **Content-Security-Policy.** WebAssembly needs `script-src 'wasm-unsafe-eval'`,
   the scanner's worker `worker-src 'self'` (without it, the codes are found
   on the page instead), and ZXing from the CDN `connect-src https://fastly.jsdelivr.net`.

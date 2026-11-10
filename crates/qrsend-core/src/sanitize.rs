@@ -20,21 +20,28 @@ pub enum PathError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SafePath(Vec<String>);
 
-const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+const RESERVED: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
 
+/// Whether Windows takes the name for a device instead of a file: one of
+/// its device names, whatever follows the first dot, and with spaces before
+/// that dot or not ("NUL", "nul.txt", "COM1 .log"). The digits of COM and
+/// LPT ports count in their superscript forms as well (Windows folds them).
 fn is_reserved(component: &str) -> bool {
     let stem = component
         .split('.')
         .next()
         .unwrap_or("")
+        .trim_end_matches(' ')
         .to_ascii_uppercase();
     if RESERVED.contains(&stem.as_str()) {
         return true;
     }
-    let b = stem.as_bytes();
-    b.len() == 4
-        && (stem.starts_with("COM") || stem.starts_with("LPT"))
-        && (b'1'..=b'9').contains(&b[3])
+    let mut chars = stem.chars();
+    let port: String = chars.by_ref().take(3).collect();
+    let number = chars.next();
+    (port == "COM" || port == "LPT")
+        && number.is_some_and(|c| matches!(c, '1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'))
+        && chars.next().is_none()
 }
 
 fn clean_component(raw: &str) -> String {
@@ -176,6 +183,11 @@ mod tests {
         assert_eq!(ok("CON"), "_CON");
         assert_eq!(ok("dir/lpt1.txt"), "dir/_lpt1.txt");
         assert_eq!(ok("COM10"), "COM10");
+        assert_eq!(ok("COMPUTER"), "COMPUTER");
+        assert_eq!(ok("nul .txt"), "_nul .txt");
+        assert_eq!(ok("COM\u{b2}.log"), "_COM\u{b2}.log");
+        assert_eq!(ok("conin$"), "_conin$");
+        assert_eq!(ok("CONOUT$.txt"), "_CONOUT$.txt");
         assert_eq!(ok("a\\b"), "a_b");
     }
 

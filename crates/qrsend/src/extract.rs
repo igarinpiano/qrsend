@@ -81,11 +81,26 @@ impl UnpackSink for FsSink {
     }
 
     fn file(&mut self, path: &SafePath, entry: &Entry, content: &mut dyn Read) -> io::Result<()> {
-        let target = path.join_to(&self.root);
+        let mut target = path.join_to(&self.root);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut w = BufWriter::with_capacity(1 << 20, File::create(&target)?);
+        // Made anew, never written over: two names of the transfer may be
+        // one name to this file system (it may fold case or accents in ways
+        // the planning of the paths does not know), and the second would
+        // silently replace the first. It gets a number instead.
+        let create = |at: &Path| fs::OpenOptions::new().write(true).create_new(true).open(at);
+        let mut n = 0;
+        let file = loop {
+            match create(&target) {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 10_000 => {
+                    n += 1;
+                    target.set_file_name(numbered_name(path.file_name(), n));
+                }
+                opened => break opened?,
+            }
+        };
+        let mut w = BufWriter::with_capacity(1 << 20, file);
         io::copy(content, &mut w)?;
         w.flush()?;
         drop(w);
@@ -283,4 +298,33 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
         }
     }
     bail!("no clipboard tool found (install wl-copy, xclip or xsel)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_that_is_taken_is_never_written_over() {
+        // Two names of a transfer that are one name to the file system
+        // (here: the same name twice, which is what folding makes of them).
+        let root = std::env::temp_dir().join(format!("qrsend-extract-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut sink = FsSink { root: root.clone() };
+        let path = SafePath::parse("dir/name.txt").unwrap();
+        let entry = Entry {
+            path: "dir/name.txt".into(),
+            kind: EntryType::File,
+            size: Some(5),
+            blake3: None,
+            mode: None,
+            mtime: None,
+        };
+        sink.file(&path, &entry, &mut &b"first"[..]).unwrap();
+        sink.file(&path, &entry, &mut &b"other"[..]).unwrap();
+        assert_eq!(fs::read(root.join("dir/name.txt")).unwrap(), b"first");
+        assert_eq!(fs::read(root.join("dir/name (1).txt")).unwrap(), b"other");
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use crossbeam_channel::{bounded, never, select, tick, unbounded};
+use crossbeam_channel::{bounded, never, select, tick};
 use indicatif::{ProgressBar, ProgressStyle};
 use qrsend_core::crypto::{self, DeviceIdentity, OpenMetaError};
 use qrsend_core::direct::{self, Record};
@@ -315,8 +315,13 @@ impl Session {
         let mut bad = Vec::new();
         for index in self.store.take_unverified() {
             let len = self.seg_len(index).unwrap();
-            let data = self.store.read_segment(index, len)?;
-            if !self.verify(index, &data) {
+            // (Stored shorter than the file list says it is: not that
+            // segment, and received again like one that fails its checksum.)
+            let good = self
+                .store
+                .read_segment(index, len)
+                .is_ok_and(|data| self.verify(index, &data));
+            if !good {
                 self.store.forget(index);
                 bad.push(index);
             }
@@ -490,9 +495,12 @@ fn read_text(path: &std::path::Path, tx: crossbeam_channel::Sender<Vec<String>>)
     // come slowly (a serial line): a sender that waits for this side's
     // report should not wait for a batch to fill.
     let mut passed = Instant::now();
-    // A damaged line (bytes that are not text) is just a lost frame.
-    for line in BufRead::split(reader, b'\n') {
-        let line = String::from_utf8_lossy(&line?).trim().to_string();
+    // A damaged line (bytes that are not text) is just a lost frame, and so
+    // is one too long to be a code.
+    let mut reader = reader;
+    let mut raw = Vec::new();
+    while util::read_code_line(&mut *reader, &mut raw)? {
+        let line = String::from_utf8_lossy(&raw).trim().to_string();
         if !line.is_empty() {
             batch.push(line);
         }
@@ -657,7 +665,10 @@ pub fn run(args: RecvArgs) -> Result<()> {
         )
     });
     let (ftx, frx) = bounded::<Picture>(threads * 2);
-    let (ttx, trx) = unbounded::<Vec<String>>();
+    // (Bounded: codes read faster than they are taken in wait at their
+    // source, a file of text however long included, instead of piling up
+    // in memory.)
+    let (ttx, trx) = bounded::<Vec<String>>(256);
     let producer = match (input, args.text.clone()) {
         (Some(input), _) => thread::spawn(move || input.produce(ftx)),
         (None, Some(path)) => {

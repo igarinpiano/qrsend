@@ -182,6 +182,12 @@ fn receiver_ignores_foreign_sessions() {
         vec![Event::ForeignSession(2)]
     );
     assert!(rx.push(b.next_frame().unwrap()).is_empty());
+    // Whoever shows codes chooses their numbers: other sessions are told
+    // once each, and beyond a few dozen of them not at all (nor remembered).
+    let told: usize = (3..1000)
+        .map(|id| rx.push(make(id).next_frame().unwrap()).len())
+        .sum();
+    assert_eq!(told, 31);
 }
 
 /// Frames a lossy transfer takes, with or without the receiver answering.

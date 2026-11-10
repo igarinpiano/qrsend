@@ -212,3 +212,61 @@ test("a transfer that stopped halfway is deleted with all that was kept of it", 
     await browser.close();
   }
 });
+
+test("a transfer under the number of one kept in the inbox does not take its place", async ({ playwright, baseURL }) => {
+  test.skip(!hasCli, "qrsend CLI binary not built");
+  // A transfer's number is 32 bits, and whoever shows codes chooses it: codes under the number of a transfer that
+  // was received and kept, but of another shape, must not make the kept one go away.
+  const dir = test.info().outputPath("profile");
+  const open = () =>
+    playwright.chromium.launchPersistentContext(dir, {
+      channel: test.info().project.use.channel,
+      args: fakeCamera(textVideo),
+      baseURL,
+      permissions: ["camera"],
+    });
+  let context = await open();
+  try {
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto("./#/receive");
+    await expect(page.getByTestId("received-text").first()).toBeVisible({ timeout: 60_000 });
+    await expect(async () => {
+      await page.goto("./#/");
+      await page.goto("./#/inbox");
+      await expect(page.getByText("Complete")).toHaveCount(1, { timeout: 2_000 });
+    }).toPass({ timeout: 20_000 });
+    // The record now says the kept transfer had another shape than the one the camera shows.
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const req = indexedDB.open("qrsend");
+          req.onerror = () => reject(req.error);
+          req.onsuccess = () => {
+            const sessions = req.result.transaction("sessions", "readwrite").objectStore("sessions");
+            const all = sessions.getAll();
+            all.onsuccess = () => {
+              const put = sessions.put({ ...all.result[0], segShift: all.result[0].segShift + 1 });
+              put.onsuccess = () => resolve();
+              put.onerror = () => reject(put.error);
+            };
+          };
+        }),
+    );
+  } finally {
+    await context.close();
+  }
+  context = await open();
+  try {
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto("./#/receive");
+    await expect(page.getByRole("alert")).toContainText("is kept in the inbox", { timeout: 60_000 });
+    await expect(page.getByTestId("received-text")).toHaveCount(0);
+    // What was received is still there, on disk and in the inbox.
+    await page.goto("./#/inbox");
+    await expect(page.getByText("Complete")).toHaveCount(1);
+    const files = await receivedFiles(page);
+    expect(files.some((f) => f.endsWith("/out"))).toBe(true);
+  } finally {
+    await context.close();
+  }
+});

@@ -194,8 +194,15 @@ impl<W: Write> Packer<W> {
         ))
     }
 
-    /// Packs a text transfer (no entries).
+    /// Packs a text transfer (no entries). A text longer than [`MAX_TEXT`]
+    /// is refused: no receiver takes it (it goes as a file instead).
     pub fn text(inner: W, text: &str, opts: PackOptions) -> io::Result<(W, Packed)> {
+        if text.len() as u64 > MAX_TEXT {
+            return Err(io::Error::other(format!(
+                "the text is longer than {} MiB: send it as a file instead",
+                MAX_TEXT >> 20
+            )));
+        }
         let mut p = Packer::new(inner, opts)?;
         p.sink.write_all(text.as_bytes())?;
         let (w, encoding, _, _) = p.close()?;
@@ -299,6 +306,8 @@ pub enum UnpackError {
     TrailingData,
     #[error("text is not valid UTF-8")]
     NotUtf8,
+    #[error("the text is longer than this program takes as text")]
+    TextTooLarge,
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -406,8 +415,17 @@ pub fn unpack<R: Read>(
     Ok(())
 }
 
+/// The longest text taken as a text transfer, in bytes. A text is held in
+/// memory whole (to be shown, or copied), and how long it is is the
+/// sender's word: a few codes of zeros that unpack to gigabytes must not
+/// take the receiver's memory with them. Longer texts travel as files.
+pub const MAX_TEXT: u64 = 256 << 20;
+
 /// Reads a `text` payload.
 pub fn unpack_text<R: Read>(manifest: &Manifest, body: R) -> Result<String, UnpackError> {
+    if manifest.body.plain_length > MAX_TEXT {
+        return Err(UnpackError::TextTooLarge);
+    }
     let reader = decoded_reader(manifest.body.encoding, body)?;
     let mut buf = Vec::new();
     reader
@@ -529,6 +547,24 @@ mod tests {
             unpack_text(&manifest(packed), &body[..]).unwrap(),
             "こんにちは"
         );
+    }
+
+    #[test]
+    fn a_text_cannot_ask_for_memory_at_will() {
+        // A few bytes that claim to unpack to far more than any text: refused
+        // before anything is read.
+        let (body, packed) = Packer::text(Vec::new(), "x", PackOptions::default()).unwrap();
+        let mut m = manifest(packed);
+        m.body.plain_length = MAX_TEXT + 1;
+        assert!(matches!(
+            unpack_text(&m, &body[..]),
+            Err(UnpackError::TextTooLarge)
+        ));
+        m.body.plain_length = MAX_TEXT;
+        assert!(matches!(
+            unpack_text(&m, &body[..]),
+            Err(UnpackError::Truncated)
+        ));
     }
 
     #[test]

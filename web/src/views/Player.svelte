@@ -4,7 +4,7 @@
   import type { FrameBatch, ReceiverReport, SendStarted } from "../lib/engine-types";
   import { drawColorGrid, drawGrid, fitGrid } from "../lib/qrdraw";
   import { bytes, duration, RateMeter } from "../lib/format";
-  import { colorsWorthShowing, parseDeviceId, ready, verifyDeviceSignature } from "../lib/core";
+  import { colorsWorthShowing, ready, verifyDeviceSignature } from "../lib/core";
   import { rememberLink, trustedDevices } from "../lib/devices";
   import { KIND_SEEDED_OFFER, LINK_PREFIX, LanSender, canConnect, fingerprintHex, introductionMessage, type LinkState } from "../lib/lan";
   import { log, logEvery } from "../lib/log";
@@ -90,8 +90,7 @@
       await ready();
       const signature = Uint8Array.from(atob(said.signature), (c) => c.charCodeAt(0));
       if (!verifyDeviceSignature(said.id, introductionMessage(used), signature)) return;
-      const device = parseDeviceId(said.id) as { fingerprint: string };
-      remembered = (await rememberLink(device.fingerprint, used)) ?? "";
+      remembered = (await rememberLink(said.id, used)) ?? "";
       log("tx", remembered ? "receiver is a trusted device: remembered" : "receiver introduced itself but is not trusted");
     } catch (e) {
       console.warn("introduction:", e);
